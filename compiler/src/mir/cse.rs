@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::func::MirFunc;
+use super::func::{MirFunc, resolve};
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, ValueId,
 };
@@ -18,13 +18,14 @@ use super::ty::MirTy;
 /// Same-block value numbering. Returns how many instructions were removed.
 ///
 /// Besides operators, a scalar read of the heap (an element, a field, a
-/// length) or a pure call's scalar reads the earlier one, until something
-/// between may write the heap (or resize, for a length).
+/// length), a field's object word, or a pure call's scalar reads the
+/// earlier one, until something between may write the heap (or resize,
+/// for a length).
 pub fn cse(func: &mut MirFunc) -> usize {
     cse_with(func, true)
 }
 
-/// [`cse`] for a LIR body: a literal is an immediate operand there, cheaper
+/// [`cse`] that leaves literals alone: an immediate operand is cheaper
 /// than a register another use reads.
 pub fn cse_lir(func: &mut MirFunc) -> usize {
     cse_with(func, false)
@@ -57,7 +58,7 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
                 continue;
             }
             let ty = |v: ValueId| types.get(v.index()).copied().unwrap_or(MirTy::Value);
-            if let Some(key) = read_key(inst, &pure_calls, &func.invariant_loads, &ty) {
+            if let Some(key) = read_key(inst, &pure_calls, &func.invariant_loads, &ty, literals) {
                 if let Some(&prev) = reads.get(&key) {
                     subst.insert(dest, prev);
                 } else {
@@ -68,6 +69,7 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
             let writes = Writes {
                 elements: inst.writes_elements(&calls),
                 fields: inst.writes_fields(&calls),
+                field_slot: inst.field_slot_written(&calls),
                 lengths: inst.may_resize(&calls),
             };
             if writes.elements || writes.fields || writes.lengths {
@@ -98,13 +100,15 @@ enum ReadKey {
     FixedIndex { array: ValueId, index: ValueId },
     FixedLen { array: ValueId },
     Len { array: ValueId },
-    Call { target: crate::il::Label, args: Vec<ValueId> },
+    Call { target: crate::bodies::Label, args: Vec<ValueId> },
 }
 
 /// What one instruction may change, for [`ReadKey::killed_by`].
 struct Writes {
     elements: bool,
     fields: bool,
+    /// With `fields`: the one slot written, when a field store is all it is.
+    field_slot: Option<u32>,
     lengths: bool,
 }
 
@@ -114,7 +118,7 @@ impl ReadKey {
     fn killed_by(&self, w: &Writes, ty: &impl Fn(ValueId) -> MirTy) -> bool {
         match self {
             Self::Index { .. } => w.elements,
-            Self::Field { .. } => w.fields,
+            Self::Field { index, .. } => w.fields && w.field_slot.is_none_or(|s| s == *index),
             Self::FixedField { .. } | Self::FixedIndex { .. } | Self::FixedLen { .. } => false,
             Self::Len { .. } => w.lengths,
             Self::Call { args, .. } => (w.elements || w.fields || w.lengths) && args.iter().any(|&a| reads_heap(ty(a))),
@@ -132,8 +136,13 @@ fn read_key(
     pure_calls: &HashSet<ValueId>,
     invariant_loads: &HashSet<ValueId>,
     ty: &impl Fn(ValueId) -> MirTy,
+    dense: bool,
 ) -> Option<ReadKey> {
-    if !ty(inst.dest()).is_numeric() {
+    // A field's object word too, in a dense body: the second read of
+    // `self.vals` borrows from the object as the first one does, and a
+    // write that may change the field ends both.
+    let field_word = dense && matches!(inst, MirInst::ProductLoad { .. }) && ty(inst.dest()).is_heap_word();
+    if !ty(inst.dest()).is_numeric() && !field_word {
         return None;
     }
     Some(match inst {
@@ -142,18 +151,18 @@ fn read_key(
         }
         MirInst::ArrayLen { dest, array } if invariant_loads.contains(dest) => ReadKey::FixedLen { array: *array },
         MirInst::Index { array, index, .. } => ReadKey::Index { array: *array, index: *index },
-        MirInst::HeapFieldLoad { dest, object, index } if invariant_loads.contains(dest) => {
-            ReadKey::FixedField { object: *object, index: *index }
+        MirInst::ProductLoad { dest, object, slot } if invariant_loads.contains(dest) => {
+            ReadKey::FixedField { object: *object, index: *slot }
         }
-        MirInst::HeapFieldLoad { object, index, .. } => ReadKey::Field { object: *object, index: *index },
+        MirInst::ProductLoad { object, slot, .. } => ReadKey::Field { object: *object, index: *slot },
         MirInst::ArrayLen { array, .. } => ReadKey::Len { array: *array },
-        MirInst::Call { dest, target, args, dest_hi: None } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
+        MirInst::Call { dest, target, args, dest_hi: None, .. } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
         _ => return None,
     })
 }
 
 /// Dominator GVN plus fully-anticipated fork PRE (COI-284).
-/// Cheap `Const` stays same-block so MIR→LIR can keep immediates on the stack.
+/// Cheap `Const` stays same-block so codegen can keep immediates as operands.
 pub fn gvn(func: &mut MirFunc) -> usize {
     let mut removed = 0;
     for _ in 0..4 {
@@ -166,15 +175,6 @@ pub fn gvn(func: &mut MirFunc) -> usize {
     removed
 }
 
-fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
-    while let Some(&n) = subst.get(&v) {
-        if n == v {
-            break;
-        }
-        v = n;
-    }
-    v
-}
 
 fn gvn_dom(func: &mut MirFunc) -> usize {
     let n = func.blocks.len();
@@ -409,16 +409,7 @@ fn inst_from_key(key: ExprKey, dest: ValueId) -> MirInst {
 }
 
 fn apply_subst(func: &mut MirFunc, subst: &HashMap<ValueId, ValueId>) -> usize {
-    let map = |v: ValueId| resolve(subst, v);
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
-    }
-    func.rewrite_debug_slots(map);
+    func.replace_uses(subst);
     let removed: HashSet<ValueId> = subst.keys().copied().collect();
     for block in &mut func.blocks {
         block.insts.retain(|i| !removed.contains(&i.dest()));
@@ -456,33 +447,9 @@ fn rpo(func: &MirFunc) -> Vec<BlockId> {
 
 pub(super) fn dce(func: &mut MirFunc) {
     let mut live: HashSet<ValueId> = HashSet::new();
-    for block in &func.blocks {
-        if let Some(term) = &block.term {
-            match term {
-                super::inst::Terminator::Br { cond, .. } => {
-                    live.insert(*cond);
-                }
-                super::inst::Terminator::JumpIfMatch {
-                    scrutinee,
-                    payloads,
-                    ..
-                } => {
-                    live.insert(*scrutinee);
-                    for p in payloads {
-                        live.insert(*p);
-                    }
-                }
-                super::inst::Terminator::Return { lo, hi } => {
-                    if let Some(v) = lo {
-                        live.insert(*v);
-                    }
-                    if let Some(v) = hi {
-                        live.insert(*v);
-                    }
-                }
-                _ => {}
-            }
-        }
+    for term in func.blocks.iter().filter_map(|b| b.term.as_ref()) {
+        // A match's payloads keep the `MatchPayload`s that name them.
+        live.extend(term.uses().chain(term.binds().iter().copied()));
     }
     // An op that can panic stays for its trap even when its value is dead.
     let traps: HashSet<ValueId> = func
@@ -497,7 +464,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         changed = false;
         for block in &func.blocks {
             for inst in block.insts.iter().rev() {
-                if live.contains(&inst.dest()) || inst.is_effect_barrier() || traps.contains(&inst.dest()) {
+                if inst.dests().any(|d| live.contains(&d)) || inst.is_effect_barrier() || traps.contains(&inst.dest()) {
                     for o in inst.operands() {
                         if live.insert(o) {
                             changed = true;
@@ -529,7 +496,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         block.insts.retain(|i| {
             i.is_effect_barrier()
                 || traps.contains(&i.dest())
-                || live.contains(&i.dest())
+                || i.dests().any(|d| live.contains(&d))
                 || matches!(i, MirInst::MatchPayload { scrutinee, .. } if unpacked.contains(&(b, *scrutinee)))
         });
     }
@@ -589,13 +556,18 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         MirInst::Phi { .. }
         | MirInst::HostInvoke { .. }
         | MirInst::Ffi { .. }
+        | MirInst::ExternCall { .. }
         | MirInst::Call { .. }
         | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }
-        | MirInst::HeapFieldLoad { .. }
+        | MirInst::ProductLoad { .. }
         | MirInst::HeapFieldStore { .. }
         | MirInst::Index { .. }
         | MirInst::StoreIndex { .. }
+        | MirInst::LaneIndex { .. }
+        | MirInst::LaneStore { .. }
+        | MirInst::LanePush { .. }
+        | MirInst::LanesToWords { .. }
         | MirInst::ArrayLen { .. }
         | MirInst::ResumeCoro { .. }
         | MirInst::Yield { .. }
@@ -606,11 +578,10 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::HomeStore { .. }
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. }
-        | MirInst::PanicStore { .. }
+        | MirInst::Probe { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }
-        | MirInst::Deopt { .. }
         | MirInst::String { .. }
         | MirInst::CodePtr { .. }
         | MirInst::Print { .. }
@@ -619,6 +590,13 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::Cow { .. }
+        | MirInst::CowIndex { .. }
+        | MirInst::CowPin { .. }
+        | MirInst::CowUnpin { .. }
+        | MirInst::RcInc { .. }
+        | MirInst::RcDec { .. }
+        | MirInst::RcReuse { .. }
+        | MirInst::AllocAt { .. }
         | MirInst::StrEq { .. }
         | MirInst::ByteScan { .. }
         | MirInst::VecLoop { .. } => {
@@ -643,6 +621,48 @@ mod tests {
     use super::*;
     use crate::mir::builder::MirBuilder;
     use crate::mir::{MirBinOp, MirConst, MirTy};
+
+    /// A coverage probe counts a run: nothing reads its token, and it stays.
+    #[test]
+    fn dce_keeps_a_coverage_probe() {
+        let mut b = MirBuilder::new("probe");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let mut f = b.finish().unwrap();
+        let token = ValueId(f.types.len() as u32);
+        f.types.push(MirTy::Bool);
+        let entry = f.entry.index();
+        f.blocks[entry].insts.push(MirInst::Probe { dest: token, id: 0 });
+        dce(&mut f);
+        assert!(f.blocks[entry].insts.iter().any(|i| matches!(i, MirInst::Probe { .. })), "{f}");
+        assert!(MirInst::Probe { dest: token, id: 0 }.is_effect_barrier());
+    }
+
+    /// A pure two-word native whose first word is unused: its second word
+    /// still keeps it.
+    #[test]
+    fn dce_keeps_a_pair_read_through_its_second_word() {
+        let mut b = MirBuilder::new("pair");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let mut f = b.finish().unwrap();
+        let (lo, hi) = (ValueId(f.types.len() as u32), ValueId(f.types.len() as u32 + 1));
+        f.types.extend([MirTy::I64, MirTy::I64]);
+        assert!(super::super::effects::host_is_pure(common::MATH_SIN_ID));
+        let entry = f.entry.index();
+        f.blocks[entry].insts.push(MirInst::HostInvoke {
+            dest: lo,
+            dest_hi: Some(hi),
+            native_id: common::MATH_SIN_ID,
+            layout: common::HOST_ENUM_LAYOUT_PAIR as u8,
+            args: vec![x],
+        });
+        f.blocks[entry].term = Some(super::super::inst::Terminator::Return { lo: Some(hi), hi: None, more: Vec::new() });
+        dce(&mut f);
+        assert!(f.blocks[entry].insts.iter().any(|i| i.dests().any(|d| d == hi)), "{f}");
+    }
 
     fn count_bin(func: &MirFunc, op: MirBinOp) -> usize {
         func.blocks
@@ -859,20 +879,20 @@ mod tests {
 
     #[test]
     fn element_store_does_not_kill_field_reads() {
-        let mut f = parse("    v2 = heaploadfield v0, 0\n    v5 = storeindex v0, v1, v1\n    v3 = heaploadfield v0, 0\n    v4 = iadd v2, v3\n    return v4");
+        let mut f = parse("    v2 = productload v0, 0\n    v5 = storeindex v0, v1, v1\n    v3 = productload v0, 0\n    v4 = iadd v2, v3\n    return v4");
         assert_eq!(cse(&mut f), 1);
         f.verify().unwrap();
-        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 1);
     }
 
     #[test]
     fn field_store_kills_field_reads_not_element_reads() {
         let mut f = parse(
-            "    v2 = heaploadfield v0, 0\n    v6 = index v0, v1\n    v5 = heapsetfield.slot v0, v1, 0\n    v3 = heaploadfield v0, 0\n    v7 = index v0, v1\n    v4 = iadd v2, v3\n    v8 = iadd v4, v6\n    v9 = iadd v8, v7\n    return v9",
+            "    v2 = productload v0, 0\n    v6 = index v0, v1\n    v5 = heapsetfield.slot v0, v1, 0\n    v3 = productload v0, 0\n    v7 = index v0, v1\n    v4 = iadd v2, v3\n    v8 = iadd v4, v6\n    v9 = iadd v8, v7\n    return v9",
         );
         assert_eq!(cse(&mut f), 1);
         f.verify().unwrap();
-        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 2);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 2);
         assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 1);
     }
 
@@ -880,11 +900,11 @@ mod tests {
     fn readonly_class_field_read_survives_field_stores() {
         // #1560: the second read of a readonly class instance's field is
         // the first, across a field store.
-        let mut f = parse("    v2 = heaploadfield v0, 0\n    v5 = heapsetfield.slot v0, v1, 1\n    v3 = heaploadfield v0, 0\n    v4 = iadd v2, v3\n    return v4");
+        let mut f = parse("    v2 = productload v0, 0\n    v5 = heapsetfield.slot v0, v1, 1\n    v3 = productload v0, 0\n    v4 = iadd v2, v3\n    return v4");
         f.invariant_loads.extend([ValueId(2), ValueId(3)]);
         assert_eq!(cse(&mut f), 1);
         f.verify().unwrap();
-        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 1);
     }
 
     #[test]

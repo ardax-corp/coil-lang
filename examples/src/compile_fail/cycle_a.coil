@@ -1,0 +1,11 @@
+// Imports `cycle_b`, which imports this module back: the cycle
+// tests/modules/compile_fail/import_cycle.coil is refused for (#2536).
+use compile_fail::cycle_b::twice;
+
+class Box1 {
+    pub n: int,
+}
+
+fn box_twice(Box1 b) -> int {
+    return twice(b);
+}

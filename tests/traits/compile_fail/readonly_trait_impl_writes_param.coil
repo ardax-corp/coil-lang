@@ -1,0 +1,19 @@
+// @expected E0107 — an impl may not write a parameter other than `self` that its trait declares `readonly` (#2845).
+class Pt {
+    pub a: int,
+}
+
+trait Tk<S> {
+    fn take(S s, readonly Pt p) -> int {}
+}
+
+impl Tk for int {
+    fn take(int s, Pt p) -> int {
+        p.a = p.a + 1;
+        return s + p.a;
+    }
+}
+
+fn main() {
+    let _ = 1.take(new Pt(8));
+}

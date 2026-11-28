@@ -1,0 +1,39 @@
+// An entry module's enum may name a class imported from another module in
+// its payload, as a class field does: the payload is that module's class
+// (#2780). Generic classes too (`Pair<int>`, the stdlib's `HashMap`).
+use tests::assert;
+use local_payload::{Box, Pair};
+use collections::map::HashMap;
+
+class H {
+    pub b: Box,
+}
+
+enum E {
+    B(Box),
+    P(Pair<int>),
+    M { m: HashMap<string, int>, n: int },
+    Z,
+}
+
+fn value(E e) -> int {
+    return match e {
+        E::B(b) => b.v,
+        E::P(p) => p.a * 10 + p.b,
+        E::M { m, n } => m.len() * 100 + n,
+        E::Z => 0,
+    };
+}
+
+test("a class field and an enum payload of an imported class") {
+    let h = new H(new Box(2));
+    assert!(h.b.v == 2 && value(E::B(new Box(3))) == 3);
+}
+
+test("an imported generic class and a stdlib map") {
+    let m: HashMap<string, int> = HashMap::new();
+    m.insert("a", 1);
+    m.insert("b", 2);
+    assert!(value(E::P(new Pair(4, 5))) == 45);
+    assert!(value(E::M { m: m, n: 7 }) == 207 && value(E::Z) == 0);
+}

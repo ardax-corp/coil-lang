@@ -1,5 +1,5 @@
 // A trait method with its own type parameters (`fn third<W>(S s, W w)`)
-// lowers in every call shape: function-style from an instance method and
+// lowers in every call shape: trait-qualified from an instance method and
 // from a test body, and a shared method body passing its own `W` on to a
 // generic free fn, declared before or after the impl (#1467).
 use tests::assert;
@@ -23,7 +23,7 @@ impl Pass for int {
         return w;
     }
     pub fn via<W>(int s, W w) -> W {
-        return third(s, w);
+        return Pass::third(s, w);
     }
     pub fn wrap<W>(int s, W w) -> W {
         return ident_after(ident_before(w));
@@ -38,7 +38,7 @@ impl Pass for string {
         return s.third(w);
     }
     pub fn wrap<W>(string s, W w) -> W {
-        return third(s, w);
+        return Pass::third(s, w);
     }
 }
 
@@ -56,7 +56,7 @@ impl Cell {
     }
 }
 
-test("an instance method calls a sibling trait method function-style") {
+test("an instance method calls a sibling trait method trait-qualified") {
     assert!(3.via(5) == 5);
     assert!(3.via("five") == "five");
     assert!("s".wrap(2.5) == 2.5);
@@ -73,10 +73,10 @@ test("an instance method passes its own type parameter to a generic fn") {
     assert!(new Cell(1).keep(6) == 6);
 }
 
-test("a test body calls the trait method function-style") {
-    assert!(third(3, 4) == 4);
-    assert!(third(3, "x") == "x");
-    assert!(third("a", 1.5) == 1.5);
-    assert!(third("a", new Pt(2)).x == 2);
+test("a test body calls the trait method trait-qualified") {
+    assert!(Pass::third(3, 4) == 4);
+    assert!(Pass::third(3, "x") == "x");
+    assert!(Pass::third("a", 1.5) == 1.5);
+    assert!(Pass::third("a", new Pt(2)).x == 2);
     assert!(3.third(4) == 4);
 }

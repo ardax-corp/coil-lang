@@ -1,0 +1,16 @@
+// @expected E0102 — a bare `Counter::fresh` is the static method's value,
+// a function of no arguments, where its result was expected; the
+// diagnostic's help says to add `()` (#2746).
+class Counter {
+    pub n: int,
+}
+
+impl Counter {
+    pub static fn fresh() -> Counter {
+        return new Counter(0);
+    }
+}
+
+fn main() {
+    let c: Counter = Counter::fresh;
+}

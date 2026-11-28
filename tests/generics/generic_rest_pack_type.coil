@@ -1,0 +1,54 @@
+// A generic rest pack's element type is the callee's `T` as the call bound
+// it (#2537): an empty pack takes it from the fixed arguments and the
+// expected type, and literal items (`Ok(1)`, `None`) take their open
+// payload from the other items. The `clone-budget-0` cell runs the same
+// calls on the shared bodies.
+use tests::assert;
+
+fn count<T>(T... xs) -> int {
+    return xs.len();
+}
+
+fn sum<T: Num>(T zero, T... xs) -> T {
+    let s = zero;
+    for x in xs {
+        s = s + x;
+    }
+    return s;
+}
+
+fn pack<T>(T... xs) -> Vec<T> {
+    return xs;
+}
+
+fn outer<T: Num>(T z) -> T {
+    return sum(z);
+}
+
+class Cell {
+    pub v: int,
+}
+
+test("an empty pack") {
+    assert!(sum(0) == 0);
+    assert!(sum(1.5) == 1.5);
+    assert!(sum(2, 3) == 5);
+    assert!(outer(7) == 7);
+    assert!(outer(2.5) == 2.5);
+    let e: Vec<string> = pack();
+    assert!(e.len() == 0);
+}
+
+test("literal items with an open payload") {
+    let r: Result<int, string> = Err("e");
+    assert!(count(r, Ok(1)) == 2);
+    assert!(count(Ok(1), r) == 2);
+    assert!(count(Some(1), None) == 2);
+    assert!(count(None, Some("s"), None) == 3);
+    let v = pack(None, Some(2));
+    assert!(v.len() == 2 && v[0] == None && v[1] == Some(2));
+    let w = pack(Ok(1), r, Ok(3));
+    assert!(w[0] == Ok(1) && w[1] == Err("e") && w[2] == Ok(3));
+    let c = pack(None, Some(new Cell(4)));
+    assert!((c[1] ?? new Cell(0)).v == 4 && c[0] == None);
+}

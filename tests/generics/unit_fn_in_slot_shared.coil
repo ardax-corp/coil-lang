@@ -1,0 +1,157 @@
+// The cases of unit_fn_in_slot.coil with no mono clones: every generic
+// function here runs its shared body, where a `()` a function value in a
+// field or a payload, or a dictionary method, returns is the empty tuple
+// object (#2541).
+// @flags --clone-budget 0
+use tests::assert;
+
+// Shared: the closures that count are stored, so a `use (n)` of a
+// copy-on-write object would be E0149 (#2787).
+shared class Count {
+    pub n: int,
+}
+
+impl Count {
+    pub fn bump() -> () {
+        self.n = self.n + 1;
+    }
+}
+
+class Lazy<T> {
+    pub f: fn() -> T,
+}
+
+impl Lazy<T> {
+    pub fn get() -> Option<T> {
+        let f = self.f;
+        return Some(f());
+    }
+
+    pub fn both() -> (T, T) {
+        let f = self.f;
+        return (f(), f());
+    }
+}
+
+class Apply<A, T> {
+    pub f: fn(A) -> T,
+    pub a: A,
+}
+
+impl Apply<A, T> {
+    pub fn get() -> Option<T> {
+        let f = self.f;
+        return Some(f(self.a));
+    }
+}
+
+enum Thunk<T> {
+    Run(fn() -> T),
+    Done(T),
+}
+
+impl Thunk<T> {
+    pub fn force() -> Option<T> {
+        return match self {
+            Thunk::Run(f) => Some(f()),
+            Thunk::Done(v) => Some(v),
+        };
+    }
+}
+
+fn from_thunk<T>(Thunk<T> t) -> Option<T> {
+    return match t {
+        Thunk::Run(f) => Some(f()),
+        Thunk::Done(v) => Some(v),
+    };
+}
+
+fn lazy_of<T>(fn() -> T f) -> Lazy<T> {
+    return new Lazy(f);
+}
+
+trait Make<T> {
+    static fn make() -> T {}
+
+    static fn two() -> Vec<T> {
+        return [T::make(), T::make()];
+    }
+}
+
+impl Make for () {
+    pub static fn make() -> () {}
+}
+
+trait Dup<T> {
+    fn dup(T x) -> T {}
+}
+
+impl Dup for () {
+    pub fn dup(() x) -> () {}
+}
+
+fn made<T: Make>(T x) -> Option<T> {
+    return Some(T::make());
+}
+
+fn made_two<T: Make>(T x) -> Vec<T> {
+    return T::two();
+}
+
+fn duped<T: Dup>(T x) -> Option<T> {
+    return Some(x.dup());
+}
+
+fn unit() -> () {}
+
+fn ignore(int x) -> () {}
+
+fn seven() -> int {
+    return 7;
+}
+
+test("a function in a generic class's field") {
+    assert!(new Lazy(unit).get() == Some(()));
+    assert!(new Lazy(unit).both() == ((), ()));
+    assert!(new Lazy(fn () {}).get() == Some(()));
+    let c = new Count(0);
+    let l = new Lazy(fn () use (c) => c.bump());
+    assert!(l.get() == Some(()));
+    assert!(c.n == 1);
+    assert!(new Apply(ignore, 3).get() == Some(()));
+    assert!(lazy_of(unit).get() == Some(()));
+    assert!(new Lazy(seven).get() == Some(7));
+}
+
+test("a function stored into a generic class's field") {
+    let l = new Lazy(unit);
+    l.f = fn () {};
+    assert!(l.get() == Some(()));
+    let m = new Lazy(unit);
+    m.f = l.f;
+    assert!(m.get() == Some(()));
+    // Ground code reads the field as a `-> ()` function.
+    let f = m.f;
+    f();
+    assert!(f() == ());
+}
+
+test("a function in a generic enum's payload") {
+    assert!(from_thunk(Thunk::Run(unit)) == Some(()));
+    assert!(Thunk::Run(unit).force() == Some(()));
+    assert!(Thunk::Run(fn () {}).force() == Some(()));
+    assert!(Thunk::Done(()).force() == Some(()));
+    let t = Thunk::Run(unit);
+    let ran = match t {
+        Thunk::Run(f) => f(),
+        Thunk::Done(v) => v,
+    };
+    assert!(ran == ());
+}
+
+test("a trait method whose result is the trait's parameter") {
+    assert!(made(()) == Some(()));
+    let units: Vec<()> = [(), ()];
+    assert!(made_two(()) == units);
+    assert!(duped(()) == Some(()));
+}

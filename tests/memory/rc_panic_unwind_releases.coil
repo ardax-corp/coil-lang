@@ -1,0 +1,59 @@
+// A frame a panic unwinds releases the counted objects it owned: each owned
+// root lives in a frame home while a call that may unwind runs, and the
+// cleanup pad drops what the homes still hold (refcount step 4). This
+// checks the panic still reaches the scope and the program goes on.
+use tests::assert;
+use gc::collect;
+use task::{scope, Scope, TaskError};
+
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+
+fn build(int n) -> Node {
+    let head = new Node(0, None);
+    let i = 1;
+    while i < n {
+        head = new Node(i, Some(head));
+        i += 1;
+    }
+    return head;
+}
+
+#[inline(never)]
+fn explode(Node n) -> int {
+    if n.v > 1 {
+        panic "boom";
+    }
+    return n.v;
+}
+
+#[inline(never)]
+fn work(int n) -> int {
+    let list = build(n);
+    let k = explode(list);
+    return k + list.v;
+}
+
+test("a panic through a frame that owns a list reaches the scope") {
+    let r = scope(fn (Scope s) {
+        s.spawn(fn () => work(50));
+        0
+    });
+    let failed = match r {
+        Result::Err(TaskError::Panicked(m)) => m == "boom",
+        default => false,
+    };
+    collect();
+    assert!(failed);
+}
+
+test("a frame that does not panic keeps its list") {
+    let r = scope(fn (Scope s) {
+        s.spawn(fn () => work(1));
+        0
+    });
+    collect();
+    assert!(r.is_ok());
+}

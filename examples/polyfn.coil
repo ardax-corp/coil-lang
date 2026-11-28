@@ -21,7 +21,7 @@ fn id<T>(T x) -> T {
 }
 
 fn show<T: Describable>(T x) -> int {
-    return describe_val(x);
+    return x.describe_val();
 }
 
 fn apply_id(forall T. T -> T f, int x) -> int {

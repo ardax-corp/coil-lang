@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 
 use reporting::{ErrorCode, Message};
 
-use crate::hir::lower::children;
 use crate::hir::{Callee, HirBody, HirId, HirKind, LocalId, LocalKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{STREAM, Ty, strip_readonly};
@@ -78,7 +77,7 @@ fn use_of(checker: &Checker, body: &HirBody, parent: Option<HirId>, node: HirId)
             None => Use::HandOff,
         },
         HirKind::Call { callee: Callee::Method { name }, args }
-            if args.first() == Some(&node) && matches!(name.as_str(), "fd" | "attach" | "park") =>
+            if args.first() == Some(&node) && name == "fd" =>
         {
             Use::Keep
         }
@@ -106,7 +105,7 @@ pub(crate) fn check(checker: &Checker, module: &crate::hir::HirModule, body: &Hi
             }
             _ => {}
         }
-        for k in children(body, id) {
+        for k in body.children(id) {
             parent.insert(k, id);
             stack.push(k);
         }

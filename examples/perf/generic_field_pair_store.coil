@@ -1,0 +1,35 @@
+// An `Option<int>` field of a generic class rewritten in a hot loop: the
+// field's type names no class parameter, so it sits flat in two slots in
+// every instance and a store boxes nothing.
+use io::sync::print;
+use string::format;
+
+class G<T> {
+    pub v: T,
+    pub o: Option<int>,
+}
+
+impl G<T> {
+    pub fn step(int i) {
+        self.o = match self.o {
+            Some(k) => if i % 7 == 0 {
+                None
+            } else {
+                Some(k + i)
+            },
+            None => Some(i),
+        };
+    }
+}
+
+fn main() {
+    let g = new G("x", None);
+    for i in 0..20000000 {
+        g.step(i);
+    }
+    let r = match g.o {
+        Some(k) => k,
+        None => -1,
+    };
+    let _ = print(format("%i", r));
+}

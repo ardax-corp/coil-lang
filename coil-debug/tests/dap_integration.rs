@@ -474,13 +474,13 @@ fn dap_stop_on_entry_has_stack_and_step_case() {
     client.disconnect();
 }
 
-fn dap_launch_allow_attach_grant_case() {
+fn dap_launch_allow_exit_grant_case() {
     let dir = case_dir("coil_dap_grant");
     let _ = std::fs::create_dir_all(&dir);
     let gated = dir.join("gated.coil");
     std::fs::write(
         &gated,
-        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+        "use env::exit;\nfn main() { exit(0); }\n",
     )
     .expect("write gated");
 
@@ -505,7 +505,7 @@ fn dap_launch_allow_attach_grant_case() {
     );
     denied.disconnect();
 
-    let mut granted = DapClient::spawn_with(&dir, &["--allow-attach"]);
+    let mut granted = DapClient::spawn_with(&dir, &["--allow-exit"]);
     let init = granted.request(
         "initialize",
         serde_json::json!({ "clientID": "test", "adapterID": "coil" }),
@@ -539,14 +539,14 @@ fn dap_launch_allow_attach_grant_case() {
         serde_json::json!({
             "program": gated.to_string_lossy(),
             "cwd": dir.to_string_lossy(),
-            "allowAttach": true,
+            "allowExit": true,
             "stopOnEntry": true,
         }),
     );
     assert_eq!(
         ok.get("success"),
         Some(&serde_json::json!(true)),
-        "launch allowAttach={ok}"
+        "launch allowExit={ok}"
     );
     via_launch.disconnect();
     let _ = std::fs::remove_dir_all(&dir);
@@ -676,9 +676,9 @@ fn dap_let_locals_at_line_breakpoint_case() {
     assert!(local(&locals, "label").is_some_and(|v| v.contains('x')), "locals={locals:?}");
 }
 
-/// A body emitted from MIR may reuse a dead local's frame word: the
-/// debugger shows that local as optimized out, never the value now there.
-fn dap_dead_local_is_optimized_out_case() {
+/// A local no longer used keeps its value: raw MIR gives each value its own
+/// register, and the debugger reads it there.
+fn dap_dead_local_keeps_its_value_case() {
     let locals = locals_at_line(
         "coil-dap-dead-local",
         "fn work(int n) -> int {\n    let doubled = n * 2;\n    let label = \"x\";\n    let total = doubled + 1;\n    if label != \"x\" {\n        panic \"label\";\n    }\n    return total;\n}\n\nfn main() {\n    let _ = work(20);\n}\n",
@@ -686,11 +686,11 @@ fn dap_dead_local_is_optimized_out_case() {
     );
     assert_eq!(local(&locals, "n"), Some("20"), "locals={locals:?}");
     assert_eq!(local(&locals, "total"), Some("41"), "locals={locals:?}");
-    // Optimized out, or (on a tier that keeps it) the local's own value.
+    // Raw MIR keeps every value: one no longer used is still its own.
     let doubled = local(&locals, "doubled");
-    assert!(matches!(doubled, Some("<optimized out>" | "40")), "locals={locals:?}");
+    assert_eq!(doubled, Some("40"), "locals={locals:?}");
     let label = local(&locals, "label");
-    assert!(label.is_some_and(|v| v == "<optimized out>" || v.contains('x')), "locals={locals:?}");
+    assert!(label.is_some_and(|v| v.contains('x')), "locals={locals:?}");
 }
 
 /// Tasks show as threads: the running task is thread 1, suspended tasks are
@@ -771,9 +771,9 @@ dap_tests! {
     dap_line_breakpoint_hit_case => dap_line_breakpoint_hit;
     dap_launch_compile_failure_case => dap_launch_compile_failure;
     dap_stop_on_entry_has_stack_and_step_case => dap_stop_on_entry_has_stack_and_step;
-    dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant;
+    dap_launch_allow_exit_grant_case => dap_launch_allow_exit_grant;
     dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection;
     dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint;
-    dap_dead_local_is_optimized_out_case => dap_dead_local_is_optimized_out;
+    dap_dead_local_keeps_its_value_case => dap_dead_local_is_optimized_out;
     dap_tasks_are_threads_case => dap_tasks_are_threads;
 }

@@ -2,7 +2,7 @@
 //! and of function-style macros in each position.
 //!
 //! When they replaced the Rust synthesizers, every derive-using program
-//! compiled to the same bytecode with either (apart from tuple-variant
+//! compiled to the same MIR with either (apart from tuple-variant
 //! payloads, now bound by the pattern instead of read as `p.0`); this pins
 //! the generated source from then on.
 

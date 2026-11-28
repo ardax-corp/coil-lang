@@ -1,0 +1,28 @@
+// @expected E0119 — a generic function's bound on a body's own type
+// parameter, passed to a `forall` parameter, needs the body to have that
+// bound, as a direct call there does (#2639).
+trait Name<T> {
+    fn name(T x) -> string {}
+}
+
+impl Name for int {
+    fn name(int x) -> string {
+        return "int";
+    }
+}
+
+fn both<A: Name, B: Name>(A a, B b) -> string {
+    return a.name() + " " + b.name();
+}
+
+fn run<T>(forall X: Name. X -> T -> string g, T t) -> string {
+    return g(1, t);
+}
+
+fn make<T>(T t) -> string {
+    return run(both, t);
+}
+
+fn main() {
+    let s = make(2);
+}

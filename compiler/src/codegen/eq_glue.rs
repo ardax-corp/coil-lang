@@ -1,14 +1,18 @@
-//! `==` / `!=` on an aggregate whose elements have a user `Eq` (#1629).
+//! `==` / `!=` on an aggregate whose elements have a user `Eq` (#1629),
+//! or a `float` leaf (#1253).
 //!
-//! The VM's structural `EQ` (and `values_eq_shaped`) compares a class
-//! instance by identity: it cannot call an `Eq` instance. So an array,
-//! `Vec`, tuple, record, `Option`, `Result` or enum payload (of an enum with
-//! no `Eq` of its own) that holds, at any depth, a class or enum with an
-//! `Eq` instance compares through a compiler-made glue function instead:
-//! one per such type, comparing part by part with `==` at the part's type.
-//! That `==` dispatches as any other: a part with an `Eq` instance calls
-//! it, a part that needs glue calls its glue, and anything else compares
-//! as the VM does (a class without `Eq` by identity).
+//! structural equality compares a class instance by identity: it cannot
+//! call an `Eq` instance. So an array, `Vec`, tuple, record, `Option`,
+//! `Result` or enum payload (of an enum with no `Eq` of its own) that
+//! holds, at any depth, a class or enum with an `Eq` instance compares
+//! through a compiler-made glue function instead: one per such type,
+//! comparing part by part with `==` at the part's type. That `==`
+//! dispatches as any other: a part with an `Eq` instance calls it, a part
+//! that needs glue calls its glue, and anything else compares as the
+//! runtime does (a class without `Eq` by identity). An array, `Vec`, tuple
+//! or record with a `float` leaf compares through glue too, so the leaf
+//! compares by IEEE 754 as scalar `float` `==` does, in plain code and with
+//! no runtime call.
 //!
 //! A glue function is reserved the first time a call of it is planned (in
 //! a body, a monomorphic clone, a structural `Eq` thunk or another glue)
@@ -21,8 +25,8 @@
 //! after the two values and compares a bare variable's part through it.
 
 use super::*;
-use crate::hir::{BinOp, Callee, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, UnOp};
-use crate::hir::synth::Synth;
+use crate::hir::{BinOp, Builtin, Callee, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, LocalKind, UnOp};
+use crate::hir::synth::{Product, ProductCtor, Synth};
 use crate::typechecking::generics::Generics;
 use crate::typechecking::ty::{self as coil_ty, TyVarId, strip_readonly};
 
@@ -36,7 +40,7 @@ const EQ_DICT_GLUE: &str = "EqDictGlue";
 
 /// The pseudo-class of the `Eq` dictionary a shared body passes for a
 /// type variable none of whose bounds has `Eq` (`T: Lt`): `eq` / `ne` as
-/// the VM's structural `EQ` compares the two values (#1694).
+/// structural equality compares the two values (#1694).
 const EQ_ANY: &str = "EqAny";
 
 /// An open glue call: the glue's key type and name, each variable of the
@@ -73,76 +77,26 @@ pub(super) enum VarEqDict {
     Any,
 }
 
-/// The type variables of `ty`, in order of first appearance.
-fn vars_in_order(ty: &Ty, out: &mut Vec<TyVarId>) {
-    match ty {
-        Ty::Var(v) => {
-            if !out.contains(v) {
-                out.push(*v);
-            }
-        }
-        Ty::App(head, items) => {
-            vars_in_order(head, out);
-            items.iter().for_each(|t| vars_in_order(t, out));
-        }
-        Ty::Fun(a, r) => {
-            vars_in_order(a, out);
-            vars_in_order(r, out);
-        }
-        Ty::Tuple(items) => items.iter().for_each(|t| vars_in_order(t, out)),
-        Ty::Record { fields } => fields.iter().for_each(|(_, t)| vars_in_order(t, out)),
-        Ty::Array { element, .. } | Ty::Readonly(element) => vars_in_order(element, out),
-        _ => {}
-    }
-}
 
 /// How a glue function takes its type apart.
 #[derive(Clone, Debug)]
 pub(super) enum GlueShape {
     /// An array or `Vec` of this element.
     Seq(Ty),
-    Tuple(Vec<Ty>),
-    /// A record's fields.
-    Record(Vec<(String, Ty)>),
+    /// A tuple or a record.
+    Product(Product),
     /// An enum's variants, each with its payload's types in declaration
-    /// order (a record variant's too: a pattern binds it positionally).
-    Enum { name: String, variants: Vec<GlueVariant> },
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct GlueVariant {
-    name: String,
-    tag: Option<u32>,
-    fields: Vec<Ty>,
+    /// order.
+    Enum(Vec<Product>),
 }
 
 impl GlueShape {
     fn parts(&self) -> Vec<&Ty> {
         match self {
             Self::Seq(element) => vec![element],
-            Self::Tuple(items) => items.iter().collect(),
-            Self::Record(fields) => fields.iter().map(|(_, t)| t).collect(),
-            Self::Enum { variants, .. } => variants.iter().flat_map(|v| &v.fields).collect(),
+            Self::Product(product) => product.parts.iter().collect(),
+            Self::Enum(variants) => variants.iter().flat_map(|v| &v.parts).collect(),
         }
-    }
-}
-
-/// `ty` with the type parameters `params` replaced by `args`.
-fn subst_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
-    let go = |t: &Ty| subst_params(t, params, args);
-    match ty {
-        Ty::Con(name) => params.iter().position(|p| p == name).and_then(|i| args.get(i).cloned()).unwrap_or_else(|| ty.clone()),
-        Ty::App(head, items) => Ty::App(Box::new(go(head)), items.iter().map(go).collect()),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(go).collect()),
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, t)| (n.clone(), go(t))).collect(),
-        },
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(go(element)),
-            length: *length,
-        },
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(go(inner))),
-        other => other.clone(),
     }
 }
 
@@ -190,8 +144,11 @@ impl Compiler {
         }
         match ty {
             Ty::Array { element, .. } => Some(GlueShape::Seq(key(element))),
-            Ty::Tuple(items) if !items.is_empty() => Some(GlueShape::Tuple(items.iter().map(key).collect())),
-            Ty::Record { fields } if !fields.is_empty() => Some(GlueShape::Record(fields.iter().map(|(n, t)| (n.clone(), key(t))).collect())),
+            Ty::Tuple(items) if !items.is_empty() => Some(GlueShape::Product(Product { ctor: ProductCtor::Tuple, parts: items.iter().map(key).collect() })),
+            Ty::Record { fields } if !fields.is_empty() => Some(GlueShape::Product(Product {
+                ctor: ProductCtor::Record(fields.iter().map(|(n, _)| n.clone()).collect()),
+                parts: fields.iter().map(|(_, t)| key(t)).collect(),
+            })),
             Ty::Con(_) | Ty::App(..) if !self.eq_user_instance(ty) => {
                 let (name, args) = match ty {
                     Ty::Con(name) => (name.clone(), Vec::new()),
@@ -201,20 +158,18 @@ impl Compiler {
                     },
                     _ => return None,
                 };
-                let variant = |vname: &str, fields: Vec<Ty>| GlueVariant {
-                    name: vname.to_string(),
-                    tag: self.checker.tag_for(&name, vname),
-                    fields,
+                let variant = |vname: &str, tag: Option<u32>, parts: Vec<Ty>| Product {
+                    ctor: ProductCtor::Variant { enum_name: name.clone(), name: vname.to_string(), tag },
+                    parts,
                 };
+                let builtin = |vname: &str, parts: Vec<Ty>| variant(vname, self.checker.tag_for(&name, vname), parts);
                 if name == common::BUILTIN_OPTION_ENUM {
                     let [some] = args.as_slice() else { return None };
-                    let variants = vec![variant("Some", vec![key(some)]), variant("None", Vec::new())];
-                    return Some(GlueShape::Enum { name, variants });
+                    return Some(GlueShape::Enum(vec![builtin("Some", vec![key(some)]), builtin("None", Vec::new())]));
                 }
                 if name == common::BUILTIN_RESULT_ENUM {
                     let [ok, err] = args.as_slice() else { return None };
-                    let variants = vec![variant("Ok", vec![key(ok)]), variant("Err", vec![key(err)])];
-                    return Some(GlueShape::Enum { name, variants });
+                    return Some(GlueShape::Enum(vec![builtin("Ok", vec![key(ok)]), builtin("Err", vec![key(err)])]));
                 }
                 if self.checker.is_class(&name) {
                     return None;
@@ -226,30 +181,48 @@ impl Compiler {
                 }
                 let variants = declared
                     .iter()
-                    .map(|(vname, tag, fields)| GlueVariant {
-                        name: vname.clone(),
-                        tag: Some(*tag),
-                        fields: fields.iter().map(|t| key(&subst_params(t, &params, &args))).collect(),
-                    })
+                    .map(|(vname, tag, fields)| variant(vname, Some(*tag), fields.iter().map(|t| key(&crate::layout::bind_params(t, &params, &args))).collect()))
                     .collect();
-                Some(GlueShape::Enum { name, variants })
+                Some(GlueShape::Enum(variants))
             }
             _ => None,
         }
     }
 
     /// Whether `ty` (a key) compares through glue: it is taken apart and
-    /// some part, at any depth, has a user `Eq` instance.
+    /// some part, at any depth, has a user `Eq` instance, or it is an
+    /// array, `Vec`, tuple or record with a `float` leaf ([`float_leaf`]).
     fn eq_glue_needed(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> bool {
-        if !crate::layout::ty_is_closed(ty) || visiting.contains(ty) {
+        self.eq_glue_needed_in(ty, visiting, false)
+    }
+
+    /// [`Self::eq_glue_needed`]; `closed`: `ty` is a part of a closed
+    /// tuple, array, `Vec` or record, so closed too. Only a named type can
+    /// lead back to itself, so only those are kept in `visiting`: asking a
+    /// structural part again whether it is closed and whether it is being
+    /// visited compared whole types at every level, `O(d^3)` for a value
+    /// `d` levels deep (#2657).
+    fn eq_glue_needed_in(&self, ty: &Ty, visiting: &mut Vec<Ty>, closed: bool) -> bool {
+        let structural = matches!(ty, Ty::Tuple(_) | Ty::Array { .. } | Ty::Record { .. }) || coil_ty::vec_element_ty(ty).is_some();
+        if !(closed || crate::layout::ty_is_closed(ty)) || !structural && visiting.contains(ty) {
             return false;
         }
         let Some(shape) = self.eq_glue_shape(ty) else {
             return false;
         };
-        visiting.push(ty.clone());
-        let needed = shape.parts().into_iter().any(|p| self.eq_user_instance(p) || self.eq_glue_needed(p, visiting));
-        visiting.pop();
+        // A two-word tuple of immediates (`(int, float)`) needs none: its
+        // `==` compares the two words, a `float` one as a `float`, with no
+        // box made (`from_hir::pair_eq`).
+        if float_leaf(&shape) && !matches!(crate::layout::two_word_kind(&self.checker, ty), Some(crate::layout::PairKind::Product)) {
+            return true;
+        }
+        if !structural {
+            visiting.push(ty.clone());
+        }
+        let needed = shape.parts().into_iter().any(|p| self.eq_user_instance(p) || self.eq_glue_needed_in(p, visiting, structural));
+        if !structural {
+            visiting.pop();
+        }
         needed
     }
 
@@ -306,7 +279,7 @@ impl Compiler {
     /// this shared body's bounds (`T: Eq`, or a subclass's as `T: Ord`).
     fn eq_var_dict(&self, v: TyVarId) -> Option<(u32, u32)> {
         if let Some(&(n, method)) = self.synth_eq_dicts.get(&v) {
-            return Some((self.lookup_slot(&format!("__dict{n}"))?, method));
+            return Some((self.frame_dict(n)?, method));
         }
         if self.compiling_mono_clone {
             return None;
@@ -321,15 +294,15 @@ impl Compiler {
             return Some((slot, eq_slot("Eq")?));
         }
         let subst = self.checker.subst();
-        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
-            let Some(scheme) = self.checker.env().lookup(name) else {
+        for name in &self.dict_owner_names() {
+            let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
-            for (i, c) in scheme.constraints.iter().enumerate() {
+            for (i, c) in dicts.iter().enumerate() {
                 let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
                 if on_var
                     && let Some(method) = eq_slot(&c.class)
-                    && let Some(slot) = self.lookup_slot(&format!("__dict{i}"))
+                    && let Some(slot) = self.frame_dict(i)
                 {
                     return Some((slot, method));
                 }
@@ -364,7 +337,7 @@ impl Compiler {
             return Some(false);
         };
         visiting.push(ty.clone());
-        let mut needed = false;
+        let mut needed = float_leaf(&shape);
         for part in shape.parts() {
             needed |= match part {
                 Ty::Var(_) => vars,
@@ -411,7 +384,7 @@ impl Compiler {
     /// (#1661).
     pub(super) fn eq_glue_body_var_dict(&self, v: TyVarId) -> Option<u32> {
         match self.synth_eq_dicts.get(&v) {
-            Some(&(n, 0)) => self.lookup_slot(&format!("__dict{n}")),
+            Some(&(n, 0)) => self.frame_dict(n),
             _ => None,
         }
     }
@@ -424,7 +397,7 @@ impl Compiler {
             return None;
         }
         let mut order = Vec::new();
-        vars_in_order(&key, &mut order);
+        key.collect_vars(&mut order);
         if order.len() != coil_ty::ftv_ty(&key).len() {
             return None;
         }
@@ -442,7 +415,7 @@ impl Compiler {
             }
             // Each variable's dictionary as an `Eq` one, [`EQ_ANY`]'s for
             // one with no `Eq` bound, when some other part needs the glue
-            // (`Vec<Box<T>>` at `T: Lt`, #1694); else the VM's `EQ` compares
+            // (`Vec<Box<T>>` at `T: Lt`, #1694); else structural equality compares
             // the value, as it compares the variables' parts.
             _ => {
                 if self.eq_dict_glue_needed(&key, false, &mut Vec::new()) != Some(true) {
@@ -468,7 +441,7 @@ impl Compiler {
     pub(super) fn var_eq_dict(&self, v: TyVarId) -> Option<VarEqDict> {
         if let Some(&(n, method)) = self.synth_eq_dicts.get(&v) {
             // An open glue body's own; a subclass's holds no `ne` it knows.
-            return (method == 0).then(|| self.lookup_slot(&format!("__dict{n}"))).flatten().map(VarEqDict::Frame);
+            return (method == 0).then(|| self.frame_dict(n)).flatten().map(VarEqDict::Frame);
         }
         if self.compiling_mono_clone {
             return None;
@@ -479,11 +452,11 @@ impl Compiler {
         }
         let generics = self.checker.generics();
         let subst = self.checker.subst();
-        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
-            let Some(scheme) = self.checker.env().lookup(name) else {
+        for name in &self.dict_owner_names() {
+            let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
-            for (i, c) in scheme.constraints.iter().enumerate() {
+            for (i, c) in dicts.iter().enumerate() {
                 let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
                 let Some(class) = generics.typeclass(&c.class).filter(|_| on_var) else {
                     continue;
@@ -491,7 +464,7 @@ impl Compiler {
                 let flat = class.flattened_methods(generics);
                 let at = |method: &str| flat.iter().position(|(owner, m)| *owner == "Eq" && m.name == method).map(|i| i as u32);
                 if let (Some(eq), Some(ne)) = (at("eq"), at("ne"))
-                    && let Some(slot) = self.lookup_slot(&format!("__dict{i}"))
+                    && let Some(slot) = self.frame_dict(i)
                 {
                     return Some(VarEqDict::Project { slot, eq, ne });
                 }
@@ -504,8 +477,20 @@ impl Compiler {
     pub(super) fn plan_var_eq_dict(&mut self, out: &mut Vec<DictStep>, dict: VarEqDict) -> bool {
         match dict {
             VarEqDict::Frame(slot) => out.push(DictStep::Load(slot)),
+            // `(eq, ne, D)`: `D`'s `eq` and `ne` take `D` itself (each may
+            // be a forwarder into `D`, or read a context that follows
+            // `D`'s methods), so the two slots here forward to `D`, the
+            // third element (#2476).
             VarEqDict::Project { slot, eq, ne } => {
-                out.extend([DictStep::Load(slot), DictStep::Field(eq), DictStep::Load(slot), DictStep::Field(ne), DictStep::Tuple(2)]);
+                let start = out.len();
+                for (method, at) in [("eq", eq), ("ne", ne)] {
+                    let Some(code) = self.dict_forwarder("Eq", method, 2, Some(at)) else {
+                        out.truncate(start);
+                        return false;
+                    };
+                    out.push(code);
+                }
+                out.extend([DictStep::Load(slot), DictStep::Tuple(3)]);
             }
             VarEqDict::Any => {
                 let start = out.len();
@@ -527,26 +512,19 @@ impl Compiler {
         true
     }
 
-    /// Emit [`EQ_ANY`]'s `fqn`: the VM's structural `EQ` of the two words
-    /// (`ne` its negation), each unboxed first as a shared body holds a
-    /// type variable's value; the trailing dictionary is not read.
+    /// Emit [`EQ_ANY`]'s `fqn`: structural equality of the two words
+    /// (`ne` its negation), each in its own representation as a shared
+    /// body holds a type variable's value; the trailing dictionary is not
+    /// read. The words are retyped to `string`, whose `==` is the runtime's
+    /// structural equality of two words (an immediate equal by its bits).
     pub(super) fn emit_eq_any(&mut self, fqn: &str, ne: bool) {
-        let int = coil_ty::int();
-        let boolean = coil_ty::boolean();
-        let native = common::VALUES_EQ_SHAPED_NATIVE;
-        let params = [(int.clone(), true), (int.clone(), true)];
-        let had = self.hir_synth_callees.insert(native.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
+        let (int, string, boolean) = (coil_ty::int(), coil_ty::string(), coil_ty::boolean());
+        let params = [(int.clone(), true), (int, true)];
         self.emit_builtin_entry(fqn, &params, boolean.clone(), false, |b, a| {
-            // No shape: `values_eq`.
-            let none = b.int(0);
-            let eq = b.call(native, vec![a[0], a[1], none], int.clone());
-            let zero = b.int(0);
-            b.bin(if ne { BinOp::Eq } else { BinOp::Ne }, eq, zero, boolean.clone())
+            let x = b.builtin(Builtin::Retype, vec![a[0]], string.clone());
+            let y = b.builtin(Builtin::Retype, vec![a[1]], string);
+            b.bin(if ne { BinOp::Ne } else { BinOp::Eq }, x, y, boolean)
         });
-        match had {
-            Some(callee) => self.hir_synth_callees.insert(native.to_string(), callee),
-            None => self.hir_synth_callees.remove(native),
-        };
     }
 
     /// Reserve the open glue functions of `glue`'s key, as
@@ -598,10 +576,35 @@ impl Compiler {
         let hir = Self::synth_generic(b.finish(root));
         self.synth_plain_dicts = Some(vars.len());
         self.synth_eq_dicts = vars.iter().enumerate().map(|(i, &(v, method))| (v, (i, method))).collect();
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), false);
+        self.emit_synth_fn(fqn, &hir, HashMap::new());
         self.synth_plain_dicts = None;
         self.synth_eq_dicts.clear();
     }
+}
+
+/// Whether an array, `Vec`, tuple or record shape has a `float` leaf
+/// through arrays, `Vec`s, tuples and records: its glue compares that
+/// leaf with `float` `==`, by IEEE 754 (`NaN != NaN`, `0.0 == -0.0`),
+/// where structural equality compares the bits (#1253). An enum payload's
+/// `float` is not one: a two-word `Option<float>` already compares its
+/// payload word as a `float`.
+fn float_leaf(shape: &GlueShape) -> bool {
+    fn ty_leaf(ty: &Ty) -> bool {
+        let ty = strip_readonly(ty);
+        if crate::hir::classify::primitive(ty) == Some(coil_ty::FLOAT) {
+            return true;
+        }
+        if let Some(element) = coil_ty::vec_element_ty(ty) {
+            return ty_leaf(element);
+        }
+        match ty {
+            Ty::Array { element, .. } => ty_leaf(element),
+            Ty::Tuple(items) => items.iter().any(ty_leaf),
+            Ty::Record { fields } => fields.iter().any(|(_, t)| ty_leaf(t)),
+            _ => false,
+        }
+    }
+    !matches!(shape, GlueShape::Enum(_)) && shape.parts().into_iter().any(ty_leaf)
 }
 
 /// `x == y` at `ty`; `()` parts are always equal.
@@ -624,6 +627,45 @@ fn all(b: &mut Synth, parts: Vec<HirId>) -> HirId {
 
 fn bool_lit(b: &mut Synth, v: bool) -> HirId {
     b.push(HirKind::Lit(Lit::Bool(v)), coil_ty::boolean())
+}
+
+/// One part of an opened product: a local its pattern bound, or a
+/// record's field, read from the record each time.
+enum Part {
+    Local(LocalId),
+    Field(LocalId, String, Ty),
+}
+
+/// The parts of tuple or record `v`, with the `let` that binds a tuple's
+/// to `{side}{i}`.
+fn open(b: &mut Synth, product: &Product, v: LocalId, side: &str) -> (Option<HirId>, Vec<Part>) {
+    if let ProductCtor::Record(names) = &product.ctor {
+        return (None, names.iter().zip(&product.parts).map(|(n, t)| Part::Field(v, n.clone(), t.clone())).collect());
+    }
+    let init = b.read(v);
+    let (bound, locals) = product.bind(b, init, side);
+    (Some(bound), locals.into_iter().map(Part::Local).collect())
+}
+
+/// `x0 == y0 && ..` over the parts of two values of one product.
+fn parts_eq(b: &mut Synth, xs: Vec<Part>, ys: Vec<Part>, tys: &[Ty]) -> HirId {
+    let read = |b: &mut Synth, part: Part| match part {
+        Part::Local(l) => b.read(l),
+        Part::Field(v, name, ty) => {
+            let base = b.read(v);
+            b.push(HirKind::Field { base, name }, ty)
+        }
+    };
+    let parts = xs
+        .into_iter()
+        .zip(ys)
+        .zip(tys)
+        .map(|((x, y), t)| {
+            let (xv, yv) = (read(b, x), read(b, y));
+            part_eq(b, xv, yv, t)
+        })
+        .collect();
+    all(b, parts)
 }
 
 /// Whether `a` and `c` (of the shape's type) are equal, part by part.
@@ -671,70 +713,24 @@ fn glue_body(b: &mut Synth, a: LocalId, c: LocalId, shape: &GlueShape) -> HirId 
             let yes = bool_lit(b, true);
             b.block(vec![check_len, init, each], Some(yes), boolean)
         }
-        GlueShape::Tuple(items) => {
-            let bind = |b: &mut Synth, v: LocalId, side: &str| {
-                let v = b.read(v);
-                let locals: Vec<_> = items.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
-                let pat = HirPat::Tuple(locals.iter().map(|&l| HirPat::Bind(l)).collect());
-                (b.push(HirKind::LetPat { pat, init: v }, coil_ty::unit()), locals)
-            };
-            let (la, xs) = bind(b, a, "x");
-            let (lc, ys) = bind(b, c, "y");
-            let parts = xs
-                .into_iter()
-                .zip(ys)
-                .zip(items)
-                .map(|((x, y), t)| {
-                    let (xv, yv) = (b.read(x), b.read(y));
-                    part_eq(b, xv, yv, t)
-                })
-                .collect();
-            let eq = all(b, parts);
-            b.block(vec![la, lc], Some(eq), boolean)
-        }
-        GlueShape::Record(fields) => {
-            let parts = fields
-                .iter()
-                .map(|(name, t)| {
-                    let (av, cv) = (b.read(a), b.read(c));
-                    let x = b.push(HirKind::Field { base: av, name: name.clone() }, t.clone());
-                    let y = b.push(HirKind::Field { base: cv, name: name.clone() }, t.clone());
-                    part_eq(b, x, y, t)
-                })
-                .collect();
-            all(b, parts)
+        // `let (x..) = a; let (y..) = c; x.. == y..`; a record's fields
+        // are read in place, each as it is compared.
+        GlueShape::Product(product) => {
+            let (la, xs) = open(b, product, a, "x");
+            let (lc, ys) = open(b, product, c, "y");
+            let eq = parts_eq(b, xs, ys, &product.parts);
+            match (la, lc) {
+                (Some(la), Some(lc)) => b.block(vec![la, lc], Some(eq), boolean),
+                _ => eq,
+            }
         }
         // `match a { V(x..) => match c { V(y..) => x.. == y.., _ => false }, .. }`
-        GlueShape::Enum { name, variants } => {
-            let pat = |b: &mut Synth, v: &GlueVariant, side: &str| {
-                let locals: Vec<_> = v.fields.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
-                let fields = if v.fields.is_empty() {
-                    HirPatFields::Unit
-                } else {
-                    HirPatFields::Tuple(locals.iter().map(|&l| HirPat::Bind(l)).collect())
-                };
-                let pat = HirPat::Variant {
-                    enum_name: name.clone(),
-                    variant: v.name.clone(),
-                    tag: v.tag,
-                    fields,
-                };
-                (pat, locals)
-            };
+        GlueShape::Enum(variants) => {
             let mut arms = Vec::with_capacity(variants.len());
             for v in variants {
-                let (pa, xs) = pat(b, v, "x");
-                let (pc, ys) = pat(b, v, "y");
-                let parts = xs
-                    .into_iter()
-                    .zip(ys)
-                    .zip(&v.fields)
-                    .map(|((x, y), t)| {
-                        let (xv, yv) = (b.read(x), b.read(y));
-                        part_eq(b, xv, yv, t)
-                    })
-                    .collect();
-                let eq = all(b, parts);
+                let (pa, xs) = v.pat(b, "x");
+                let (pc, ys) = v.pat(b, "y");
+                let eq = parts_eq(b, xs.into_iter().map(Part::Local).collect(), ys.into_iter().map(Part::Local).collect(), &v.parts);
                 let no = bool_lit(b, false);
                 let cv = b.read(c);
                 let inner = b.match_(cv, vec![(pc, eq), (HirPat::Wild, no)], boolean.clone());

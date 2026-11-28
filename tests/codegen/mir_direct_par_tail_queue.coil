@@ -1,5 +1,5 @@
 // The fork-join function of each parallel loop moved out of a body is
-// queued when the body lowers to MIR, not when its stack IL reaches the
+// queued when the body lowers to MIR, not when it reaches the
 // loop: loops on a branch, after an early return, inside a lambda, and
 // two in one body.
 use tests::assert;

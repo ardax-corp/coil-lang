@@ -1,11 +1,12 @@
 //! Pretty (ariadne) diagnostic sink.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::io::Write;
+use std::ops::Range;
 use std::path::Path;
 
-use ariadne::{
-    Color, Config, IndexType, Label as AriadneLabel, LabelAttach, Report, ReportKind, sources,
-};
+use ariadne::{Cache, Color, Config, IndexType, Label as AriadneLabel, LabelAttach, Report, ReportKind, Source};
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::sink::DiagnosticSink;
@@ -16,6 +17,40 @@ pub struct AriadneSink {
     sources: SourceMap,
     writer: Box<dyn Write + Send>,
     error_count: usize,
+    /// Each source a report has read, by its displayed path, line-indexed
+    /// once: indexing every registered file for every report made a
+    /// compile with many warnings quadratic in its size (#2352).
+    rendered: HashMap<String, Source<String>>,
+}
+
+/// The [`Cache`] a report reads its files from: each file of `sources`
+/// (the last one registered under a displayed path), indexed the first
+/// time a report needs it.
+struct RenderedSources<'a> {
+    rendered: &'a mut HashMap<String, Source<String>>,
+    sources: &'a SourceMap,
+}
+
+impl Cache<String> for RenderedSources<'_> {
+    type Storage = String;
+
+    fn fetch(&mut self, id: &String) -> Result<&Source<String>, impl fmt::Debug> {
+        if !self.rendered.contains_key(id) {
+            let text = self
+                .sources
+                .iter()
+                .filter(|(_, path, _)| path.display().to_string() == *id)
+                .last()
+                .map(|(_, _, text)| text.to_string())
+                .ok_or_else(|| format!("Failed to fetch source '{id}'"))?;
+            self.rendered.insert(id.clone(), Source::from(text));
+        }
+        Ok::<_, String>(&self.rendered[id])
+    }
+
+    fn display<'b>(&self, id: &'b String) -> Option<impl fmt::Display + 'b> {
+        Some(Box::new(id))
+    }
 }
 
 impl AriadneSink {
@@ -24,6 +59,7 @@ impl AriadneSink {
             sources,
             writer,
             error_count: 0,
+            rendered: HashMap::new(),
         }
     }
 
@@ -73,7 +109,9 @@ impl AriadneSink {
             diag.message.clone()
         };
 
-        let mut report = Report::build(kind, (filename.clone(), loc.range.clone()))
+        let text = self.sources.text(loc.file).unwrap_or("");
+        let primary = shown_range(text, &loc.range);
+        let mut report = Report::build(kind, (filename.clone(), primary.clone()))
             .with_message(&message)
             .with_config(
                 Config::new()
@@ -90,9 +128,19 @@ impl AriadneSink {
                 .path(label.location.file)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| filename.clone());
+            let label_text = self.sources.text(label.location.file).unwrap_or("");
+            // A label without a message still needs one: ariadne draws the
+            // underline only for labels that have a message.
             report = report.with_label(
-                AriadneLabel::new((label_path, label.location.range.clone()))
+                AriadneLabel::new((label_path, shown_range(label_text, &label.location.range)))
                     .with_message(&label.message)
+                    .with_color(Color::Primary),
+            );
+        }
+        if diag.labels.is_empty() {
+            report = report.with_label(
+                AriadneLabel::new((filename.clone(), primary))
+                    .with_message("")
                     .with_color(Color::Primary),
             );
         }
@@ -101,31 +149,51 @@ impl AriadneSink {
             report = report.with_help(help);
         }
 
-        let cache_pairs: Vec<(String, String)> = self
-            .sources
-            .iter()
-            .map(|(_, path, text)| (path.display().to_string(), text.to_string()))
-            .collect();
-        let mut cache = sources(cache_pairs);
+        let cache = RenderedSources { rendered: &mut self.rendered, sources: &self.sources };
 
         report
             .finish()
-            .write(&mut cache, &mut self.writer)
+            .write(cache, &mut self.writer)
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 
-fn diagnostic_has_source_span(diag: &Diagnostic) -> bool {
-    if diag
-        .labels
-        .iter()
-        .any(|l| l.location.range.start < l.location.range.end)
-    {
-        return diag.location.is_some();
+/// The bytes a report draws for `range` of `text`: a point (an empty
+/// range, such as the end of a body or of the input) widens to the
+/// character at it, or the one before it at the end of the text, so the
+/// report still shows the line; a span that runs on over trailing
+/// whitespace (an item's span up to the next one) stops at its last
+/// visible character.
+fn shown_range(text: &str, range: &Range<usize>) -> Range<usize> {
+    let start = floor_char_boundary(text, range.start.min(text.len()));
+    let end = floor_char_boundary(text, range.end.min(text.len())).max(start);
+    if start == end {
+        return match text[start..].chars().next() {
+            Some(c) if c != '\n' => start..start + c.len_utf8(),
+            _ => match text[..start].chars().next_back() {
+                Some(c) if c != '\n' || start == text.len() => start - c.len_utf8()..start,
+                _ => start..start,
+            },
+        };
     }
-    diag.location
-        .as_ref()
-        .is_some_and(|l| l.range.start < l.range.end)
+    let trimmed = start + text[start..end].trim_end().len();
+    if trimmed > start { start..trimmed } else { start..end }
+}
+
+fn floor_char_boundary(text: &str, mut at: usize) -> usize {
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// A report has a place in a file to show: a located diagnostic whose
+/// span is not empty, or is a point past the first byte (it still names a
+/// line and column; `0..0` means "no position").
+fn diagnostic_has_source_span(diag: &Diagnostic) -> bool {
+    let shown = |r: &Range<usize>| r.start < r.end || r.start > 0;
+    diag.location.as_ref().is_some_and(|l| shown(&l.range))
+        || (diag.location.is_some() && diag.labels.iter().any(|l| shown(&l.location.range)))
 }
 
 impl DiagnosticSink for AriadneSink {
@@ -147,6 +215,7 @@ impl DiagnosticSink for AriadneSink {
     }
 
     fn register_source(&mut self, path: &Path, text: &str) -> SourceId {
+        self.rendered.remove(&path.display().to_string());
         self.sources.insert(path, text)
     }
 
@@ -192,6 +261,21 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A report after a file is registered again shows its new text, not
+    /// the copy an earlier report indexed.
+    #[test]
+    fn pretty_sink_reads_a_file_registered_again() {
+        let shared = SharedBuf::new();
+        let mut sink = AriadneSink::new(SourceMap::new(), Box::new(shared.clone()));
+        let file = sink.register_source(Path::new("a.coil"), "let old_name = 1;\n");
+        sink.emit(Diagnostic::warning("first").at(file, 4..12).with_label(RelatedLabel::new(Location::new(file, 4..12), "here")));
+        let file = sink.register_source(Path::new("a.coil"), "let new_name = 2;\n");
+        sink.emit(Diagnostic::warning("second").at(file, 4..12).with_label(RelatedLabel::new(Location::new(file, 4..12), "here")));
+        let out = shared.into_string();
+        let second = out.split("second").nth(1).expect("second report");
+        assert!(out.contains("old_name") && second.contains("new_name") && !second.contains("old_name"), "{out}");
     }
 
     #[test]
@@ -262,6 +346,35 @@ mod tests {
             "{out}"
         );
         assert!(sink.had_errors());
+    }
+
+    #[test]
+    fn shown_range_widens_points_and_trims_trailing_blank_lines() {
+        let text = "fn f() {}\n\nlet é = 1;\n";
+        // A point shows the character at it.
+        assert_eq!(shown_range(text, &(8..8)), 8..9);
+        // A point at the end of a line shows the character before it.
+        assert_eq!(shown_range(text, &(9..9)), 8..9);
+        // The end of the text shows its last character.
+        assert_eq!(shown_range(text, &(text.len()..text.len())), text.len() - 1..text.len());
+        // A span over trailing blank lines stops at its last visible byte.
+        assert_eq!(shown_range(text, &(0..11)), 0..9);
+        // A multi-byte character is shown whole, and a range inside it is
+        // moved to its start.
+        let e = text.find('é').unwrap();
+        assert_eq!(shown_range(text, &(e..e)), e..e + 2);
+        assert_eq!(shown_range(text, &(e + 1..e + 1)), e..e + 2);
+    }
+
+    #[test]
+    fn pretty_sink_names_the_line_of_a_point_diagnostic() {
+        let mut sources = SourceMap::new();
+        let file = sources.insert("p.coil", "fn f() -> bool {}\n");
+        let shared = SharedBuf::new();
+        let mut sink = AriadneSink::new(sources, Box::new(shared.clone()));
+        sink.emit(Diagnostic::error("reaches the end").with_code(ErrorCode::ReturnMismatch).at(file, 16..16));
+        let out = shared.into_string();
+        assert!(out.contains("p.coil:1:17"), "{out}");
     }
 
     #[test]

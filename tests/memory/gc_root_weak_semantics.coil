@@ -75,19 +75,6 @@ test("unroot hands the value back once") {
     assert!(after == 0);
 }
 
-test("a weak to an immediate always upgrades") {
-    let w = weak(42);
-    collect();
-    let v = match upgrade(w) {
-        Option::Some(n) => n,
-        Option::None => -1,
-    };
-    assert!(v == 42);
-    let b = weak(true);
-    collect();
-    assert!(upgrade(b) == Option::Some(true));
-}
-
 test("weak entries in a registry do not extend lifetimes") {
     let reg: Vec<Weak<Cell>> = Vec::new();
     let keep = new Cell(1);

@@ -1,0 +1,540 @@
+//! What native code's inline allocation writes (`docs/internals/native.md`,
+//! "Inline allocation"): a fixed-size nursery object (an enum, a tuple
+//! among them, with an inline payload, an instance with inline fields) is bumped from
+//! its class's cursor ([`super::super::slab::Bump`]) and filled from an
+//! image of its slot, without a call into the runtime.
+//!
+//! The images are probed from real objects, so they follow the
+//! `repr(C)` / `repr(u8)` layouts of [`ObjEnum`], [`ObjInstance`] and
+//! their payloads. Those reprs keep the layout the same
+//! in the compiler that emits the code and the runtime that runs it, and
+//! [`layout_fingerprint`] lets an AOT runtime refuse an object compiled
+//! against another layout.
+
+use std::alloc::Layout;
+use std::hash::{Hash, Hasher};
+
+use super::*;
+
+/// One fixed-size object native code allocates inline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InlineShape {
+    /// `ALLOC_ENUM` of a variant (a tuple: [`common::PRODUCT_TAG`]) with
+    /// `n` payload words (1 to [`ENUM_INLINE_ARITY`]), `kinds` their packed
+    /// word kinds.
+    Enum { tag: u32, kinds: common::PackedKinds, n: u8 },
+    /// `ALLOC_OBJECT` of a class with `n` fields (1 to
+    /// [`INSTANCE_INLINE_FIELDS`]); its fields stay zero until stored.
+    /// `kinds`: its own kinds of the slots its row leaves unknown
+    /// (`ObjInstance::own_kinds`).
+    Instance { type_id: u32, kinds: common::PackedKinds, n: u8 },
+}
+
+/// How to allocate one [`InlineShape`] inline.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InlineObject {
+    /// Index of its nursery class's cursor ([`Heap::inline_alloc_ptrs`]).
+    pub class: u32,
+    /// Bytes the cursor moves by (the slot).
+    pub slot: u32,
+    /// Bytes the heap accounts for it ([`HeapCounts::alloc_bytes`]).
+    pub size: u32,
+    /// The slot's words as a fresh young object, header first, with its
+    /// payload words zero.
+    pub image: Vec<u64>,
+    /// Index in `image` of the first payload word: enum payload (tuple)
+    /// words go there in order.
+    pub words_at: u32,
+}
+
+/// The nursery classes of the inline shapes, made first in every heap so
+/// their cursor indexes are the same in every build.
+fn inline_layouts() -> [Layout; 3] {
+    [Layout::new::<GcData<ObjEnum>>(), Layout::new::<GcData<ObjInstance>>(), Layout::new::<GcData<ObjString>>()]
+}
+
+/// Make the inline shapes' nursery classes (a new heap, first); the
+/// last is the strings' that native code frees inline onto
+/// ([`string_free`]). Two layouts of one size class share a cursor.
+pub(super) fn make_inline_classes(slab: &mut Slab) -> [usize; 3] {
+    inline_layouts().map(|l| slab.young_class(l))
+}
+
+/// The cursors [`make_inline_classes`] gives a new slab's classes, without
+/// making one: each new class key takes the next cursor.
+fn inline_class_indices() -> [usize; 3] {
+    let keys = inline_layouts().map(Slab::class_of);
+    std::array::from_fn(|i| {
+        let first = keys.iter().position(|k| *k == keys[i]).expect("its own key");
+        (0..first).filter(|&j| keys[..j].iter().all(|k| *k != keys[j])).count()
+    })
+}
+
+/// Offset of `field` within `base`, both inside one object.
+fn off<A, B>(base: &A, field: &B) -> usize {
+    std::ptr::from_ref(field) as usize - std::ptr::from_ref(base) as usize
+}
+
+/// A payload's discriminant byte, `len`, `kinds` and slot offsets, and its
+/// slot words, probed from `p`.
+fn payload_probe(p: &EnumPayload) -> (u8, usize, usize, usize, [u64; ENUM_INLINE_ARITY]) {
+    let EnumPayloadInner::Inline { len, kinds, slots } = &p.inner else {
+        unreachable!("an inline-arity payload is inline");
+    };
+    // SAFETY: `repr(u8)`: the discriminant is the first byte.
+    let tag = unsafe { *std::ptr::from_ref(&p.inner).cast::<u8>() };
+    (tag, off(p, len), off(p, kinds), off(p, slots), slots.map(|v| v.bits()))
+}
+
+/// Write `bytes` at `at` in `img`.
+fn put(img: &mut [u8], at: usize, bytes: &[u8]) {
+    img[at..at + bytes.len()].copy_from_slice(bytes);
+}
+
+/// The header of a fresh young object of `kind`, written into `img`.
+fn put_header(img: &mut [u8], kind: u8) {
+    let probe = GcHeader::new();
+    put(img, off(&probe, &probe.kind), &[kind]);
+    put(img, off(&probe, &probe.generation), &[GEN_YOUNG]);
+}
+
+fn words(img: &[u8]) -> Vec<u64> {
+    img.as_chunks::<8>().0.iter().map(|w| u64::from_le_bytes(*w)).collect()
+}
+
+/// How to allocate `shape` inline; `None` when it does not fit inline (a
+/// spilled payload, a fieldless or untyped instance).
+#[must_use]
+pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
+    let classes = inline_class_indices();
+    let placeholder = [Value::default(); ENUM_INLINE_ARITY];
+    let (class, layout, data, size, img, words_at) = match shape {
+        InlineShape::Enum { tag, kinds, n } => {
+            let n = usize::from(n);
+            if n == 0 || n > ENUM_INLINE_ARITY {
+                return None;
+            }
+            let obj = ObjEnum::new(tag, EnumPayload::from_slice(&placeholder[..n]).with_kinds(kinds));
+            let layout = Layout::new::<GcData<ObjEnum>>();
+            let data = std::mem::offset_of!(GcData<ObjEnum>, data);
+            let mut img = vec![0u8; layout.size()];
+            put_header(&mut img, KIND_ENUM);
+            put(&mut img, data + off(&obj, &obj.tag), &obj.tag.to_le_bytes());
+            put(&mut img, data + off(&obj, &obj.type_id), &obj.type_id.to_le_bytes());
+            let base = data + off(&obj, &obj.payload);
+            let (d, len, k, slots, words) = payload_probe(&obj.payload);
+            put(&mut img, base, &[d]);
+            put(&mut img, base + len, &[n as u8]);
+            put(&mut img, base + k, &kinds.to_le_bytes());
+            for (i, w) in words.iter().enumerate() {
+                put(&mut img, base + slots + i * 8, &w.to_le_bytes());
+            }
+            (classes[0], layout, data, PACED_HEADER_BYTES + obj.size(), img, base + slots)
+        }
+        InlineShape::Instance { type_id, kinds, n } => {
+            if type_id == 0 || n == 0 || usize::from(n) > INSTANCE_INLINE_FIELDS {
+                return None;
+            }
+            let obj = ObjInstance::with_type_id_and_fields(type_id, usize::from(n)).with_own_kinds(kinds);
+            let layout = Layout::new::<GcData<ObjInstance>>();
+            let data = std::mem::offset_of!(GcData<ObjInstance>, data);
+            let mut img = vec![0u8; layout.size()];
+            put_header(&mut img, KIND_INSTANCE);
+            put(&mut img, data + off(&obj, &obj.type_id), &obj.type_id.to_le_bytes());
+            let base = data + off(&obj, &obj.storage);
+            let (d, len, k, slots, words) = payload_probe(&obj.storage);
+            put(&mut img, base, &[d]);
+            put(&mut img, base + len, &[n]);
+            put(&mut img, base + k, &kinds.to_le_bytes());
+            for (i, w) in words.iter().enumerate() {
+                put(&mut img, base + slots + i * 8, &w.to_le_bytes());
+            }
+            (classes[1], layout, data, PACED_HEADER_BYTES + obj.size(), img, base + slots)
+        }
+    };
+    debug_assert!(data % 8 == 0 && words_at % 8 == 0 && layout.size() % 8 == 0 && layout.align() <= 8);
+    Some(InlineObject {
+        class: class as u32,
+        slot: layout.size() as u32,
+        size: size as u32,
+        image: words(&img),
+        words_at: (words_at / 8) as u32,
+    })
+}
+
+/// Where native code reads a product object's slots in place, and writes an
+/// instance's (`docs/internals/native.md`, "Inline field access"): byte
+/// offsets from the object's address, probed from real objects as the
+/// images are. An instance's fields and an enum's payload (a tuple's items)
+/// are one store at one offset, so the store offsets serve both kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProductSlots {
+    /// The header's kind byte, an instance's kind and an enum's.
+    pub kind_at: u32,
+    pub kind: u8,
+    pub enum_kind: u8,
+    /// An enum's `u32` tag.
+    pub enum_tag_at: u32,
+    /// The storage's discriminant byte.
+    pub storage_at: u32,
+    /// Inline slots: the discriminant, the `u8` slot count and the words.
+    pub inline_tag: u8,
+    pub inline_len_at: u32,
+    pub inline_slots_at: u32,
+    /// Spilled slots: the discriminant and the `Vec`'s pointer and length words.
+    pub spill_tag: u8,
+    pub spill_ptr_at: u32,
+    pub spill_len_at: u32,
+    /// Stores may be written in place. A debug or GC-stress runtime checks
+    /// every write ([`GcData::as_mut`]), so its stores take the helper.
+    pub inline_stores: bool,
+}
+
+/// The [`ProductSlots`] of this build.
+#[must_use]
+pub fn product_slots() -> ProductSlots {
+    let data = std::mem::offset_of!(GcData<ObjInstance>, data);
+    let header = GcHeader::new();
+    let inline = ObjInstance::with_type_id_and_fields(1, 2);
+    let storage = data + off(&inline, &inline.storage);
+    let variant = ObjEnum::new(7, EnumPayload::one(Value::default()));
+    let enum_data = std::mem::offset_of!(GcData<ObjEnum>, data);
+    assert_eq!(enum_data + off(&variant, &variant.payload), storage, "an enum's payload and an instance's fields share an offset");
+    // SAFETY: `repr(u8)`: the discriminant is the first byte.
+    let tag = |s: &EnumPayload| unsafe { *std::ptr::from_ref(&s.inner).cast::<u8>() };
+    let (inline_tag, len, _, slots, _) = payload_probe(&inline.storage);
+    let (inline_len_at, inline_slots_at) = (storage + len, storage + slots);
+    let mut spill = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS + 3);
+    let spill_tag = tag(&spill.storage);
+    if let EnumPayloadInner::Spill { words, .. } = &mut spill.storage.inner {
+        words.reserve_exact(5);
+    }
+    let EnumPayloadInner::Spill { words: v, .. } = &spill.storage.inner else {
+        unreachable!("a wide instance spills");
+    };
+    let vec_at = storage + off(&spill.storage, v);
+    // A `Vec`'s words are its capacity, pointer and length in some order:
+    // find the pointer and the length (the capacity is larger).
+    // SAFETY: a `Vec` is three words.
+    let words: [usize; 3] = unsafe { std::mem::transmute_copy(v) };
+    let ptr = words.iter().position(|&w| w == v.as_ptr() as usize).expect("a Vec holds its pointer");
+    let len_word = words.iter().position(|&w| w == v.len()).expect("a Vec holds its length");
+    assert!(v.capacity() != v.len() && ptr != len_word);
+    ProductSlots {
+        kind_at: off(&header, &header.kind) as u32,
+        kind: KIND_INSTANCE,
+        enum_kind: KIND_ENUM,
+        enum_tag_at: (enum_data + off(&variant, &variant.tag)) as u32,
+        storage_at: storage as u32,
+        inline_tag,
+        inline_len_at: inline_len_at as u32,
+        inline_slots_at: inline_slots_at as u32,
+        spill_tag,
+        spill_ptr_at: (vec_at + ptr * 8) as u32,
+        spill_len_at: (vec_at + len_word * 8) as u32,
+        inline_stores: !cfg!(any(debug_assertions, feature = "rc-check")),
+    }
+}
+
+/// What native code's inline free of a string reads and writes: an `RcDec`
+/// that takes the last owner of a young string no weak handle names, held
+/// inline or as a view of a buffer another string still holds, poisons its
+/// header and pushes its slot on the string class's intrusive free list, as
+/// [`Heap::rc_release`] would, without a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StringFree {
+    /// Index of the string class's nursery cursor
+    /// ([`Heap::inline_alloc_ptrs`]).
+    pub class: u32,
+    /// Bytes the heap accounts for an inline string
+    /// ([`HeapCounts::alloc_bytes`]); a view adds its `accounted` count.
+    pub size: u32,
+    /// Byte offset in the slot of the string's `StrData` discriminant.
+    pub tag_at: u32,
+    /// That discriminant for an inline string (no buffer to drop).
+    pub inline_tag: u8,
+    /// That discriminant for a view of a shared buffer
+    /// ([`crate::StrData::Shared`]).
+    pub shared_tag: u8,
+    /// Byte offsets in the slot of a view's buffer pointer and of its
+    /// `accounted` count (a `u32`), and in the buffer of its reference count
+    /// (a `usize`, changed atomically). Native code frees a view only when
+    /// its decrement leaves the buffer another owner; the last one's buffer
+    /// goes back through the runtime.
+    pub buf_at: u32,
+    pub accounted_at: u32,
+    pub refs_at: u32,
+    /// Header word bits the test reads, and the value they must have: the
+    /// string kind, the nursery bit, no weak handle.
+    pub header_mask: u64,
+    pub header_want: u64,
+    /// Header word bits a freed slot keeps (the finalizer's claim, as
+    /// `Gc::recycle` leaves it).
+    pub header_keep: u64,
+}
+
+/// [`StringFree`] of this build, probed from a real string.
+#[must_use]
+pub fn string_free() -> StringFree {
+    static PROBED: std::sync::OnceLock<StringFree> = std::sync::OnceLock::new();
+    *PROBED.get_or_init(probe_string_free)
+}
+
+fn probe_string_free() -> StringFree {
+    let classes = inline_class_indices();
+    let obj = ObjString::from("ab");
+    let data = std::mem::offset_of!(GcData<ObjString>, data);
+    // SAFETY: `StrData` is `repr(u8)`: the discriminant is its first byte.
+    let inline_tag = unsafe { *std::ptr::from_ref(&obj.data).cast::<u8>() };
+    debug_assert!(matches!(obj.data, crate::StrData::Inline { .. }));
+    let probe = GcHeader::new();
+    let at = |f: *const u8| 8 * (f as usize - std::ptr::from_ref(&probe) as usize);
+    let (kind, flags, generation) = (at(probe.kind.as_ptr()), at(probe.flags.as_ptr()), at(probe.generation.as_ptr()));
+    let tag_at = data + off(&obj, &obj.data);
+    let shared = crate::memory::shared_layout();
+    StringFree {
+        class: classes[2] as u32,
+        size: (PACED_HEADER_BYTES + obj.size()) as u32,
+        tag_at: tag_at as u32,
+        inline_tag,
+        shared_tag: shared.tag,
+        buf_at: (tag_at + shared.buf_at) as u32,
+        accounted_at: (tag_at + shared.accounted_at) as u32,
+        refs_at: shared.refs_at as u32,
+        header_mask: (0xff << kind) | (u64::from(FLAG_WEAK_TARGET) << flags) | (u64::from(GEN_YOUNG) << generation),
+        header_want: (u64::from(KIND_STRING) << kind) | (u64::from(GEN_YOUNG) << generation),
+        header_keep: u64::from(FLAG_FINALIZED) << flags,
+    }
+}
+
+/// How native code allocates a short string inline (a slice of up to
+/// [`crate::memory::INLINE_MAX`] bytes, `string_slice_bytes`): the slot of
+/// a fresh young empty inline string from the string class's cursor, then
+/// its length byte and its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StringAlloc {
+    /// Index of the string class's nursery cursor (as [`StringFree::class`]).
+    pub class: u32,
+    /// Bytes the cursor moves by (the slot).
+    pub slot: u32,
+    /// Bytes the heap accounts for an inline string.
+    pub size: u32,
+    /// The slot's words as a fresh young empty inline string, header first.
+    pub image: Vec<u64>,
+    /// Byte offsets in the slot of the inline length and of the first byte.
+    pub len_at: u32,
+    pub bytes_at: u32,
+    /// Longest string held inline.
+    pub max: u32,
+}
+
+/// [`StringAlloc`] of this build, probed from a real string.
+#[must_use]
+pub fn string_alloc() -> &'static StringAlloc {
+    static PROBED: std::sync::OnceLock<StringAlloc> = std::sync::OnceLock::new();
+    PROBED.get_or_init(probe_string_alloc)
+}
+
+fn probe_string_alloc() -> StringAlloc {
+    let obj = ObjString::from("");
+    let layout = Layout::new::<GcData<ObjString>>();
+    let data = std::mem::offset_of!(GcData<ObjString>, data);
+    let crate::StrData::Inline { len, bytes } = &obj.data else { unreachable!("an empty string is inline") };
+    let mut img = vec![0u8; layout.size()];
+    put_header(&mut img, KIND_STRING);
+    // SAFETY: `ObjString`'s bytes, all initialized for an inline string
+    // (a tag, a length, 30 bytes and the hash word: no padding).
+    let raw = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&obj).cast::<u8>(), std::mem::size_of::<ObjString>()) };
+    put(&mut img, data, raw);
+    debug_assert!(layout.size().is_multiple_of(8) && layout.align() <= 8);
+    StringAlloc {
+        class: inline_class_indices()[2] as u32,
+        slot: layout.size() as u32,
+        size: (PACED_HEADER_BYTES + obj.size()) as u32,
+        image: words(&img),
+        len_at: (data + off(&obj, len)) as u32,
+        bytes_at: (data + off(&obj, bytes)) as u32,
+        max: bytes.len() as u32,
+    }
+}
+
+/// A digest of everything inline allocation assumes: every shape's image,
+/// the counter and cursor layouts. An AOT object records the compiler's,
+/// and the runtime refuses it when its own differs
+/// ([`crate::native::install_aot`]).
+#[must_use]
+pub fn layout_fingerprint() -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    for n in 1..=ENUM_INLINE_ARITY as u8 {
+        inline_object(InlineShape::Enum { tag: 0x0102_0304, kinds: 0x5a, n }).hash(&mut h);
+    }
+    for n in 1..=INSTANCE_INLINE_FIELDS as u8 {
+        inline_object(InlineShape::Instance { type_id: 0x0607_0809, kinds: 0x5a, n }).hash(&mut h);
+    }
+    let counts = [
+        std::mem::offset_of!(HeapCounts, inline_gate),
+        std::mem::offset_of!(HeapCounts, fin_words),
+        std::mem::offset_of!(HeapCounts, fin_len),
+        std::mem::offset_of!(HeapCounts, alloc_bytes),
+        std::mem::offset_of!(HeapCounts, live_count),
+        std::mem::offset_of!(HeapCounts, header_xor),
+        std::mem::offset_of!(super::super::slab::Bump, next),
+        std::mem::offset_of!(super::super::slab::Bump, end),
+        std::mem::offset_of!(super::super::slab::Bump, free),
+        super::super::slab::FREE_LINK as usize,
+        std::mem::size_of::<super::super::slab::Bump>(),
+    ];
+    counts.hash(&mut h);
+    product_slots().hash(&mut h);
+    super::array_slots().hash(&mut h);
+    // The map table ops' cached string hash read.
+    super::string_slots().hash(&mut h);
+    // The inline string free.
+    string_free().hash(&mut h);
+    string_alloc().hash(&mut h);
+    // The inline share (#2506).
+    (super::HEADER_KIND_OFFSET, super::HEADER_FLAGS_OFFSET, super::FLAG_SHARED, super::KIND_ARRAY).hash(&mut h);
+    // The pin the inline share tests, and `CowPin` / `CowUnpin` write.
+    (super::FLAG_PINNED, super::HEADER_COUNT_OFFSET).hash(&mut h);
+    // The inline count ops (reference-count plan step 6).
+    (super::HEAP_ALLOC_LOCK_OFFSET, super::COUNT_IMMORTAL, super::HEAP_SLAB_LO_OFFSET, super::HEAP_SLAB_HI_OFFSET).hash(&mut h);
+    (super::HEAP_UNIT_ENUMS_OFFSET, super::UNIT_ENUM_FAST).hash(&mut h);
+    // Counts in place for objects born in the open steal epoch (#2927).
+    (super::HEAP_EPOCH_GEN_OFFSET, super::HEADER_EPOCH_OFFSET).hash(&mut h);
+    // The store view protocol: plain views only, no card table.
+    (super::VIEW_PLAIN, "no cards").hash(&mut h);
+    h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A short string written from [`string_alloc`]'s image, its length
+    /// byte and its bytes reads back as the string the runtime makes, and
+    /// is charged what the runtime charges for one.
+    #[test]
+    fn string_image_builds_the_string_the_runtime_makes() {
+        let sa = string_alloc();
+        let mut slot = sa.image.clone();
+        let bytes: &mut [u8] = bytemuck_bytes(&mut slot);
+        let text = b"word42";
+        bytes[sa.len_at as usize] = text.len() as u8;
+        bytes[sa.bytes_at as usize..][..text.len()].copy_from_slice(text);
+        // SAFETY: the slot holds a whole `GcData<ObjString>`.
+        let made = unsafe { &*slot.as_ptr().cast::<GcData<ObjString>>() };
+        assert_eq!(made.as_ref().data.as_str(), "word42");
+        assert!(!made.as_ref().interned());
+        assert_eq!(made.header.generation.get(), GEN_YOUNG);
+        assert_eq!(made.header.kind.get(), KIND_STRING);
+        let real = ObjString::from("word42");
+        assert_eq!(sa.size as usize, PACED_HEADER_BYTES + real.size());
+        assert_eq!(sa.slot as usize, std::mem::size_of::<GcData<ObjString>>());
+        assert_eq!(sa.class as usize, make_inline_classes(&mut Slab::new())[2]);
+        assert_eq!(sa.class, string_free().class);
+    }
+
+    fn bytemuck_bytes(words: &mut [u64]) -> &mut [u8] {
+        // SAFETY: any bytes are valid `u8`s; the length covers the words.
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8) }
+    }
+
+    /// The computed cursors are the ones a new slab's classes get.
+    #[test]
+    fn class_indices_match_a_new_slab() {
+        assert_eq!(inline_class_indices(), make_inline_classes(&mut Slab::new()));
+    }
+
+    /// An inline enum, tuple and instance written from their images read
+    /// back as the objects the runtime would have made.
+    #[test]
+    fn images_build_the_objects_the_runtime_makes() {
+        let mut heap = Heap::default();
+        heap.set_nursery(true);
+        let (counts, bumps) = heap.inline_alloc_ptrs();
+        assert_eq!(unsafe { (*counts).inline_gate }, u64::from(!cfg!(feature = "rc-check")));
+        let words = [Value::from(7_i64), Value::from(8_i64), Value::from(9_i64)];
+        let mut alloc = |shape: InlineShape, payload: &[Value]| -> u64 {
+            let o = inline_object(shape).expect("inline shape");
+            // The slow path first, so the class's cursor has a chunk.
+            let _ = heap.alloc(ObjEnum::new(1, EnumPayload::one(words[0])), Object::Enum);
+            let _ = heap.alloc(ObjInstance::with_type_id_and_fields(3, 1), Object::Instance);
+            let b = unsafe { &mut *bumps.add(o.class as usize) };
+            assert!(b.next + u64::from(o.slot) <= b.end);
+            let at = b.next;
+            b.next += u64::from(o.slot);
+            let c = unsafe { &mut *counts };
+            c.alloc_bytes += o.size as usize;
+            c.live_count += 1;
+            let p = at as *mut u64;
+            for (i, w) in o.image.iter().enumerate() {
+                unsafe { p.add(i).write(*w) };
+            }
+            for (i, v) in payload.iter().enumerate() {
+                unsafe { p.add(o.words_at as usize + i).write(v.bits()) };
+            }
+            at
+        };
+        let e = alloc(InlineShape::Enum { tag: 4, kinds: 0, n: 2 }, &words[1..]);
+        let tuple = InlineShape::Enum { tag: common::PRODUCT_TAG, kinds: 0, n: 3 };
+        let t = alloc(tuple, &words);
+        let i = alloc(InlineShape::Instance { type_id: 5, kinds: 0, n: 2 }, &[]);
+        let Some(Object::Enum(gc)) = heap.find_object_by_addr(e) else { panic!("not an enum") };
+        assert_eq!(gc.as_ref().tag, 4);
+        assert_eq!(gc.as_ref().payload.as_slice(), &words[1..]);
+        assert_eq!(Object::Enum(gc).generation() & GEN_YOUNG, GEN_YOUNG);
+        let Some(gc) = heap.find_object_by_addr(t).and_then(Object::as_tuple) else { panic!("not a tuple") };
+        assert_eq!(gc.as_ref().elements(), &words);
+        let Some(Object::Instance(gc)) = heap.find_object_by_addr(i) else { panic!("not an instance") };
+        assert_eq!(gc.as_ref().type_id, 5);
+        assert_eq!(gc.as_ref().slot(1), Some(Value::from(0_i64)));
+        assert_eq!(gc.as_ref().slot(2), None);
+        for (a, s) in [(e, InlineShape::Enum { tag: 4, kinds: 0, n: 2 }), (t, tuple), (i, InlineShape::Instance { type_id: 5, kinds: 0, n: 2 })] {
+            assert_eq!(heap.find_object_by_addr(a).map(|o| o.size()), inline_object(s).map(|o| o.size as usize));
+        }
+    }
+
+    #[test]
+    fn wide_payloads_and_untyped_instances_stay_on_the_helper() {
+        assert!(inline_object(InlineShape::Enum { tag: 0, kinds: 0, n: 5 }).is_none());
+        assert!(inline_object(InlineShape::Enum { tag: common::PRODUCT_TAG, kinds: 0, n: 0 }).is_none());
+        assert!(inline_object(InlineShape::Instance { type_id: 0, kinds: 0, n: 1 }).is_none());
+        assert!(inline_object(InlineShape::Instance { type_id: 1, kinds: 0, n: 5 }).is_none());
+    }
+
+    /// Slots read and written at [`product_slots`]' offsets are the
+    /// instance's own, inline and spilled.
+    #[test]
+    fn product_slots_find_the_fields() {
+        let l = product_slots();
+        let mut heap = Heap::default();
+        for n in [2usize, INSTANCE_INLINE_FIELDS + 2] {
+            let mut obj = ObjInstance::with_type_id_and_fields(9, n);
+            for i in 0..n {
+                obj.set_slot(i, Value::from(100 + i as i64));
+            }
+            let addr = heap.alloc(obj, Object::Instance).1.as_ptr() as u64;
+            let byte = |at: u32| unsafe { *((addr + u64::from(at)) as *const u8) };
+            let word = |at: u32| unsafe { *((addr + u64::from(at)) as *const u64) };
+            assert_eq!(byte(l.kind_at), l.kind);
+            let (ptr, len) = if byte(l.storage_at) == l.inline_tag {
+                (addr + u64::from(l.inline_slots_at), u64::from(byte(l.inline_len_at)))
+            } else {
+                assert_eq!(byte(l.storage_at), l.spill_tag);
+                (word(l.spill_ptr_at), word(l.spill_len_at))
+            };
+            assert_eq!(len, n as u64);
+            for i in 0..n {
+                assert_eq!(unsafe { *((ptr + 8 * i as u64) as *const i64) }, 100 + i as i64);
+            }
+            unsafe { *((ptr + 8) as *mut i64) = 7 };
+            let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else { panic!("not an instance") };
+            assert_eq!(gc.as_ref().slot(1), Some(Value::from(7_i64)));
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_is_stable_within_a_build() {
+        assert_eq!(layout_fingerprint(), layout_fingerprint());
+    }
+}

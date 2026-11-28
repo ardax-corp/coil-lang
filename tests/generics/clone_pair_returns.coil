@@ -1,0 +1,96 @@
+// A mono clone of a generic function returns a two-word result in its
+// own two words: a bare `T`, an open `(T, T)` and an open `Option<T>` /
+// `Result<T, E>` at a two-word instance, through `?`, a tail call between
+// clones and a function value made at the clone's types.
+use tests::assert;
+use string::format;
+
+readonly class P {
+    pub a: int,
+    pub b: int,
+}
+
+#[inline(never)]
+fn pick<T>(bool c, T a, T b) -> T {
+    if c {
+        return a;
+    }
+    return b;
+}
+
+#[inline(never)]
+fn swap<T>((T, T) p) -> (T, T) {
+    return (p[1], p[0]);
+}
+
+#[inline(never)]
+fn wrap<T>(T x) -> Option<T> {
+    return Some(x);
+}
+
+#[inline(never)]
+fn ok_or<T>(Option<T> o, string e) -> Result<T, string> {
+    return match o {
+        Some(v) => Ok(v),
+        None => Err(e),
+    };
+}
+
+#[inline(never)]
+fn plus_one(Option<int> o) -> Result<int, string> {
+    let v = ok_or(o, "none")?;
+    return Ok(v + 1);
+}
+
+#[inline(never)]
+fn pick_late<T>(int n, T a, T b) -> T {
+    if n == 0 {
+        return pick(false, a, b);
+    }
+    return pick_late(n - 1, a, b);
+}
+
+fn run(fn(bool, (int, float), (int, float)) -> (int, float) f) -> (int, float) {
+    return f(true, (1, 0.5), (2, 1.5));
+}
+
+test("a bare type parameter result at a two-word type") {
+    let o: Option<int> = pick(true, Some(1), None);
+    assert!(o == Some(1));
+    let n: Option<int> = pick(false, Some(1), None);
+    assert!(n == None);
+    let t = pick(false, (1, 2.5), (3, 4.5));
+    assert!(t[0] == 3 && t[1] == 4.5);
+    let p = pick(true, new P(1, 2), new P(3, 4));
+    assert!(p.a == 1 && p.b == 2);
+    let r: Result<int, string> = pick(false, Ok(1), Err("x"));
+    assert!(format("%v", r) == "Err(x)");
+}
+
+test("an open tuple and an open option result at a two-word instance") {
+    let s = swap((1, 2));
+    assert!(s[0] == 2 && s[1] == 1);
+    let w = wrap(5);
+    assert!(w == Some(5));
+    assert!(format("%v", wrap(2.5)) == "Some(2.5)");
+    assert!(format("%v", ok_or(Some(3), "e")) == "Ok(3)");
+    let none: Option<int> = None;
+    assert!(format("%v", ok_or(none, "e")) == "Err(e)");
+}
+
+test("through `?`, a tail call between clones and a function value") {
+    assert!(format("%v", plus_one(Some(1))) == "Ok(2)");
+    assert!(format("%v", plus_one(None)) == "Err(none)");
+    let o: Option<int> = pick_late(3, Some(1), Some(2));
+    assert!(o == Some(2));
+    let q = run(pick);
+    assert!(q[0] == 1 && q[1] == 0.5);
+    let sum = 0;
+    let i = 0;
+    while i < 100 {
+        let x: Option<int> = pick(i % 2 == 0, Some(i), None);
+        sum += x ?? 0;
+        i += 1;
+    }
+    assert!(sum == 2450);
+}

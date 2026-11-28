@@ -51,36 +51,65 @@ impl AggregateOp {
     }
 }
 
+/// The container an element-wise operator runs over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateShape {
+    Tuple(usize),
+    /// `None` is the dynamic `[T]` / `Vec<T>` (broadcast and negation only:
+    /// never zip).
+    Array(Option<usize>),
+}
+
+impl AggregateShape {
+    /// The element count, when it is static.
+    pub fn static_len(self) -> Option<usize> {
+        match self {
+            Self::Tuple(n) => Some(n),
+            Self::Array(n) => n,
+        }
+    }
+
+    pub fn is_tuple(self) -> bool {
+        matches!(self, Self::Tuple(_))
+    }
+
+    pub fn array(length: ArrayLength) -> Self {
+        Self::Array(match length {
+            ArrayLength::Static(n) => Some(n),
+            ArrayLength::Dynamic => None,
+        })
+    }
+}
+
+/// How the operands of an element-wise operator combine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregateMode {
+    /// Two aggregates of the same static shape, element by element.
+    Zip,
+    /// One aggregate and a scalar on the given side.
+    Broadcast(ScalarSide),
+    /// Unary `-`.
+    Neg,
+}
+
+impl AggregateMode {
+    pub fn scalar_on(self) -> Option<ScalarSide> {
+        match self {
+            Self::Broadcast(side) => Some(side),
+            Self::Zip | Self::Neg => None,
+        }
+    }
+}
+
 /// Codegen recipe for aggregate arithmetic at a node.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AggregateArithKind {
-    ZipTuple {
-        arity: usize,
-        elem_is_float: bool,
-    },
-    ZipArray {
-        length: usize,
-        elem_is_float: bool,
-    },
-    BroadcastTuple {
-        arity: usize,
-        scalar_on: ScalarSide,
-        elem_is_float: bool,
-    },
-    /// `length: None` means dynamic `[T]` (broadcast only — never zip).
-    BroadcastArray {
-        length: Option<usize>,
-        scalar_on: ScalarSide,
-        elem_is_float: bool,
-    },
-    NegTuple {
-        arity: usize,
-        elem_is_float: bool,
-    },
-    NegArray {
-        length: Option<usize>,
-        elem_is_float: bool,
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AggregateArithKind {
+    pub shape: AggregateShape,
+    pub mode: AggregateMode,
+    pub elem_is_float: bool,
+    /// Elements are `byte`: `+ - * **` and negation wrap modulo 256, as
+    /// the scalar operators do.
+    pub elem_is_byte: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,16 +122,7 @@ pub struct AggregateArithInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArithShape {
     Scalar(Ty),
-    Tuple { elem: Ty, arity: usize },
-    Array { elem: Ty, length: ArrayLength },
-}
-
-/// How two shapes combine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ZipMode {
-    Zip,
-    BroadcastLeft,
-    BroadcastRight,
+    Aggregate { elem: Ty, shape: AggregateShape },
 }
 
 pub fn is_numeric_elem(ty: &Ty) -> bool {
@@ -116,29 +136,33 @@ pub fn elem_is_float(ty: &Ty) -> bool {
     matches!(ty, Ty::Con(n) if n == "float")
 }
 
+pub fn elem_is_byte(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(n) if n == "byte")
+}
+
 /// Classify a pruned type as an arithmetic shape.
 ///
 /// Homogeneous tuples only; heterogeneous tuples return `None` from the
 /// caller after a separate homogeneity check.
 pub fn classify_arith(ty: &Ty) -> ArithShape {
     match ty {
-        Ty::Tuple(elems) if !elems.is_empty() => {
-            // Caller must verify homogeneity; use first element as elem.
-            ArithShape::Tuple {
-                elem: elems[0].clone(),
-                arity: elems.len(),
-            }
-        }
-        Ty::Array { element, length } => ArithShape::Array {
+        // Caller must verify homogeneity; use first element as elem.
+        Ty::Tuple(elems) if !elems.is_empty() => ArithShape::Aggregate {
+            elem: elems[0].clone(),
+            shape: AggregateShape::Tuple(elems.len()),
+        },
+        Ty::Array { element, length } => ArithShape::Aggregate {
             elem: element.as_ref().clone(),
-            length: *length,
+            shape: AggregateShape::array(*length),
         },
         // `Vec<T>` is the dynamic-length array (#890).
-        other if vec_element_ty(other).is_some() => ArithShape::Array {
-            elem: vec_element_ty(other).cloned().expect("vec element"),
-            length: ArrayLength::Dynamic,
+        other => match vec_element_ty(other) {
+            Some(elem) => ArithShape::Aggregate {
+                elem: elem.clone(),
+                shape: AggregateShape::Array(None),
+            },
+            None => ArithShape::Scalar(other.clone()),
         },
-        other => ArithShape::Scalar(other.clone()),
     }
 }
 
@@ -175,18 +199,14 @@ fn vec_as_dynamic_array(ty: &Ty) -> Ty {
     }
 }
 
-/// Result type for a successful shape resolution.
-pub fn result_ty_for(shape: &ArithShape) -> Ty {
+/// The type of an element-wise result: `shape` over `elem`.
+pub fn result_ty_for(shape: AggregateShape, elem: Ty) -> Ty {
     match shape {
-        ArithShape::Scalar(t) => t.clone(),
-        ArithShape::Tuple { elem, arity } => Ty::Tuple(vec![elem.clone(); *arity]),
-        ArithShape::Array {
-            elem,
-            length: ArrayLength::Dynamic,
-        } => vec_app_ty(elem.clone()),
-        ArithShape::Array { elem, length } => Ty::Array {
-            element: Box::new(elem.clone()),
-            length: *length,
+        AggregateShape::Tuple(arity) => Ty::Tuple(vec![elem; arity]),
+        AggregateShape::Array(None) => vec_app_ty(elem),
+        AggregateShape::Array(Some(n)) => Ty::Array {
+            element: Box::new(elem),
+            length: ArrayLength::Static(n),
         },
     }
 }
@@ -199,11 +219,14 @@ pub enum LinearAlgebraKind {
         length: usize,
         left_is_tuple: bool,
         elem_is_float: bool,
+        /// Elements are `byte`: the result wraps modulo 256.
+        elem_is_byte: bool,
     },
     /// Length-3 vectors → length-3 vector (same container kind as left).
     Cross {
         left_is_tuple: bool,
         elem_is_float: bool,
+        elem_is_byte: bool,
     },
     /// Nested static matrices (row-major): `(m×k) × (k×n) → (m×n)`.
     MatMul {
@@ -215,6 +238,7 @@ pub enum LinearAlgebraKind {
         /// Each row is a tuple (vs array).
         row_is_tuple: bool,
         elem_is_float: bool,
+        elem_is_byte: bool,
     },
     /// Element-wise op on equal-shaped `Matrix` values.
     ///
@@ -227,7 +251,7 @@ pub enum LinearAlgebraKind {
         outer_is_tuple: bool,
         row_is_tuple: bool,
         elem_is_float: bool,
-        /// Cells are `byte`. Bitwise results are masked to `0..=255`.
+        /// Cells are `byte`: `+`, `-` and bitwise results wrap to `0..=255`.
         elem_is_byte: bool,
         scalar_on: Option<ScalarSide>,
     },
@@ -416,6 +440,15 @@ pub fn is_matrix_ty(ty: &Ty) -> bool {
     )
 }
 
+/// `ty` with every `Matrix<Data>` in it replaced by its `Data`: the type
+/// of the value at run time.
+pub fn erase_matrix_ty(ty: &Ty) -> Ty {
+    match unwrap_matrix_ty(ty) {
+        Some(data) => erase_matrix_ty(data),
+        None => ty.map_children(erase_matrix_ty),
+    }
+}
+
 /// Peel `Matrix<Data>` → `Data`.
 pub fn unwrap_matrix_ty(ty: &Ty) -> Option<&Ty> {
     match ty {
@@ -467,117 +500,48 @@ pub fn matrix_of_elem(
     wrap_matrix_ty(data)
 }
 
+/// The shape and element type of a homogeneous tuple or an array.
+fn aggregate_shape(ty: &Ty) -> Option<(AggregateShape, Ty)> {
+    let elem = homogeneous_aggregate_elem(ty)?;
+    match ty {
+        Ty::Tuple(elems) => Some((AggregateShape::Tuple(elems.len()), elem)),
+        Ty::Array { length, .. } => Some((AggregateShape::array(*length), elem)),
+        _ => None,
+    }
+}
+
 /// The element-wise shape of `lty op rty` (`-lty` with no `rty`) from the
 /// operand types alone, for a body the checker recorded none for (a mono
 /// clone of a generic body).
 pub fn recover(lty: &Ty, rty: Option<&Ty>, op: AggregateOp) -> Option<AggregateArithInfo> {
+    use AggregateMode::{Broadcast, Neg, Zip};
+    use AggregateShape::{Array, Tuple};
     let lty = &vec_as_dynamic_array(lty);
     let rty = rty.map(vec_as_dynamic_array);
-    let rty = rty.as_ref();
-    match (op, rty) {
+    let left = aggregate_shape(lty);
+    let (shape, mode, elem) = match (op, &rty) {
         (AggregateOp::Neg, None) => {
-            let elem = homogeneous_aggregate_elem(lty)?;
-            let float = elem_is_float(&elem);
-            match lty {
-                Ty::Tuple(elems) => Some(AggregateArithInfo {
-                    kind: AggregateArithKind::NegTuple {
-                        arity: elems.len(),
-                        elem_is_float: float,
-                    },
-                    op,
-                }),
-                Ty::Array { length, .. } => Some(AggregateArithInfo {
-                    kind: AggregateArithKind::NegArray {
-                        length: match length {
-                            ArrayLength::Static(n) => Some(*n),
-                            ArrayLength::Dynamic => None,
-                        },
-                        elem_is_float: float,
-                    },
-                    op,
-                }),
-                _ => None,
-            }
+            let (shape, elem) = left?;
+            (shape, Neg, elem)
         }
-        (_, Some(rty)) => match (lty, rty) {
-            (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() && !a.is_empty() => {
-                let le = homogeneous_aggregate_elem(lty)?;
-                let re = homogeneous_aggregate_elem(rty)?;
-                if le != re {
-                    return None;
-                }
-                Some(AggregateArithInfo {
-                    kind: AggregateArithKind::ZipTuple {
-                        arity: a.len(),
-                        elem_is_float: elem_is_float(&le),
-                    },
-                    op,
-                })
-            }
-            (
-                Ty::Array {
-                    element,
-                    length: ArrayLength::Static(n),
-                },
-                Ty::Array {
-                    length: ArrayLength::Static(m),
-                    ..
-                },
-            ) if n == m => Some(AggregateArithInfo {
-                kind: AggregateArithKind::ZipArray {
-                    length: *n,
-                    elem_is_float: elem_is_float(element),
-                },
-                op,
-            }),
-            (Ty::Tuple(a), r) if !a.is_empty() && is_numeric_elem(r) => {
-                let elem = homogeneous_aggregate_elem(lty)?;
-                Some(AggregateArithInfo {
-                    kind: AggregateArithKind::BroadcastTuple {
-                        arity: a.len(),
-                        scalar_on: ScalarSide::Right,
-                        elem_is_float: elem_is_float(&elem),
-                    },
-                    op,
-                })
-            }
-            (l, Ty::Tuple(b)) if !b.is_empty() && is_numeric_elem(l) => {
-                let elem = homogeneous_aggregate_elem(rty)?;
-                Some(AggregateArithInfo {
-                    kind: AggregateArithKind::BroadcastTuple {
-                        arity: b.len(),
-                        scalar_on: ScalarSide::Left,
-                        elem_is_float: elem_is_float(&elem),
-                    },
-                    op,
-                })
-            }
-            (Ty::Array { element, length }, r) if is_numeric_elem(r) => Some(AggregateArithInfo {
-                kind: AggregateArithKind::BroadcastArray {
-                    length: match length {
-                        ArrayLength::Static(n) => Some(*n),
-                        ArrayLength::Dynamic => None,
-                    },
-                    scalar_on: ScalarSide::Right,
-                    elem_is_float: elem_is_float(element),
-                },
-                op,
-            }),
-            (l, Ty::Array { element, length }) if is_numeric_elem(l) => Some(AggregateArithInfo {
-                kind: AggregateArithKind::BroadcastArray {
-                    length: match length {
-                        ArrayLength::Static(n) => Some(*n),
-                        ArrayLength::Dynamic => None,
-                    },
-                    scalar_on: ScalarSide::Left,
-                    elem_is_float: elem_is_float(element),
-                },
-                op,
-            }),
-            _ => None,
+        (_, Some(rty)) => match (left, aggregate_shape(rty)) {
+            (Some((Tuple(a), le)), Some((Tuple(b), re))) if a == b && le == re => (Tuple(a), Zip, le),
+            (Some((Array(Some(n)), le)), Some((Array(Some(m)), _))) if n == m => (Array(Some(n)), Zip, le),
+            (Some((shape, elem)), None) if is_numeric_elem(rty) => (shape, Broadcast(ScalarSide::Right), elem),
+            (None, Some((shape, elem))) if is_numeric_elem(lty) => (shape, Broadcast(ScalarSide::Left), elem),
+            _ => return None,
         },
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some(AggregateArithInfo {
+        kind: AggregateArithKind {
+            shape,
+            mode,
+            elem_is_float: elem_is_float(&elem),
+            elem_is_byte: elem_is_byte(&elem),
+        },
+        op,
+    })
 }
 
 #[cfg(test)]
@@ -588,12 +552,18 @@ mod tests {
     #[test]
     fn classify_tuple_and_array() {
         let t = classify_arith(&Ty::Tuple(vec![int(), int()]));
-        assert!(matches!(t, ArithShape::Tuple { arity: 2, .. }));
+        assert!(matches!(
+            t,
+            ArithShape::Aggregate {
+                shape: AggregateShape::Tuple(2),
+                ..
+            }
+        ));
         let a = classify_arith(&array_fixed(int(), 3));
         assert!(matches!(
             a,
-            ArithShape::Array {
-                length: ArrayLength::Static(3),
+            ArithShape::Aggregate {
+                shape: AggregateShape::Array(Some(3)),
                 ..
             }
         ));

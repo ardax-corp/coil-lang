@@ -1,0 +1,115 @@
+// A `()` a generic body gets from a function value is the word a direct
+// call stores for one, the empty tuple object (#2498): through a function,
+// a lambda and a closure, stored in an `Option`, a `Vec`, a tuple and a field,
+// and from a function held in a `Vec` or a tuple.
+//
+// unit_from_function_value_shared.coil runs the same with no mono clones.
+use tests::assert;
+
+class Count {
+    pub n: int,
+}
+
+impl Count {
+    pub fn bump() -> () {
+        self.n = self.n + 1;
+    }
+}
+
+class Holder<T> {
+    pub item: T,
+}
+
+fn call<T>(fn() -> T f) -> Option<T> {
+    return Some(f());
+}
+
+fn call1<A, T>(fn(A) -> T f, A a) -> Option<T> {
+    return Some(f(a));
+}
+
+fn shown<T: Show>(fn() -> T f) -> Option<T> {
+    return Some(f());
+}
+
+fn keep<T>(fn() -> T f, int n) -> Vec<T> {
+    let v: Vec<T> = [];
+    let i = 0;
+    while i < n {
+        v.push(f());
+        i = i + 1;
+    }
+    return v;
+}
+
+fn pair<T>(fn() -> T f) -> (T, int) {
+    return (f(), 1);
+}
+
+fn held<T>(fn() -> T f) -> Option<T> {
+    let h = new Holder(f());
+    return Some(h.item);
+}
+
+fn first_of<T>(Vec<fn() -> T> fs) -> Option<T> {
+    return Some(fs[0]());
+}
+
+fn first_of_pair<T>((fn() -> T, int) p) -> Option<T> {
+    let (f, _) = p;
+    return Some(f());
+}
+
+fn maybe<T>(fn() -> Option<T> f) -> Option<T> {
+    return f();
+}
+
+fn unit() -> () {}
+
+fn ignore(int x) -> () {}
+
+fn some_name() -> Option<string> {
+    return Some("n");
+}
+
+fn units(int n) -> Vec<()> {
+    let v: Vec<()> = [];
+    let i = 0;
+    while i < n {
+        v.push(());
+        i = i + 1;
+    }
+    return v;
+}
+
+test("a function value's unit result is the unit a direct call stores") {
+    assert!(call(unit) == Some(()));
+    assert!(call(unit) == Some(unit()));
+    assert!(call1(ignore, 2) == Some(()));
+    assert!(shown(unit) == Some(()));
+}
+
+test("a lambda's and a closure's unit result") {
+    let c = new Count(0);
+    assert!(call(fn () {}) == Some(()));
+    assert!(call(fn () use (mut c) => c.bump()) == Some(()));
+    assert!(c.n == 1);
+    assert!(call1(fn (int x) {}, 3) == Some(()));
+}
+
+test("the unit result stored in a Vec, a tuple and a field") {
+    assert!(keep(unit, 2) == units(2));
+    assert!(keep(fn () {}, 3) == units(3));
+    assert!(pair(unit) == ((), 1));
+    assert!(held(unit) == Some(()));
+}
+
+test("a function held in a Vec or a tuple") {
+    let fs: Vec<fn() -> ()> = [unit, unit];
+    assert!(first_of(fs) == Some(()));
+    assert!(first_of_pair((unit, 2)) == Some(()));
+}
+
+test("a function of no arguments whose result is a niche Option") {
+    assert!(maybe(some_name) == Some("n"));
+}

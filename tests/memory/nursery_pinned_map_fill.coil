@@ -1,0 +1,63 @@
+// A map's values sit in a vector a shared generic body made, whose words
+// are of unknown kind: a minor collection pins every young value and
+// holds its chunk until a major cycle. A map that grows across many
+// collections keeps every value and what it holds (#2350).
+use tests::assert;
+use gc::collect;
+use collections::map::HashMap;
+
+class Node {
+    pub v: int,
+    pub kid: Option<Node>,
+}
+
+fn kid_v(Node n) -> int {
+    match n.kid {
+        Option::Some(k) => {
+            return k.v;
+        },
+        Option::None => {
+            return -1;
+        },
+    }
+}
+
+test("a growing map of class values keeps every value") {
+    let n = 3000;
+    let m: HashMap<int, Node> = HashMap::new();
+    let i = 0;
+    while i < n {
+        m.insert(i, new Node(i, Option::Some(new Node(i * 2, Option::None))));
+        if i % 750 == 0 {
+            collect();
+        }
+        i += 1;
+    }
+    // Overwrite every third value: the old ones die, the new ones are young.
+    i = 0;
+    while i < n {
+        m.insert(i, new Node(i + n, Option::None));
+        i += 3;
+    }
+    collect();
+    assert!(m.len() == n);
+    let sum = 0;
+    let kids = 0;
+    i = 0;
+    while i < n {
+        if let Option::Some(x) = m.get(i) {
+            if i % 3 == 0 {
+                assert!(x.v == i + n);
+                assert!(kid_v(x) == -1);
+            } else {
+                assert!(x.v == i);
+                assert!(kid_v(x) == i * 2);
+                kids += 1;
+            }
+            sum += x.v;
+        }
+        i += 1;
+    }
+    assert!(kids == n - n / 3);
+    assert!(sum == n * (n - 1) / 2 + (n / 3) * n);
+}

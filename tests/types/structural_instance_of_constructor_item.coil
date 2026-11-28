@@ -1,0 +1,49 @@
+// A tuple literal whose item is an `Option` constructor's type
+// (`(Some(3), 1)`) and the same tuple at its annotated type
+// (`(Option<int>, int)`) in one module are one structural instance
+// (coil-lang#2607): a later `Show`, `Eq` or `Hash` goal of the shape sees
+// it once, not "Ambiguous instance". Also an array and a nested tuple of
+// such items, `Result`'s constructors and a user enum's case.
+use tests::assert;
+
+#[derive(Eq, Show)]
+enum Suit {
+    Clubs,
+    Hearts,
+}
+
+test("Show, Eq and Hash of a tuple literal of an Option and its annotated type") {
+    let i: (Option<int>, int) = (Some(3), 1);
+    assert!(i.show() == "(Some(3), 1)");
+    assert!((Some(3), 1).show() == "(Some(3), 1)");
+    assert!(Eq::eq(i, i));
+    assert!((Some(3), 1) == i);
+    assert!((Some(4), 1) != i);
+    assert!((Some(3), 1).hash() == i.hash());
+    assert!((Some(4), 1).hash() != i.hash());
+}
+
+test("an array and a nested tuple of constructor items") {
+    let a: [Option<int>; 2] = [Some(1), Some(2)];
+    assert!([Some(1), Some(2)].show() == a.show());
+    assert!([Some(1), Some(2)] == a);
+    let n: ((Option<string>, int), int) = ((Some("x"), 1), 2);
+    assert!(((Some("x"), 1), 2) == n);
+    assert!(((Some("x"), 1), 2).show() == n.show());
+}
+
+test("Result constructors beside the annotated type") {
+    let r: (Result<int, string>, int) = (Ok(2), 0);
+    let e: (Result<int, string>, int) = (Err("no"), 0);
+    assert!(r.show() == "(Ok(2), 0)");
+    assert!(e != r);
+    let ok: Result<int, string> = Ok(2);
+    assert!((ok, 0) == r);
+}
+
+test("a user enum's case beside the annotated type") {
+    let a: (int, Suit) = (1, Suit::Clubs);
+    assert!(a.show() == (1, Suit::Clubs).show());
+    assert!(Eq::eq(a, (1, Suit::Clubs)));
+    assert!((1, Suit::Hearts) != a);
+}

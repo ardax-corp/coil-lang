@@ -1,0 +1,190 @@
+// A derived `Eq`, `Hash` or `Show` reads a `Matrix` field or payload as its
+// data (coil-lang#2457): the structural `==` of a `readonly class` or a
+// `#[derive(Eq)]` compares the two matrices and is a `bool`, where `a.m ==
+// b.m` written out is the element-wise comparison. The same through an
+// alias, in a generic class, inside an `Option` or a tuple, and in an enum
+// payload.
+use tests::assert;
+use string::format;
+
+readonly class Holder {
+    pub m: Matrix<[[int; 2]; 2]>,
+    pub k: int,
+}
+
+#[derive(Eq, Hash, Show)]
+class Cell {
+    pub m: Matrix<[[int; 2]; 2]>,
+    pub k: int,
+}
+
+#[derive(Eq, Hash, Show)]
+class Rows {
+    pub m: Matrix<((float, float), (float, float))>,
+}
+
+type Grid = Matrix<[[int; 2]; 2]>;
+
+#[derive(Eq, Hash, Show)]
+class Aliased {
+    pub g: Grid,
+    pub name: string,
+}
+
+#[derive(Eq)]
+class Wrap<T> {
+    pub m: Matrix<[[T; 2]; 2]>,
+    pub k: T,
+}
+
+#[derive(Eq, Hash, Show)]
+class Nested {
+    pub some: Option<Matrix<[[int; 2]; 2]>>,
+    pub pair: (Matrix<[[int; 2]; 2]>, int),
+}
+
+#[derive(Eq, Hash, Show)]
+enum Shape {
+    Grid(Matrix<[[int; 2]; 2]>),
+    Scaled(Matrix<[[int; 2]; 2]>, int),
+    Named { m: Matrix<[[int; 2]; 2]>, k: int },
+    Empty,
+}
+
+// The same fields without the wrapper.
+#[derive(Eq, Hash, Show)]
+class Plain {
+    pub m: [[int; 2]; 2],
+    pub k: int,
+}
+
+fn grid(int a, int b, int c, int d) -> Matrix<[[int; 2]; 2]> {
+    return matrix([[a, b], [c, d]]);
+}
+
+fn same<T: Eq>(T a, T b) -> bool {
+    return a == b;
+}
+
+fn keep(Holder h) -> Holder {
+    return h;
+}
+
+test("a readonly class compares its matrix field") {
+    let h = new Holder(matrix([[1, 2], [3, 4]]), 5);
+    let g = new Holder(matrix([[1, 2], [3, 4]]), 5);
+    let other = new Holder(matrix([[1, 2], [3, 9]]), 5);
+    let key = new Holder(matrix([[1, 2], [3, 4]]), 6);
+    assert!(h.m[1][1] == 4 && h.k == 5);
+    assert!(h == g && !(h != g));
+    assert!(h != other && !(h == other));
+    assert!(h != key);
+    // Built at run time, and across a call.
+    let n = 4;
+    let made = keep(new Holder(grid(1, 2, 3, n), n + 1));
+    assert!(made == h && made != other);
+    assert!(same(h, g) && !same(h, other));
+}
+
+test("derive(Eq) on a class, over arrays and tuples") {
+    let a = new Cell(grid(1, 2, 3, 4), 7);
+    let b = new Cell(grid(1, 2, 3, 4), 7);
+    let c = new Cell(grid(0, 2, 3, 4), 7);
+    assert!(a == b && a != c && Eq::eq(a, b) && !a.eq(c));
+    let r = new Rows(matrix(((1.0, 2.0), (3.0, 4.0))));
+    let s = new Rows(matrix(((1.0, 2.0), (3.0, 4.0))));
+    let t = new Rows(matrix(((1.0, 2.0), (3.0, 4.5))));
+    assert!(r == s && r != t);
+    let all: Vec<Cell> = [a, c];
+    assert!(all[0] == b && all[1] != b);
+}
+
+test("an alias, a generic class and nested fields") {
+    let a = new Aliased(grid(1, 2, 3, 4), "a");
+    let b = new Aliased(grid(1, 2, 3, 4), "a");
+    let c = new Aliased(grid(1, 2, 3, 5), "a");
+    assert!(a == b && a != c);
+    let w = new Wrap(matrix([[1, 2], [3, 4]]), 1);
+    let x = new Wrap(matrix([[1, 2], [3, 4]]), 1);
+    let y = new Wrap(matrix([[1, 2], [4, 4]]), 1);
+    assert!(w == x && w != y);
+    let f = new Wrap(matrix([[1.5, 2.5], [3.5, 4.5]]), 0.5);
+    let g = new Wrap(matrix([[1.5, 2.5], [3.5, 4.5]]), 0.5);
+    assert!(f == g);
+    let n = new Nested(Some(grid(1, 2, 3, 4)), (grid(5, 6, 7, 8), 9));
+    let m = new Nested(Some(grid(1, 2, 3, 4)), (grid(5, 6, 7, 8), 9));
+    let o = new Nested(None, (grid(5, 6, 7, 8), 9));
+    let p = new Nested(Some(grid(1, 2, 3, 4)), (grid(5, 6, 7, 0), 9));
+    assert!(n == m && n != o && n != p);
+}
+
+test("derive(Eq) on an enum's matrix payloads") {
+    let a = Shape::Grid(grid(1, 2, 3, 4));
+    let b = Shape::Grid(grid(1, 2, 3, 4));
+    let c = Shape::Grid(grid(1, 2, 3, 5));
+    assert!(a == b && a != c && a != Shape::Empty);
+    let s = Shape::Scaled(grid(1, 2, 3, 4), 2);
+    assert!(s == Shape::Scaled(grid(1, 2, 3, 4), 2));
+    assert!(
+        s != Shape::Scaled(grid(1, 2, 3, 4), 3) && s != Shape::Scaled(grid(9, 2, 3, 4), 2) && s != a,
+    );
+    let n = Shape::Named { m: grid(1, 2, 3, 4), k: 1 };
+    assert!(
+        n == Shape::Named { m: grid(1, 2, 3, 4), k: 1 } &&
+        n != Shape::Named { m: grid(1, 2, 3, 0), k: 1 },
+    );
+}
+
+test("derive(Hash) hashes the matrix as its data") {
+    let a = new Cell(grid(1, 2, 3, 4), 7);
+    let b = new Cell(grid(1, 2, 3, 4), 7);
+    let c = new Cell(grid(1, 2, 3, 5), 7);
+    assert!(a.hash() == b.hash() && a.hash() != c.hash());
+    // As the class with the plain array field does.
+    let p = new Plain([[1, 2], [3, 4]], 7);
+    assert!(a.hash() == p.hash());
+    let x = new Aliased(grid(1, 2, 3, 4), "a");
+    let y = new Aliased(grid(1, 2, 3, 4), "a");
+    assert!(x.hash() == y.hash());
+    let r = new Rows(matrix(((1.0, 2.0), (3.0, 4.0))));
+    let s = new Rows(matrix(((1.0, 2.0), (3.0, 4.0))));
+    assert!(r.hash() == s.hash());
+    assert!(Shape::Grid(grid(1, 2, 3, 4)).hash() == Shape::Grid(grid(1, 2, 3, 4)).hash());
+    assert!(Shape::Grid(grid(1, 2, 3, 4)).hash() != Shape::Scaled(grid(1, 2, 3, 4), 0).hash());
+    let n = new Nested(Some(grid(1, 2, 3, 4)), (grid(5, 6, 7, 8), 9));
+    let m = new Nested(Some(grid(1, 2, 3, 4)), (grid(5, 6, 7, 8), 9));
+    assert!(n.hash() == m.hash());
+}
+
+test("derive(Show) shows the matrix as its data") {
+    let a = new Cell(grid(1, 2, 3, 4), 7);
+    assert!(format("%v", a) == "Cell { m: [[1, 2], [3, 4]], k: 7 }");
+    let p = new Plain([[1, 2], [3, 4]], 7);
+    assert!(format("%v", p) == "Plain { m: [[1, 2], [3, 4]], k: 7 }");
+    let x = new Aliased(grid(1, 2, 3, 4), "a");
+    assert!(format("%v", x) == "Aliased { g: [[1, 2], [3, 4]], name: a }");
+    assert!(
+        format("%v", Shape::Scaled(grid(1, 2, 3, 4), 2)) == "Shape::Scaled([[1, 2], [3, 4]], 2)",
+    );
+    assert!(
+        format("%v", Shape::Named { m: grid(1, 2, 3, 4), k: 1 }) ==
+        "Shape::Named { m: [[1, 2], [3, 4]], k: 1 }",
+    );
+    let n = new Nested(Some(grid(1, 2, 3, 4)), (grid(5, 6, 7, 8), 9));
+    assert!(
+        format("%v", n) == "Nested { some: Some([[1, 2], [3, 4]]), pair: ([[5, 6], [7, 8]], 9) }",
+    );
+}
+
+test("the operators on the field itself are the matrix's") {
+    let h = new Holder(matrix([[1, 2], [3, 4]]), 5);
+    let g = new Holder(matrix([[1, 0], [3, 0]]), 5);
+    // Element-wise: a `Matrix` of `byte`.
+    let cells = h.m == g.m;
+    assert!(cells[0][0] == 1 && cells[0][1] == 0 && cells[1][0] == 1 && cells[1][1] == 0);
+    let p = h.m * h.m;
+    assert!(p[0][0] == 7 && p[1][1] == 22);
+    let a = new Cell(grid(1, 2, 3, 4), 7);
+    let q = a.m * a.m;
+    assert!(q[1][0] == 15);
+}

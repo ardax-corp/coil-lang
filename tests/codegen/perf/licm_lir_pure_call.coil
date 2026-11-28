@@ -3,8 +3,8 @@
 
 // CPU: a loop that adds an invariant pure call and an invariant int
 // division each iteration, in a body that returns an object allocated
-// after the loop (dense refuses that shape, so the body stays on LIR).
-// MIR LICM must move both out on LIR: the call and the division can trap,
+// after the loop (the loop cannot be a dense kernel).
+// MIR LICM must move both out: the call and the division can trap,
 // so they move behind a copy of the loop test.
 use io::stdout;
 use io::sync::write_all;

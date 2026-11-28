@@ -1,0 +1,135 @@
+// `Trait::m(a, b)` on a two-word `Option` / `Result` whose instance has a
+// generic head (`impl Pick for Option<T>`) is the call `a.m(b)` is
+// (coil-lang#2483): both reach the instance's clone where there is one,
+// and its shared entry, the pairs boxed, where there is none.
+// Here past the clone budget, where every call reaches the shared entry.
+// @flags --clone-budget 0
+use tests::assert;
+
+trait Pick<T> {
+    fn pick(T x, T y, bool first) -> T {}
+
+    fn both(T x, T y) -> int {}
+
+    fn id(T x) -> T {}
+}
+
+impl Pick for Option<T> {
+    fn pick(Option<T> x, Option<T> y, bool first) -> Option<T> {
+        if first {
+            return x;
+        }
+        return y;
+    }
+
+    fn both(Option<T> x, Option<T> y) -> int {
+        let n = 0;
+        match x {
+            Some(_) => {
+                n = n + 1;
+            },
+            None => {},
+        }
+        match y {
+            Some(_) => {
+                n = n + 1;
+            },
+            None => {},
+        }
+        return n;
+    }
+
+    fn id(Option<T> o) -> Option<T> {
+        return o;
+    }
+}
+
+impl Pick for Result<T, E> {
+    fn pick(Result<T, E> x, Result<T, E> y, bool first) -> Result<T, E> {
+        if first {
+            return x;
+        }
+        return y;
+    }
+
+    fn both(Result<T, E> x, Result<T, E> y) -> int {
+        let n = 0;
+        match x {
+            Ok(_) => {
+                n = n + 1;
+            },
+            Err(_) => {},
+        }
+        match y {
+            Ok(_) => {
+                n = n + 1;
+            },
+            Err(_) => {},
+        }
+        return n;
+    }
+
+    fn id(Result<T, E> r) -> Result<T, E> {
+        return r;
+    }
+}
+
+fn pick_generic<T>(Option<T> a, Option<T> b, bool first) -> Option<T> {
+    return Pick::pick(a, b, first);
+}
+
+test("an Option<int> through the trait and the method spelling") {
+    let i: Option<int> = Some(4);
+    let n: Option<int> = None;
+    assert!(Pick::pick(n, i, false) == Some(4));
+    assert!(Pick::pick(n, i, true) == None);
+    assert!(Pick::pick(i, n, true) == n.pick(i, false));
+    assert!(Pick::both(i, n) == 1 && Pick::both(i, i) == 2 && Pick::both(n, n) == 0);
+    assert!(Pick::id(i) == Some(4) && Pick::id(n) == None);
+}
+
+test("a pair made at the call") {
+    let i: Option<int> = Some(4);
+    assert!(Pick::pick(Some(1), i, true) == Some(1));
+    assert!(Pick::pick(None, i, false) == Some(4));
+    assert!(Pick::both(Some(1), Some(2)) == 2);
+    assert!(Pick::pick(Pick::pick(i, None, false), i, false) == Some(4));
+}
+
+test("an Option<float> and an Option<bool>") {
+    let f: Option<float> = Some(1.5);
+    let g: Option<float> = None;
+    assert!(Pick::pick(g, f, false) == Some(1.5));
+    let b: Option<bool> = Some(true);
+    assert!(Pick::pick(b, None, true) == Some(true));
+    assert!(Pick::both(f, g) == 1);
+}
+
+test("a Result<int, string>") {
+    let ok: Result<int, string> = Ok(3);
+    let err: Result<int, string> = Err("no");
+    assert!(Pick::pick(err, ok, false) == Ok(3));
+    assert!(Pick::pick(err, ok, true) == Err("no"));
+    assert!(Pick::both(ok, err) == 1);
+    assert!(Pick::id(ok) == ok.id());
+}
+
+test("the result in a loop, a match and a generic body") {
+    let total = 0;
+    let i = 0;
+    while i < 4 {
+        let a: Option<int> = Some(i);
+        match Pick::pick(a, None, i % 2 == 0) {
+            Some(v) => {
+                total = total + v + 10;
+            },
+            None => {
+                total = total + 1;
+            },
+        }
+        i = i + 1;
+    }
+    assert!(total == 24);
+    assert!(pick_generic(Some(7), None, true) == Some(7));
+    assert!(pick_generic(Some("a"), Some("b"), false) == Some("b"));
+}

@@ -1,0 +1,11 @@
+// @expected E0107 — a store through a tuple a `Vec` element holds changes the
+// tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let vs: Vec<(C, int)> = Vec::new();
+    vs.push((new C(1), 0));
+    vs[0][0].x = 6;
+}

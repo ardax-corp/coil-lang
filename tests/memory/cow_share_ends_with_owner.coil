@@ -1,0 +1,56 @@
+// A write copies an object only while a share of it is still held. Once
+// the other place lets go (a vector cleared, a second name out of use), the
+// write is made in place under counts (reference-count plan step 5), and
+// what each name reads stays the same either way.
+use tests::assert;
+
+class P {
+    pub x: int,
+}
+
+test("a write after the vector that shared the object was cleared") {
+    let a = new P(0);
+    let v: Vec<P> = Vec::new();
+    let i = 0;
+    while i < 100 {
+        v.push(a);
+        v.clear();
+        a.x = a.x + 1;
+        i += 1;
+    }
+    assert!(a.x == 100);
+    assert!(v.len() == 0);
+}
+
+test("a write while the vector still holds the share copies") {
+    let a = new P(0);
+    let v: Vec<P> = Vec::new();
+    v.push(a);
+    a.x = 7;
+    assert!(v[0].x == 0);
+    assert!(a.x == 7);
+    v.clear();
+    a.x = 8;
+    assert!(a.x == 8);
+}
+
+test("a share folded into its source still copies on the write") {
+    let t = (new P(1), new P(2));
+    let (a, b) = t;
+    a.x = 5;
+    b.x = 6;
+    let (c, d) = t;
+    assert!(a.x == 5 && b.x == 6 && c.x == 1 && d.x == 2);
+}
+
+test("two mut captures of one object write it in place") {
+    let b = new P(0);
+    let inc = fn () use (mut b) {
+        b.x = b.x + 1;
+        return b.x;
+    };
+    let read = fn () use (mut b) => b.x;
+    inc();
+    inc();
+    assert!(read() == 2);
+}

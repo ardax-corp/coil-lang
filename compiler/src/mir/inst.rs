@@ -148,7 +148,7 @@ impl MirBinOp {
 
     /// `**` is a float or an `i64` op (no narrow int `**`).
     pub fn takes(self, ty: MirTy) -> bool {
-        self != Self::Pow || ty.is_float() || ty == MirTy::I64
+        self != Self::Pow || ty.is_float() || ty.is_int()
     }
 
     pub fn requires_int(self) -> bool {
@@ -183,7 +183,7 @@ impl MirCmpOp {
             (Self::Gt, true) => "fcmp.ogt",
             (Self::Ge, true) => "fcmp.oge",
             (Self::Eq, true) => "fcmp.oeq",
-            (Self::Ne, true) => "fcmp.one",
+            (Self::Ne, true) => "fcmp.une",
         }
     }
 
@@ -201,7 +201,7 @@ impl MirCmpOp {
             "fcmp.ogt" => (Self::Gt, true),
             "fcmp.oge" => (Self::Ge, true),
             "fcmp.oeq" => (Self::Eq, true),
-            "fcmp.one" => (Self::Ne, true),
+            "fcmp.une" => (Self::Ne, true),
             _ => return None,
         })
     }
@@ -311,6 +311,7 @@ impl LaneExpr {
         Self::not(self.clone()) == *other || Self::not(other.clone()) == *self
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn not(a: Self) -> Self {
         match a {
             Self::Const(b) => Self::Const(!b),
@@ -327,7 +328,7 @@ impl LaneExpr {
                 Self::Cmp { op, lhs, rhs }
             }
             // De Morgan when it costs no nodes: `!(a | b)` with compares
-            // on both sides is `!a & !b`, the shape the VM's fast scans
+            // on both sides is `!a & !b`, the shape the runtime's fast scans
             // match (a threaded `&&` chain's mask, #1976).
             Self::And(x, y) => {
                 let size = 1 + x.size() + y.size();
@@ -400,8 +401,12 @@ impl MirCastKind {
     pub fn allows(self, from: MirTy, to: MirTy) -> bool {
         match self {
             Self::IntToFloat => from.is_int() && to.is_float(),
-            Self::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
+            Self::FloatToInt => from == MirTy::F64 && to.is_int(),
+            // An `i64` and a maybe-object word are the same word.
+            Self::Word if from.is_int() && to.is_int() => from != to,
             Self::Word => {
+                // A maybe-object word casts as the `i64` it is.
+                let (from, to) = (from.word_class(), to.word_class());
                 let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
                 (niche(to) && matches!(from, MirTy::I64 | MirTy::HeapRef))
                     || (niche(from) && matches!(to, MirTy::HeapRef | MirTy::I64))
@@ -457,6 +462,9 @@ pub enum MirInst {
     /// edge). I6 types other natives as barriers; impure never hoists.
     HostInvoke {
         dest: ValueId,
+        /// A two-word result (`common::HOST_ENUM_LAYOUT_PAIR`): its tag,
+        /// `dest` its payload word.
+        dest_hi: Option<ValueId>,
         native_id: u16,
         /// `common::HOST_ENUM_LAYOUT_*` packed on reconstruct.
         layout: u8,
@@ -464,7 +472,7 @@ pub enum MirInst {
     },
     /// An FFI opcode (`extern` calls and `dload` / `declare` / `invoke`):
     /// `args` are its stack operands in push order, `operand` the opcode's
-    /// own; `dest` is the boxed `Result` the VM pushes. A call that may run
+    /// own; `dest` is the boxed `Result` the runtime pushes. A call that may run
     /// a callback: an effect barrier, as an impure HostInvoke; dense refuses.
     Ffi {
         dest: ValueId,
@@ -472,14 +480,29 @@ pub enum MirInst {
         operand: u32,
         args: Vec<ValueId>,
     },
-    /// Dense / LIR `CALL` (COI-291 / B3). Args stay on the operand stack
+    /// A call of a function an `extern` block declares: `args` are its
+    /// library handle, function id and C address (the module's statics),
+    /// then the arguments' words; `dest` is the C function's result word (`0` for
+    /// a `void` one). A call the runtime cannot make panics with its
+    /// error. `sig` is the declared signature, for a direct C-ABI call.
+    /// An effect barrier, as [`MirInst::Ffi`].
+    ExternCall {
+        dest: ValueId,
+        sig: Box<MirExternSig>,
+        args: Vec<ValueId>,
+    },
+    /// `CALL` (COI-291 / B3). Args stay on the operand stack
     /// (LOAD / BinSlotImm convoy). One-word `Entry` uses `dest` only;
     /// two-slot `[payload, tag]` sets `dest_hi`. `STORE` only when a dest
     /// is live in a slot. Same bits as the callee's slots `0..n`.
     Call {
         dest: ValueId,
         dest_hi: Option<ValueId>,
-        target: crate::il::Label,
+        /// Result words 3.. of a callee that returns more than two
+        /// (`MirFunc::ret_more_tys`), in order. Empty unless `dest_hi` is
+        /// set; at most [`MAX_RET_MORE`] entries.
+        dest_more: Vec<ValueId>,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
     },
     /// `CallIndirect n`: call the function value `callee` (an `ObjFn` /
@@ -494,6 +517,12 @@ pub enum MirInst {
         /// How many of `args` (the last ones) are instance dictionaries a
         /// `PolyFn` callee takes after its arguments.
         dicts: u32,
+        /// A two-word result (`Option<int>`, `(int, int)`): its second
+        /// word, and `unpair`, a body taking the result's one word (its
+        /// box) and returning its two words. An engine enters the
+        /// callee's two-word twin ([`super::MirFunc::pair_twin`]) when it
+        /// has one; otherwise it calls the callee and `unpair` on the word.
+        pair: Option<(ValueId, crate::bodies::Label)>,
     },
     /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
     /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
@@ -504,18 +533,21 @@ pub enum MirInst {
     },
     /// Heap `LoadField` of slot `index` on an escaping object (D1 maps).
     /// `object` is [`MirTy::HeapRef`]. Dest is the field word (not SROA).
-    HeapFieldLoad {
+    ProductLoad {
         dest: ValueId,
         object: ValueId,
-        index: u32,
+        slot: u32,
     },
-    /// Heap `SetField` of slot `index`. Dest is the stored value (VM
+    /// Heap `SetField` of slot `index`. Dest is the stored value (runtime
     /// leaves it TOS).
     HeapFieldStore {
         dest: ValueId,
         object: ValueId,
         value: ValueId,
         index: u32,
+        /// The field's static type is a number (`WORD_SCALAR`): the store
+        /// moves no reference count, the old word being a number too.
+        scalar: bool,
     },
     /// Heap index load (S3). `array` is `HeapRef`; `index` is `i64`.
     /// Reconstructs `Index` / `IndexUnchecked` (pin forms lower to the
@@ -526,13 +558,16 @@ pub enum MirInst {
         index: ValueId,
         unchecked: bool,
     },
-    /// Heap index store (S3). Dest is the stored value (VM leaves it TOS).
+    /// Heap index store (S3). Dest is the stored value (runtime leaves it TOS).
     StoreIndex {
         dest: ValueId,
         array: ValueId,
         index: ValueId,
         value: ValueId,
         unchecked: bool,
+        /// The element's static type is a number (`WORD_SCALAR`): its old
+        /// and new words are numbers, stored with no count change.
+        scalar: bool,
     },
     /// Structural `ArrayLen` (S3). Dest is `i64`.
     ArrayLen {
@@ -547,7 +582,7 @@ pub enum MirInst {
         send: Option<ValueId>,
     },
     /// `YieldCoro` (or `YieldFromCoro` when `from`): suspend the running
-    /// coroutine with `value` (a sub-coroutine handle for `from`). The VM
+    /// coroutine with `value` (a sub-coroutine handle for `from`). The runtime
     /// saves the frame as it stands and resumes at the next instruction,
     /// so this is one instruction, and a GC safepoint as a call is: every
     /// live heap word stays in the frame. With `receive`, dest is the word
@@ -609,16 +644,59 @@ pub enum MirInst {
         dest: ValueId,
         value: ValueId,
     },
-    /// The field store a panic in the code after this owes the heap: a
-    /// field kept in a register across a loop ([`super::promote_fields`])
-    /// holds `value` here, where the source had stored it. A panic between
-    /// this and the next label stores it before unwinding. Dest is a
-    /// `bool` unit token. Emits nothing in line.
-    PanicStore {
+    /// Count one more run of coverage probe `id`
+    /// ([`super::coverage::instrument`]). Only a capture holds one, so the
+    /// code tiers never see it. Dest is a `bool` unit token.
+    Probe {
         dest: ValueId,
-        object: ValueId,
-        value: ValueId,
-        index: u32,
+        id: u32,
+    },
+    /// Element `index` of a lane array (`k` words per element): its first
+    /// word in `dest`, its second (an enum's tag) in `dest_hi`, words 3..k
+    /// of a wide element (the leaves of a tuple nested at any depth) in
+    /// `dest_more`, read from its tuple as `shape` says on an array of one
+    /// word per element. Out of bounds panics, as [`Self::Index`] does.
+    LaneIndex {
+        dest: ValueId,
+        dest_hi: ValueId,
+        dest_more: Vec<ValueId>,
+        array: ValueId,
+        index: ValueId,
+        shape: MirLaneShape,
+    },
+    /// Store `lo`, `hi` and `more` as element `index` of a lane array
+    /// (or, on an array of one word per element, the element boxed as
+    /// `shape` says; a wide element as a tuple of its words). Dest is a
+    /// `bool` unit token.
+    LaneStore {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        more: Vec<ValueId>,
+        shape: MirLaneShape,
+    },
+    /// Append the element `[lo, hi, more..]` to a lane array in place
+    /// (boxed as `shape` says on an array of one word per element, a wide
+    /// element as a tuple). Dest is the same `HeapRef` identity; a GC
+    /// safepoint like [`Self::ArrayPush`].
+    LanePush {
+        dest: ValueId,
+        array: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        more: Vec<ValueId>,
+        shape: MirLaneShape,
+    },
+    /// Turn a lane array into one word per element in place, each element
+    /// boxed as `shape` says, before code that reads it one word per
+    /// element; an array that already is one does not change. Dest is the
+    /// same `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    LanesToWords {
+        dest: ValueId,
+        array: ValueId,
+        shape: MirLaneShape,
     },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
@@ -628,36 +706,29 @@ pub enum MirInst {
         value: ValueId,
     },
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
-    /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
-    /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
-    /// S2c may emit across this edge when every allocation has its barrier.
+    /// safepoint; pair with [`Self::GcBarrier`].
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
+        /// The object's words in declaration order: an array's elements,
+        /// a tuple's items, a variant's payload, a function value's
+        /// captures then filled parameters.
         elems: Vec<ValueId>,
         /// Construction word kinds from the source types, as HIR emission
         /// stamps them: an array's element kind (`MakeArrayK`), or a tuple's
         /// / enum's packed payload kinds (`MakeTupleK` / `MakeEnumK`).
         /// `0` = none recorded; emission then reads tuple / enum kinds off
         /// the element words' MIR types.
-        kinds: u8,
+        kinds: common::PackedKinds,
     },
     /// GC safepoint / write-barrier (I5). Dest is a `HeapRef` token
-    /// (not a second object). `roots` is the S2a live-heap SSA list
-    /// (new object plus other live heap words). Not an interpreter map.
+    /// naming `object`, the word the allocating op right before it made
+    /// ([`crate::mir::barrier_pairs`]). `object` is an operand, so the
+    /// allocation stays as long as its barrier does.
     GcBarrier {
         dest: ValueId,
         kind: MirGcKind,
-        roots: Vec<ValueId>,
-    },
-    /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
-    /// Sidecar only — emit skips this inst. Names the edge a later
-    /// native tier must leave or pause at. Only tests build one today.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Deopt {
-        dest: ValueId,
-        kind: MirDeoptKind,
-        loc: common::DebugLoc,
+        object: ValueId,
     },
     /// Const string-table push (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
     String {
@@ -669,7 +740,7 @@ pub enum MirInst {
     /// [`MirTy::I64`].
     CodePtr {
         dest: ValueId,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `PRINT` (I4 / Q9 R1). Dest is a `bool` unit token. IO barrier.
     Print {
@@ -724,10 +795,91 @@ pub enum MirInst {
         unique: bool,
         field: Option<u32>,
     },
-    /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
+    /// Copy-on-write unique of element `index` of the array `array`, in
+    /// place (archive 8.17): `array[index] = unique(array[index])` in one
+    /// instruction, writing the element back only when it copied. Traps
+    /// out of bounds as [`Self::Index`] does. Dest is the element once
+    /// unique (the copy when it copied), what an `Index` of `array` at
+    /// `index` reads right after it (archive 8.18; 8.17's dest was `array`'s
+    /// word). Neither takes nor drops an owner of `array` (a copy replaces a
+    /// shared element, whose other owner keeps it); the dest is read out of
+    /// `array` as an `Index` reads, which owns it. A side effect and an
+    /// allocating safepoint; pair with [`Self::GcBarrier`].
+    CowIndex {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+    },
+    /// Copy-on-write pin (archive 8.2): `dest` (a `bool`) is whether
+    /// `src`'s object was pinned, and the op pins it, so a share of it
+    /// hands out a copy instead of marking it shared until [`Self::CowUnpin`]
+    /// (`machine::Object::is_pinned`). `false` and no effect for a word that
+    /// is no class instance or array. Allocates nothing; a header byte.
+    CowPin {
+        dest: ValueId,
+        src: ValueId,
+    },
+    /// Copy-on-write unpin: clears `src`'s pin when `saved` (the `bool` its
+    /// [`Self::CowPin`] gave) is `false`, so an outer pin stays. Dest is a
+    /// `bool` unit token.
+    CowUnpin {
+        dest: ValueId,
+        src: ValueId,
+        saved: ValueId,
+    },
+    /// Reference count increment (reference counts plan step 3, archive
+    /// 8.5): `src`'s object gains an owner. A word that names no object
+    /// (`0`, a scalar, an interned or immortal object) is left alone; a
+    /// `Result` niche word's `Err` bit is cleared first. With `guard` (a
+    /// `bool`: a shared generic body's bit of its `kinds` word, a pair's
+    /// tag test) the op applies only when it is `true`, for a word that may
+    /// be a scalar or an object. Dest is a `bool` unit token.
+    RcInc {
+        dest: ValueId,
+        src: ValueId,
+        guard: Option<ValueId>,
+    },
+    /// Reference count decrement: `src`'s object loses an owner, and when
+    /// that was its last, the runtime releases it (`machine::Heap::rc_drop`:
+    /// what it names loses an owner in turn, then it is freed). The same
+    /// words and `guard` as [`Self::RcInc`]. Dest is a `bool` unit token.
+    RcDec {
+        dest: ValueId,
+        src: ValueId,
+        guard: Option<ValueId>,
+    },
+    /// Reuse in place: `src`'s object loses an owner, as [`Self::RcDec`].
+    /// When that was its last and it is a plain enum or instance (no
+    /// `drop`, no weak handle), its words are released but its slot is
+    /// kept: dest (`i64`) is the slot's address for the [`Self::AllocAt`]
+    /// that follows in the block, else `0` (`machine::Heap::rc_take_slot`).
+    ///
+    /// `moved`: payload words (bit `i`: word `i`) the body took from the
+    /// object without counting them: a kept slot hands its owner to them,
+    /// and otherwise each gains an owner before the decrement.
+    RcReuse {
+        dest: ValueId,
+        src: ValueId,
+        moved: u32,
+    },
+    /// [`Self::Alloc`] of an enum into `slot` when there is one and it is
+    /// not `0`: a slot [`Self::RcReuse`] kept, of the same layout.
+    ///
+    /// `owned`: payload words (bit `i`: word `i`) whose owner the frame
+    /// hands to the new object, so the allocation counts them no owner
+    /// more and the frame decrements them no more.
+    AllocAt {
+        dest: ValueId,
+        slot: Option<ValueId>,
+        owned: u32,
+        kind: MirAllocKind,
+        elems: Vec<ValueId>,
+        kinds: common::PackedKinds,
+    },
+    /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
-    /// instance, which the VM compares structurally: that reads mutable
+    /// instance, which the runtime compares structurally: that reads mutable
     /// objects, so it is never CSE'd or hoisted (it is not, as above).
     StrEq {
         dest: ValueId,
@@ -756,7 +908,7 @@ pub enum MirInst {
         expr: LaneExpr,
     },
     /// A counted map or reduce loop over 8 lanes at a time (archive 6.2,
-    /// VM `VLoop`): `kind` for `p = from, from + 8, ..` below `to`
+    /// the vector loop): `kind` for `p = from, from + 8, ..` below `to`
     /// (`to - from` a multiple of 8, every read and write in range). A
     /// reduce's `dest` is the accumulator; a store loop's is unused.
     /// `pos` (a second dest) holds the block position while the body
@@ -775,7 +927,7 @@ pub enum MirInst {
 /// `p`. Kinds are `common::simd` / `dense` codes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecExpr {
-    /// An invariant `i64` / `f64` in every lane (`ty` is `dense::TY_*`).
+    /// An invariant `i64` / `f64` in every lane (`ty` is the lane type code).
     Splat { v: ValueId, ty: u8 },
     /// The loop index `p + k` in lane `k` (an int lane).
     Index,
@@ -858,7 +1010,7 @@ impl VecExpr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecLoopKind {
     /// `dest = init`, then `dest = dest ⊕ term` lane by lane, left to
-    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`). `stores`
+    /// right (`fold` is `simd::REDUCE_*`, `ty` the lane type code). `stores`
     /// (as in [`Self::Store`]) run first in each block: a loop that both
     /// maps and folds.
     Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
@@ -929,6 +1081,58 @@ impl VecLoopKind {
     }
 }
 
+/// The most words an [`MirInst::ExternCall`] passes the runtime: its
+/// library, function id and arguments, and a variadic call's tags. A call
+/// with more keeps the argument tuple.
+pub const EXTERN_CALL_MAX_WORDS: usize = common::FFI_CALL_MAX_WORDS;
+
+/// The most words past the second a lane element (`LaneIndex::dest_more`,
+/// `MirLaneShape`) carries: the wide-value word budget, as many as a
+/// direct call carries ([`MAX_CALL_RET_MORE`]).
+pub const MAX_RET_MORE: usize = common::PACKED_KIND_WORDS - 2;
+
+/// The most result words past the second a direct `Call` / `Return`
+/// carries (`dest_more` / `more` / `MirFunc::ret_more_tys`): a direct call
+/// returns at most `2 + MAX_CALL_RET_MORE` words, those past the
+/// registers in a return area the caller gives (native code's `tail`
+/// convention). As many as a tuple has items
+/// ([`common::PACKED_KIND_WORDS`]).
+pub const MAX_CALL_RET_MORE: usize = common::PACKED_KIND_WORDS - 2;
+
+/// The signature of an [`MirInst::ExternCall`]: the C symbol, the
+/// declared parameters' and the result's FFI type tags (each
+/// `encode_tag_operand(tag, aux)`) and, for a variadic function, the tags
+/// of every argument of this call, and the C layout of each `extern struct`
+/// they pass by value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MirExternSig {
+    pub symbol: String,
+    pub params: Vec<u32>,
+    pub ret: u32,
+    pub variadic: Option<Vec<u32>>,
+    /// One per struct id the tags name (MIR format 20); empty before.
+    pub structs: Vec<MirCStruct>,
+}
+
+impl MirExternSig {
+    /// The layout of struct `id`, when the signature carries it.
+    pub fn struct_layout(&self, id: u32) -> Option<&MirCStruct> {
+        self.structs.iter().find(|s| s.id == id)
+    }
+}
+
+/// An `extern struct`'s C layout as a call passes it by value: its id (the
+/// tag's aux), its size and alignment in bytes, and its scalar fields,
+/// nested structs flattened, as `(byte offset, FFI tag)` in offset order.
+/// What a native direct call needs to place it in registers or memory.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MirCStruct {
+    pub id: u32,
+    pub size: u32,
+    pub align: u32,
+    pub fields: Vec<(u32, u32)>,
+}
+
 /// The FFI opcode a [`MirInst::Ffi`] reconstructs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirFfiOp {
@@ -939,6 +1143,8 @@ pub enum MirFfiOp {
     /// `FfiInvoke`: library, function id, argument tuple, and a variadic
     /// call's tag tuple.
     Invoke,
+    /// The C address of a declared function: library, function id.
+    Addr,
 }
 
 impl MirFfiOp {
@@ -947,23 +1153,50 @@ impl MirFfiOp {
             Self::Load => "load",
             Self::Declare => "declare",
             Self::Invoke => "invoke",
+            Self::Addr => "addr",
         }
     }
 
-    pub fn instruction(self) -> common::Instruction {
+    /// What the runtime's `coil_native_ffi` calls the op.
+    pub fn code(self) -> u8 {
         match self {
-            Self::Load => common::Instruction::FfiLoad,
-            Self::Declare => common::Instruction::DeclareFFI,
-            Self::Invoke => common::Instruction::FfiInvoke,
+            Self::Load => common::FFI_OP_LOAD,
+            Self::Declare => common::FFI_OP_DECLARE,
+            Self::Invoke => common::FFI_OP_INVOKE,
+            Self::Addr => common::FFI_OP_ADDR,
         }
     }
+}
+
+/// How a two-word element of a lane array is boxed as one word: an enum
+/// variant object (tag `t` carries its payload word when bit `t` of
+/// `payload_mask` is set, the empty tuple when bit `t` of `unit_mask` is),
+/// or a two-item tuple when `payload_mask` is `0`. `tag_mask` is the lane
+/// array's: the tags under which the first word is a heap reference.
+///
+/// A wide element's (three or more words, the leaves of a tuple at any
+/// depth): `tag_mask` has bit `j` set when word `j` is a heap word (the
+/// lane array's), and `payload_mask` / `unit_mask` are its tuple's nesting
+/// ([`common::lane_nest_pack`]; both `0` for a flat tuple).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct MirLaneShape {
+    pub tag_mask: u64,
+    pub payload_mask: u64,
+    pub unit_mask: u64,
 }
 
 /// Heap object constructed by [`MirInst::Alloc`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirAllocKind {
     Array,
-    Tuple,
+    /// A lane array of `2 + more` words per element, `elems` their words
+    /// in order (`ObjArray::from_lanes`); lane 0 is a heap reference under
+    /// the tags set in `tag_mask`, or for a wide element (`more` > 0) lane
+    /// `j` is one when bit `j` of `tag_mask` is set ([`MirLaneShape`]).
+    Lanes {
+        tag_mask: u64,
+        more: u8,
+    },
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
     /// dense Object `DenseMakeObject` is D2.
     Object {
@@ -981,7 +1214,7 @@ pub enum MirAllocKind {
     },
     /// `MakeCoro`: args → coroutine handle (C2b). Target is the async body.
     Coro {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `MakeFn`: a function value of the code at `target`, elems its
     /// captures then its filled parameters (the `Const mask` fill mask and
@@ -989,13 +1222,13 @@ pub enum MirAllocKind {
     /// operand; `mask` has a bit per filled parameter (0: none, a closure
     /// or a named function's value; a prefix: a partial application).
     Fn {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         operand: u32,
         mask: u32,
     },
     /// `MakePolyFn`: a generic function's value with no dictionaries.
     PolyFn {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `MakePolyFnCapture`: a generic function's value carrying its
     /// instance dictionaries, the elems (a `0` word for evidence the call
@@ -1003,17 +1236,21 @@ pub enum MirAllocKind {
     /// its declared parameter count (0: unrecorded), so a call given more
     /// hands the rest to its result (#1589).
     PolyFnCapture {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         params: u32,
     },
 }
 
 impl MirAllocKind {
+    /// A tuple: a product, an enum object of [`common::PRODUCT_TAG`].
+    pub const TUPLE: Self = Self::Enum { tag: common::PRODUCT_TAG };
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Array => "array",
-            Self::Tuple => "tuple",
+            Self::Lanes { .. } => "lanes",
             Self::Object { .. } => "object",
+            Self::TUPLE => "tuple",
             Self::Enum { .. } => "enum",
             Self::DropEnum { .. } => "dropenum",
             Self::Coro { .. } => "coro",
@@ -1046,32 +1283,6 @@ impl MirGcKind {
     }
 }
 
-/// Stop / leave-specialized edge (I7). Not a bytecode opcode.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum MirDeoptKind {
-    /// Interpreter may pause here (line / `stepi` boundary).
-    Stop,
-    /// Leave specialized or native code; resume fuse-IL at this edge.
-    Deopt,
-}
-
-impl MirDeoptKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Deopt => "deopt",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "stop" => Self::Stop,
-            "deopt" => Self::Deopt,
-            _ => return None,
-        })
-    }
-}
-
 impl MirInst {
     pub fn dest(&self) -> ValueId {
         match *self {
@@ -1083,10 +1294,11 @@ impl MirInst {
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
             | Self::Ffi { dest, .. }
+            | Self::ExternCall { dest, .. }
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
-            | Self::HeapFieldLoad { dest, .. }
+            | Self::ProductLoad { dest, .. }
             | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
@@ -1100,11 +1312,14 @@ impl MirInst {
             | Self::HomeStore { dest, .. }
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
-            | Self::PanicStore { dest, .. }
+            | Self::Probe { dest, .. }
             | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
-            | Self::Deopt { dest, .. }
             | Self::String { dest, .. }
             | Self::CodePtr { dest, .. }
             | Self::Print { dest, .. }
@@ -1113,40 +1328,95 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Cow { dest, .. }
+            | Self::CowIndex { dest, .. }
+            | Self::CowPin { dest, .. }
+            | Self::CowUnpin { dest, .. }
+            | Self::RcInc { dest, .. }
+            | Self::RcDec { dest, .. }
+            | Self::RcReuse { dest, .. }
+            | Self::AllocAt { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
         }
     }
 
-    /// `dest` plus a two-slot CALL tag / second word when present.
-    pub fn dests(&self) -> impl Iterator<Item = ValueId> {
+    /// [`Self::dest`], to rename it (a cloned instruction's).
+    pub fn dest_mut(&mut self) -> &mut ValueId {
+        match self {
+            Self::Const { dest, .. }
+            | Self::Bin { dest, .. }
+            | Self::Cmp { dest, .. }
+            | Self::Unary { dest, .. }
+            | Self::Cast { dest, .. }
+            | Self::Phi { dest, .. }
+            | Self::HostInvoke { dest, .. }
+            | Self::Ffi { dest, .. }
+            | Self::ExternCall { dest, .. }
+            | Self::Call { dest, .. }
+            | Self::CallIndirect { dest, .. }
+            | Self::MatchPayload { dest, .. }
+            | Self::ProductLoad { dest, .. }
+            | Self::HeapFieldStore { dest, .. }
+            | Self::Index { dest, .. }
+            | Self::StoreIndex { dest, .. }
+            | Self::ArrayLen { dest, .. }
+            | Self::ResumeCoro { dest, .. }
+            | Self::Yield { dest, .. }
+            | Self::DoneCoro { dest, .. }
+            | Self::LoadStatic { dest, .. }
+            | Self::StoreStatic { dest, .. }
+            | Self::HomeLoad { dest, .. }
+            | Self::HomeStore { dest, .. }
+            | Self::ClearWord { dest, .. }
+            | Self::KeepAlive { dest, .. }
+            | Self::Probe { dest, .. }
+            | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
+            | Self::Alloc { dest, .. }
+            | Self::GcBarrier { dest, .. }
+            | Self::String { dest, .. }
+            | Self::CodePtr { dest, .. }
+            | Self::Print { dest, .. }
+            | Self::FreeEarly { dest, .. }
+            | Self::Panic { dest, .. }
+            | Self::Format { dest, .. }
+            | Self::Stringify { dest, .. }
+            | Self::Cow { dest, .. }
+            | Self::CowIndex { dest, .. }
+            | Self::CowPin { dest, .. }
+            | Self::CowUnpin { dest, .. }
+            | Self::RcInc { dest, .. }
+            | Self::RcDec { dest, .. }
+            | Self::RcReuse { dest, .. }
+            | Self::AllocAt { dest, .. }
+            | Self::StrEq { dest, .. }
+            | Self::ByteScan { dest, .. }
+            | Self::VecLoop { dest, .. } => dest,
+        }
+    }
+
+    /// `dest` plus a two-slot CALL tag / second word when present, then a
+    /// CALL's further words (`dest_more`).
+    pub fn dests(&self) -> impl Iterator<Item = ValueId> + '_ {
         let hi = match *self {
             Self::Call {
                 dest_hi: Some(h), ..
             } => Some(h),
             Self::VecLoop { pos: Some(p), .. } => Some(p),
+            Self::CallIndirect { pair: Some((h, _)), .. } => Some(h),
+            Self::HostInvoke { dest_hi: Some(h), .. } => Some(h),
+            Self::LaneIndex { dest_hi, .. } => Some(dest_hi),
             _ => None,
         };
-        std::iter::once(self.dest()).chain(hi)
-    }
-
-    /// Allocation or GC safepoint — specialize / native must not cross.
-    pub fn is_gc_edge(&self) -> bool {
-        matches!(
-            self,
-            Self::Alloc { .. }
-                | Self::ArrayPush { .. }
-                | Self::Format { .. }
-                | Self::Stringify { .. }
-                | Self::Cow { .. }
-                | Self::GcBarrier { .. }
-        )
-    }
-
-    /// Explicit I7 stop / deopt inst.
-    pub fn is_deopt_edge(&self) -> bool {
-        matches!(self, Self::Deopt { .. })
+        let more: &[ValueId] = match self {
+            Self::Call { dest_more, .. } | Self::LaneIndex { dest_more, .. } => dest_more,
+            _ => &[],
+        };
+        std::iter::once(self.dest()).chain(hi).chain(more.iter().copied())
     }
 
     pub fn is_phi(&self) -> bool {
@@ -1155,15 +1425,15 @@ impl MirInst {
 
     pub fn operands(&self) -> Vec<ValueId> {
         match self {
-            Self::Const { .. } => Vec::new(),
+            Self::Const { .. } | Self::Probe { .. } => Vec::new(),
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
-            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
+            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::ExternCall { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
-            Self::HeapFieldLoad { object, .. } => vec![*object],
-            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => vec![*object, *value],
+            Self::ProductLoad { object, .. } => vec![*object],
+            Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -1184,10 +1454,19 @@ impl MirInst {
             Self::LoadStatic { .. } | Self::HomeLoad { .. } => Vec::new(),
             Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
+            Self::LaneIndex { array, index, .. } => vec![*array, *index],
+            Self::LaneStore { array, index, lo, hi, more, .. } => [*array, *index, *lo, *hi].into_iter().chain(more.iter().copied()).collect(),
+            Self::LanePush { array, lo, hi, more, .. } => [*array, *lo, *hi].into_iter().chain(more.iter().copied()).collect(),
+            Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
-            Self::GcBarrier { roots, .. } => roots.clone(),
-            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::GcBarrier { object, .. } => vec![*object],
+            Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
+            Self::CowIndex { array, index, .. } => vec![*array, *index],
+            Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => std::iter::once(*src).chain(*guard).collect(),
+            Self::RcReuse { src, .. } => vec![*src],
+            Self::AllocAt { slot, elems, .. } => slot.iter().copied().chain(elems.iter().copied()).collect(),
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1204,7 +1483,7 @@ impl MirInst {
 
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
-            Self::Const { .. } => {}
+            Self::Const { .. } | Self::Probe { .. } => {}
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => {
                 *lhs = map(*lhs);
                 *rhs = map(*rhs);
@@ -1215,7 +1494,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => {
+            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::ExternCall { args, .. } | Self::Call { args, .. } => {
                 for v in args.iter_mut() {
                     *v = map(*v);
                 }
@@ -1227,8 +1506,8 @@ impl MirInst {
                 *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
-            Self::HeapFieldLoad { object, .. } => *object = map(*object),
-            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => {
+            Self::ProductLoad { object, .. } => *object = map(*object),
+            Self::HeapFieldStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);
             }
@@ -1261,18 +1540,59 @@ impl MirInst {
                 *array = map(*array);
                 *value = map(*value);
             }
+            Self::LaneIndex { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+            }
+            Self::LaneStore { array, index, lo, hi, more, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+                *lo = map(*lo);
+                *hi = map(*hi);
+                for v in more.iter_mut() {
+                    *v = map(*v);
+                }
+            }
+            Self::LanePush { array, lo, hi, more, .. } => {
+                *array = map(*array);
+                *lo = map(*lo);
+                *hi = map(*hi);
+                for v in more.iter_mut() {
+                    *v = map(*v);
+                }
+            }
+            Self::LanesToWords { array, .. } => *array = map(*array),
             Self::Alloc { elems, .. } => {
                 for v in elems.iter_mut() {
                     *v = map(*v);
                 }
             }
-            Self::GcBarrier { roots, .. } => {
-                for v in roots.iter_mut() {
-                    *v = map(*v);
+            Self::GcBarrier { object, .. } => *object = map(*object),
+            Self::String { .. } | Self::CodePtr { .. } => {}
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::CowUnpin { src, saved, .. } => {
+                *src = map(*src);
+                *saved = map(*saved);
+            }
+            Self::CowIndex { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+            }
+            Self::RcReuse { src, .. } => *src = map(*src),
+            Self::AllocAt { slot, elems, .. } => {
+                if let Some(slot) = slot {
+                    *slot = map(*slot);
+                }
+                for e in elems {
+                    *e = map(*e);
                 }
             }
-            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
-            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => {
+                *src = map(*src);
+                if let Some(g) = guard {
+                    *g = map(*g);
+                }
+            }
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {
@@ -1315,7 +1635,7 @@ pub enum Terminator {
     /// Taken pops the scrutinee and binds `payloads` (declaration order;
     /// last word TOS), including boxed-overlap `JumpIfMatch` arity 0 with
     /// a unary payload. Miss leaves the scrutinee on the stack (same as
-    /// bytecode `JumpIfMatch`).
+    /// code `JumpIfMatch`).
     JumpIfMatch {
         scrutinee: ValueId,
         tag: u32,
@@ -1328,6 +1648,10 @@ pub enum Terminator {
     Return {
         lo: Option<ValueId>,
         hi: Option<ValueId>,
+        /// Words 3.. of a body that returns more than two
+        /// (`MirFunc::ret_more_tys`), in order. Empty unless `hi` is set; at
+        /// most [`MAX_RET_MORE`] entries.
+        more: Vec<ValueId>,
     },
     Unreachable,
 }
@@ -1358,6 +1682,29 @@ impl Terminator {
         }
     }
 
+    /// The values this terminator reads: a branch's condition, a match's
+    /// scrutinee, the returned words. Not a match's [`Self::binds`].
+    pub fn uses(&self) -> impl Iterator<Item = ValueId> + '_ {
+        let (words, more): ([Option<ValueId>; 2], &[ValueId]) = match self {
+            Self::Br { cond, .. } => ([Some(*cond), None], &[]),
+            Self::JumpIfMatch { scrutinee, .. } => ([Some(*scrutinee), None], &[]),
+            Self::Return { lo, hi, more } => ([*lo, *hi], more),
+            Self::Jump { .. } | Self::Unreachable => ([None, None], &[]),
+        };
+        words.into_iter().flatten().chain(more.iter().copied())
+    }
+
+    /// The payload words a `JumpIfMatch` binds on its taken edge. Each is
+    /// the dest of a `MatchPayload` in the same block, which the engines
+    /// skip: the terminator writes the word, so it is not live before it.
+    /// A pass that deletes dead code still keeps those `MatchPayload`s.
+    pub fn binds(&self) -> &[ValueId] {
+        match self {
+            Self::JumpIfMatch { payloads, .. } => payloads,
+            _ => &[],
+        }
+    }
+
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
             Self::Br { cond, .. } => *cond = map(*cond),
@@ -1371,11 +1718,14 @@ impl Terminator {
                     *v = map(*v);
                 }
             }
-            Self::Return { lo, hi } => {
+            Self::Return { lo, hi, more } => {
                 if let Some(v) = lo {
                     *v = map(*v);
                 }
                 if let Some(v) = hi {
+                    *v = map(*v);
+                }
+                for v in more {
                     *v = map(*v);
                 }
             }
@@ -1413,5 +1763,31 @@ mod tests {
         assert_eq!(LaneExpr::and(x2, LaneExpr::and(ne(3), LaneExpr::not(ne(1)))), LaneExpr::Const(false));
         // Nothing shared: left as it is.
         assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
+    }
+
+    /// A match reads its scrutinee; its payloads are words it binds on
+    /// the taken edge, not reads.
+    #[test]
+    fn terminator_uses_and_binds() {
+        let (s, p, q) = (ValueId(1), ValueId(2), ValueId(3));
+        let m = Terminator::JumpIfMatch { scrutinee: s, tag: 1, payloads: vec![p, q], taken: BlockId(1), not_taken: BlockId(2) };
+        assert_eq!(m.uses().collect::<Vec<_>>(), [s]);
+        assert_eq!(m.binds(), [p, q]);
+        let r = Terminator::Return { lo: Some(p), hi: Some(q), more: Vec::new() };
+        assert_eq!(r.uses().collect::<Vec<_>>(), [p, q]);
+        assert!(r.binds().is_empty());
+        let r4 = Terminator::Return { lo: Some(p), hi: Some(q), more: vec![s, ValueId(4)] };
+        assert_eq!(r4.uses().collect::<Vec<_>>(), [p, q, s, ValueId(4)]);
+        assert_eq!(Terminator::Jump { dest: BlockId(0) }.uses().count(), 0);
+    }
+
+    /// Both engines compute float `!=` unordered (`NaN != x` holds), as
+    /// Rust's `!=` and Cranelift's `FloatCC::NotEqual` do: the label says
+    /// so, and the text parser reads it back.
+    #[test]
+    fn float_ne_is_labelled_unordered() {
+        let label = MirCmpOp::Ne.as_str(true);
+        assert!(label.starts_with("fcmp.u"), "{label}");
+        assert_eq!(MirCmpOp::parse(label), Some((MirCmpOp::Ne, true)));
     }
 }

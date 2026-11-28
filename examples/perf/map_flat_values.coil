@@ -1,0 +1,33 @@
+// CPU: for-in over a map whose values are two words (`Option<int>`), each
+// entry a flat `Pair<int, Option<int>>`.
+use collections::map::HashMap;
+use io::sync::print;
+use string::format;
+
+fn main() {
+    let m: HashMap<int, Option<int>> = HashMap::new();
+    let i = 0;
+    while i < 1000 {
+        m.insert(
+            i,
+            if i % 3 == 0 {
+                None
+            } else {
+                Some(i)
+            },
+        );
+        i += 1;
+    }
+    let s = 0;
+    let round = 0;
+    while round < 5000 {
+        for e in m {
+            s += match e.value {
+                Some(x) => x + e.key,
+                None => 1,
+            };
+        }
+        round += 1;
+    }
+    let _ = print(format("%i\n", s));
+}

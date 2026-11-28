@@ -1,0 +1,34 @@
+// @expected E0413 — a generic call costs what the impl it runs there does:
+// `Tally`'s `write` changes a static, which `uses {write, suspend}` does not
+// cover.
+use io::{Write, IoError};
+use string::to_bytes;
+
+static let WRITTEN: int = 0;
+
+class Tally {
+    pub n: int,
+}
+
+impl Write for Tally {
+    fn write(Tally t, Vec<byte> buf) -> Result<int, IoError> {
+        WRITTEN = WRITTEN + buf.len();
+        return Ok(buf.len());
+    }
+
+    fn wait_writable(Tally t) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+
+fn send<W: Write>(W w, Vec<byte> buf) -> Result<int, IoError> {
+    return w.write(buf);
+}
+
+fn log(string s) uses {write, suspend} {
+    let _ = send(new Tally(0), to_bytes(s));
+}
+
+fn main() {
+    log("x");
+}

@@ -31,7 +31,11 @@ test("compound store") {
 }
 
 test("through a tuple") {
+    // A tuple cannot be changed in place, nor through an element (#2791):
+    // change a copy of the element and build a new tuple.
     let t = (new B(1), new B(2));
-    t[1].v = 5;
+    let e = t[1];
+    e.v = 5;
+    t = (t[0], e);
     assert!(t[0].v + t[1].v == 6);
 }

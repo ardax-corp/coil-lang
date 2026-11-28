@@ -1,0 +1,19 @@
+// CPU: an (int, int, int) from a direct call: three words in registers (`mir::wide_ret`).
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn split3(int a) -> (int, int, int) {
+    return (a % 10, a / 10 % 10, a / 100);
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        let (x, y, z) = split3(i);
+        s += x + y + z;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}

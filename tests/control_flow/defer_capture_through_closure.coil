@@ -25,10 +25,19 @@ test("through a closure") {
 }
 
 test("through a spawned task") {
-    let log = new Log(0);
-    let _ = scope(fn (Scope s) use (mut log) {
-        s.spawn(fn () use (mut log) => fails(log));
-        0
+    // The task writes a `Log` of its own and hands back what the defer did:
+    // a `use (mut log)` closure the spawn keeps would borrow the outer `log`
+    // past its scope (E0149, #2787).
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () {
+            let log = new Log(0);
+            let _ = fails(log);
+            return log.n;
+        });
+        return match t.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        };
     });
-    assert!(log.n == 1);
+    assert!(r == Result::Ok(1));
 }

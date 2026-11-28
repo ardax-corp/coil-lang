@@ -1,0 +1,12 @@
+// @expected E0102 — a scalar-backed enum is not cast with `as` either; the help
+// says it is its backing `int` where one is expected (#2803).
+#[repr(int)]
+enum R {
+    A = 1,
+    B = 2,
+}
+
+fn main() {
+    let e = R::B;
+    let n = e as int;
+}

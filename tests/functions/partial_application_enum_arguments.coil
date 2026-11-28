@@ -1,0 +1,256 @@
+// A partial application may fill a parameter of any argument shape
+// (#2789): the closure holds each filled argument as one word, as the
+// function takes it once it has a value: an `Option` / `Result` / enum's
+// niche word or its box, a two-word one boxed (as a pair tuple, #2790), and
+// `()` as the empty tuple object.
+use tests::assert;
+use gc::collect;
+
+class Pt {
+    pub a: int,
+}
+
+#[derive(Eq, Show)]
+enum Duo {
+    L(int),
+    R(string),
+}
+
+#[repr(int)]
+enum Lvl {
+    Lo = 1,
+    Hi = 7,
+}
+
+#[derive(Eq, Show)]
+enum Mixed {
+    M(int, string),
+    N,
+}
+
+readonly class RP {
+    pub x: int,
+    pub y: int,
+}
+
+fn oi(Option<int> a, int b) -> int {
+    return (a ?? 0) * 10 + b;
+}
+
+fn os(Option<string> a, string b) -> string {
+    return (a ?? "-") + b;
+}
+
+fn oc(Option<Pt> a, int b) -> int {
+    return match a {
+        Option::Some(p) => p.a * 10 + b,
+        Option::None => b,
+    };
+}
+
+fn ri(Result<int, string> a, int b) -> int {
+    return match a {
+        Result::Ok(v) => v * 10 + b,
+        Result::Err(e) => e.len() * 100 + b,
+    };
+}
+
+fn rs(Result<string, string> a, string b) -> string {
+    return match a {
+        Result::Ok(v) => "ok" + v + b,
+        Result::Err(e) => "err" + e + b,
+    };
+}
+
+fn ru(Result<(), string> a, int b) -> int {
+    return match a {
+        Result::Ok(_) => b,
+        Result::Err(e) => e.len() + b,
+    };
+}
+
+fn du(Duo d, int b) -> int {
+    return match d {
+        Duo::L(n) => n * 10 + b,
+        Duo::R(s) => s.len() * 100 + b,
+    };
+}
+
+fn lv(Lvl l, int b) -> int {
+    return match l {
+        Lvl::Lo => 10 + b,
+        Lvl::Hi => 70 + b,
+    };
+}
+
+fn mx(Mixed m, int b) -> int {
+    return match m {
+        Mixed::M(n, s) => n * 10 + s.len() + b,
+        Mixed::N => b,
+    };
+}
+
+fn oo(Option<Option<int>> a, int b) -> int {
+    return match a {
+        Option::Some(Option::Some(v)) => v * 10 + b,
+        Option::Some(Option::None) => 100 + b,
+        Option::None => b,
+    };
+}
+
+fn rp(RP p, int b) -> int {
+    return p.x * 100 + p.y * 10 + b;
+}
+
+fn mid(int a, Option<int> b, int c) -> int {
+    return a * 100 + (b ?? 0) * 10 + c;
+}
+
+class Q {
+    pub k: int,
+}
+
+impl Q {
+    pub fn m(Duo d, Option<int> o, int b) -> int {
+        return self.k * 1000 + du(d, 0) + (o ?? 0) + b;
+    }
+
+    pub static fn s(Result<int, string> a, int b) -> int {
+        return ri(a, b);
+    }
+}
+
+fn some_int() -> Option<int> {
+    return Option::Some(3);
+}
+
+test("Option<int>: literal, local, call, None") {
+    let o = Option::Some(5);
+    let ps = [oi(Option::Some(3)), oi(o), oi(some_int()), oi(Option::None)];
+    collect();
+    assert!(ps[0](4) == 34 && ps[1](4) == 54 && ps[2](4) == 34 && ps[3](4) == 4);
+}
+
+test("Option<string> and Option of a class") {
+    let a = os(Option::Some("x"));
+    let n = os(Option::None);
+    let c = oc(Option::Some(new Pt(6)));
+    collect();
+    assert!(a("y") == "xy" && n("y") == "-y" && c(1) == 61);
+}
+
+test("Result shapes") {
+    let a = ri(Result::Ok(2));
+    let e = ri(Result::Err("abc"));
+    let s = rs(Result::Err("e"));
+    let u = ru(Result::Err("abcd"));
+    let k = ru(Result::Ok(()));
+    collect();
+    assert!(a(1) == 21 && e(1) == 301 && s("!") == "erre!" && u(1) == 5 && k(1) == 1);
+}
+
+test("user enums") {
+    let d = du(Duo::L(4));
+    let r = du(Duo::R("ab"));
+    let l = lv(Lvl::Hi);
+    let m = mx(Mixed::M(2, "xyz"));
+    let n = mx(Mixed::N);
+    collect();
+    assert!(d(1) == 41 && r(1) == 201 && l(1) == 71 && m(1) == 24 && n(1) == 1);
+}
+
+test("nested Option and a pair class") {
+    let a = oo(Option::Some(Option::Some(2)));
+    let b = oo(Option::Some(Option::None));
+    let p = rp(new RP(1, 2));
+    collect();
+    assert!(a(1) == 21 && b(1) == 101 && p(3) == 123);
+}
+
+test("an enum after a word, a method and a static method") {
+    let f = mid(1, Option::Some(2));
+    let q = new Q(9);
+    let m = q.m(Duo::L(3), Option::Some(4));
+    let s = Q::s(Result::Ok(5));
+    collect();
+    assert!(f(3) == 123 && m(1) == 9035 && s(1) == 51);
+}
+
+enum Gen<T> {
+    G(T),
+    N,
+}
+
+class Bx<T> {
+    pub v: T,
+}
+
+fn ge(Gen<int> g, int b) -> int {
+    return match g {
+        Gen::G(v) => v * 10 + b,
+        Gen::N => b,
+    };
+}
+
+fn gb(Bx<int> x, int b) -> int {
+    return x.v * 10 + b;
+}
+
+fn vo(Vec<Option<int>> v, int b) -> int {
+    return v.len() * 10 + b;
+}
+
+fn tp((Option<int>, int) t, int b) -> int {
+    return (t[0] ?? 0) * 100 + t[1] * 10 + b;
+}
+
+fn fv(fn(int) -> int f, int b) -> int {
+    return f(b);
+}
+
+fn tr((int, string, float) t, int b) -> int {
+    return t[0] * 10 + t[1].len() + b;
+}
+
+test("generic enum") {
+    let p = ge(Gen::G(3));
+    assert!(p(1) == 31);
+}
+
+test("generic class") {
+    let p = gb(new Bx(4));
+    assert!(p(1) == 41);
+}
+
+test("vec of option") {
+    let p = vo([Option::Some(1), Option::None]);
+    assert!(p(1) == 21);
+}
+
+test("tuple with option") {
+    let p = tp((Option::Some(2), 3));
+    assert!(p(1) == 231);
+}
+
+test("function value") {
+    let p = fv(fn (int x) => x * 2);
+    assert!(p(5) == 10);
+}
+
+test("three-tuple") {
+    let p = tr((2, "ab", 1.5));
+    assert!(p(1) == 23);
+}
+
+fn un(() u, int b) -> int {
+    return b + 1;
+}
+
+fn unit() -> () {}
+
+test("a unit argument") {
+    let p = un(());
+    let q = un(unit());
+    collect();
+    assert!(p(1) == 2 && q(2) == 3);
+}

@@ -1,0 +1,218 @@
+// `io::Read`, `io::Write` and `io::Close` are ordinary traits: a user class
+// implements them, a generic body takes them as bounds, a trait value holds
+// a class or a `Stream` and meets the bound too, and `Stream` implements all
+// three. `flush` defaults to doing nothing.
+// @flags --allow-read --allow-write
+use tests::assert;
+use io::open;
+use io::Stream;
+use io::IoError;
+use io::Read;
+use io::Write;
+use io::Close;
+use io::fs::remove_file;
+use string::{from_bytes, to_bytes};
+
+/// Reads `data` a few bytes at a time, then reports end of input.
+shared class Source {
+    pub data: Vec<byte>,
+    pub at: int,
+    pub chunk: int,
+}
+
+impl Read for Source {
+    fn read(Source s, Vec<byte> buf) -> Result<Option<int>, IoError> {
+        let start = s.at;
+        if start >= s.data.len() {
+            return Ok(None);
+        }
+        let n = 0;
+        while n < buf.len() && n < s.chunk && start + n < s.data.len() {
+            buf[n] = s.data[start + n];
+            n += 1;
+        }
+        s.at = start + n;
+        return Ok(Some(n));
+    }
+
+    fn wait_readable(Source s) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+
+/// Takes at most two bytes per write and counts flushes and closes.
+shared class Sink {
+    pub got: Vec<byte>,
+    pub flushes: int,
+    pub closed: bool,
+}
+
+impl Write for Sink {
+    fn write(Sink s, Vec<byte> buf) -> Result<int, IoError> {
+        if s.closed {
+            raise IoError::AlreadyClosed;
+        }
+        let out = s.got;
+        let n = 0;
+        while n < buf.len() && n < 2 {
+            out.push(buf[n]);
+            n += 1;
+        }
+        s.got = out;
+        return Ok(n);
+    }
+
+    fn wait_writable(Sink s) -> Result<unit, IoError> {
+        return Ok(());
+    }
+
+    fn flush(Sink s) -> Result<unit, IoError> {
+        s.flushes += 1;
+        return Ok(());
+    }
+}
+
+impl Close for Sink {
+    fn close(Sink s) -> Result<unit, IoError> {
+        s.closed = true;
+        return Ok(());
+    }
+}
+
+fn new_sink() -> Sink {
+    let empty: Vec<byte> = [];
+    return new Sink(empty, 0, false);
+}
+
+fn new_source(string text, int chunk) -> Source {
+    return new Source(to_bytes(text), 0, chunk);
+}
+
+/// Every byte of `r`, waiting whenever it is not ready.
+fn drain<R: Read>(R r) -> Result<Vec<byte>, IoError> {
+    let out: Vec<byte> = [];
+    let buf = to_bytes("........");
+    while true {
+        match r.read(buf) {
+            Ok(Some(n)) => {
+                for i in 0..n {
+                    out.push(buf[i]);
+                }
+            },
+            Ok(None) => {
+                return out;
+            },
+            Err(IoError::WouldBlock) => {
+                r.wait_readable()?;
+            },
+            Err(e) => {
+                raise e;
+            },
+        }
+    }
+}
+
+/// All of `bytes` into `w`, however little each write takes, then a flush.
+fn put_all<W: Write>(W w, Vec<byte> bytes) -> Result<int, IoError> {
+    let done = 0;
+    while done < bytes.len() {
+        let rest: Vec<byte> = [];
+        for i in done..bytes.len() {
+            rest.push(bytes[i]);
+        }
+        match w.write(rest) {
+            Ok(n) => {
+                done += n;
+            },
+            Err(IoError::WouldBlock) => {
+                w.wait_writable()?;
+            },
+            Err(e) => {
+                raise e;
+            },
+        }
+    }
+    w.flush()?;
+    return done;
+}
+
+/// Copy `r` into `w`, then close `w`.
+fn pipe<R: Read, W: Write + Close>(R r, W w) -> Result<int, IoError> {
+    let n = put_all(w, drain(r)?)?;
+    w.close()?;
+    return n;
+}
+
+fn text(Vec<byte> b) -> string {
+    return match from_bytes(b) {
+        Ok(t) => t,
+        Err(_) => "",
+    };
+}
+
+test("a user reader and writer through bounds") {
+    let sink = new_sink();
+    assert!(pipe(new_source("hello, traits", 3), sink)? == 13);
+    assert!(text(sink.got) == "hello, traits");
+    assert!(sink.flushes == 1);
+    assert!(sink.closed);
+    let after = match sink.write(to_bytes("x")) {
+        Err(IoError::AlreadyClosed) => true,
+        default => false,
+    };
+    assert!(after);
+}
+
+test("the qualified spelling is the same call") {
+    let src = new_source("ab", 8);
+    let buf = to_bytes("....");
+    assert!(Read::read(src, buf)? == Some(2));
+    assert!(Read::read(src, buf)? == None);
+}
+
+test("trait values hold a class or a Stream") {
+    let path = "coil_traits_io_values.txt";
+    let file = open(path, "w")?;
+    let sink = new_sink();
+    let writers: Vec<Write> = [sink, file];
+    for w in writers {
+        assert!(w.write(to_bytes("sa"))? == 2);
+        assert!(put_all(w, to_bytes("me"))? == 2);
+    }
+    assert!(text(sink.got) == "same");
+    assert!(sink.flushes == 1);
+    file.close()?;
+    let back = open(path, "r")?;
+    assert!(text(drain(back)?) == "same");
+    back.close()?;
+    remove_file(path)?;
+}
+
+test("Stream implements Read, Write and Close") {
+    let path = "coil_traits_io_stream.txt";
+    let w: Stream = open(path, "w")?;
+    assert!(pipe(new_source("via a file stream", 5), w)? == 17);
+    let r = open(path, "r")?;
+    assert!(text(drain(r)?) == "via a file stream");
+    r.close()?;
+    let again = match r.close() {
+        Err(IoError::AlreadyClosed) => true,
+        default => false,
+    };
+    assert!(again);
+    remove_file(path)?;
+}
+
+test("write_from writes from an offset, by default through a copy") {
+    let sink = new_sink();
+    assert!(sink.write_from(to_bytes("abcd"), 2)? == 2);
+    assert!(text(sink.got) == "cd");
+    let path = "coil_traits_io_write_from.txt";
+    let w = open(path, "w")?;
+    assert!(w.write_from(to_bytes("xyz"), 1)? == 2);
+    w.close()?;
+    let r = open(path, "r")?;
+    assert!(text(drain(r)?) == "yz");
+    r.close()?;
+    remove_file(path)?;
+}

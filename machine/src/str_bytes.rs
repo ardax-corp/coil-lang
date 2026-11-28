@@ -7,8 +7,7 @@
 
 use common::Value;
 
-use crate::io::peel_one_boxed;
-use crate::memory::{EnumPayload, Heap, Object};
+use crate::memory::{EnumPayload, Heap};
 
 /// Tag indices for [`StringError`](common::BUILTIN_STRING_ERROR_ENUM).
 #[repr(u32)]
@@ -35,9 +34,9 @@ pub fn as_string_result_value(heap: &mut Heap, r: Result<Value, StringErrorTag>)
 /// Run `f` on the UTF-8 content of string `v`; non-strings read as `""`
 /// (the typechecker rejects them).
 fn with_str<R>(heap: &Heap, v: Value, f: impl FnOnce(&str) -> R) -> R {
-    match heap.find_object_by_addr(peel_one_boxed(heap, v).bits()) {
-        Some(Object::String(gc)) => f(gc.as_ref().data.as_str()),
-        _ => f(""),
+    match heap.str_at(v.bits()) {
+        Some(gc) => f(gc.as_ref().data.as_str()),
+        None => f(""),
     }
 }
 
@@ -69,8 +68,7 @@ pub(crate) fn byte_at(s: &[u8], i: i64) -> i64 {
     usize::try_from(i).ok().and_then(|i| s.get(i)).map_or(-1, |&b| b as i64)
 }
 
-/// [`string_byte_at`] on a word that is not a string object itself (a
-/// boxed one): what dense `DenseIndex` with `HEAP_STR_BYTE` falls back to.
+/// [`string_byte_at`] on a string word.
 pub(crate) fn byte_at_value(heap: &Heap, s: Value, i: i64) -> i64 {
     with_str(heap, s, |s| byte_at(s.as_bytes(), i))
 }
@@ -85,14 +83,14 @@ pub fn string_byte_at(heap: &mut Heap, args: &[Value]) -> Value {
 /// offset falls inside a UTF-8 sequence.
 pub fn string_slice_bytes(heap: &mut Heap, args: &[Value]) -> Value {
     let (start, end) = (args[1].as_int(), args[2].as_int());
-    let part = match heap.find_object_by_addr(peel_one_boxed(heap, args[0]).bits()) {
-        Some(Object::String(gc)) => {
+    let part = match heap.str_at(args[0].bits()) {
+        Some(gc) => {
             let n = gc.as_ref().data.len() as i64;
             let start = start.clamp(0, n) as usize;
             let end = end.clamp(start as i64, n) as usize;
             heap.alloc_slice(gc, start, end)
         }
-        _ => Some(heap.alloc_string(String::new())),
+        None => Some(heap.alloc_string(String::new())),
     };
     let r = match part {
         Some(gc) => Ok(Value::from(gc.as_ptr() as *mut u8 as u64)),
@@ -138,6 +136,7 @@ pub fn string_match_at(heap: &mut Heap, args: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::Object;
 
     #[test]
     fn find_from_matches_bytes_find_from() {

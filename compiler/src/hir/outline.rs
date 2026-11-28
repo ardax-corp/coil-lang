@@ -3,7 +3,7 @@
 //!
 //! A cold arm is an arm of an `if` statement that always fails (a panic,
 //! with any statements before it) or that calls a cold function. The arm
-//! must be plain code ([`super::lower::plain`]: no loop, closure, `defer`,
+//! must be plain code ([`super::query::plain`]: no loop, closure, `defer`,
 //! coroutine step or `break` / `continue`) with no `return`. Its free
 //! locals become the helper's parameters. It may assign at most one of
 //! them, by name only (`x = ..`): the helper takes that local's value and
@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::inline::map_ids;
-use super::lower::{children, plain, visit};
+use super::query::plain;
 use super::{BodyKind, Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, LocalId, LocalKind};
 use crate::typechecking::ty;
 
@@ -46,7 +46,7 @@ pub fn outline(
     }
     let root = body.root?;
     let mut arms = Vec::new();
-    visit(body, root, &mut |e| {
+    body.visit(root, &mut |e| {
         if let HirKind::Block { stmts, .. } = &e.kind {
             for &s in stmts {
                 if let HirKind::If { then, els, .. } = &body.expr(s).kind {
@@ -87,7 +87,7 @@ fn cold_arm(body: &HirBody, arm: HirId, cold_call: &dyn Fn(HirId) -> bool, diver
     let mut clears = false;
     let mut blames = false;
     let mut calls_cold = false;
-    visit(body, arm, &mut |e| {
+    body.visit(arm, &mut |e| {
         nodes += 1;
         returns |= matches!(e.kind, HirKind::Return(_));
         // A failed `requires` blames the caller of the frame it runs in.
@@ -97,7 +97,7 @@ fn cold_arm(body: &HirBody, arm: HirId, cold_call: &dyn Fn(HirId) -> bool, diver
     let mut stack = vec![arm];
     while let Some(at) = stack.pop() {
         calls_cold |= matches!(body.expr(at).kind, HirKind::Call { .. }) && cold_call(at);
-        stack.extend(children(body, at));
+        stack.extend(body.children(at));
     }
     nodes >= MIN_NODES && !returns && !clears && !blames && (calls_cold || super::cold::fails(body, arm, diverging))
 }
@@ -108,7 +108,7 @@ fn cut(body: &HirBody, out: &mut HirBody, arm: HirId, name: &str) -> Option<(Hel
     // The arm's nodes in order, and the locals it binds.
     let mut nodes = Vec::new();
     let mut bound = HashSet::new();
-    visit(body, arm, &mut |e| match &e.kind {
+    body.visit(arm, &mut |e| match &e.kind {
         HirKind::Let { local, .. } => {
             bound.insert(*local);
         }
@@ -119,9 +119,7 @@ fn cut(body: &HirBody, out: &mut HirBody, arm: HirId, name: &str) -> Option<(Hel
     let mut stack = vec![arm];
     while let Some(at) = stack.pop() {
         nodes.push(at);
-        let mut kids = children(body, at);
-        kids.reverse();
-        stack.extend(kids);
+        stack.extend(body.children(at).rev());
     }
     // Free locals in order of first use, and the ones the arm writes.
     let mut free: Vec<LocalId> = Vec::new();
@@ -206,6 +204,8 @@ fn cut(body: &HirBody, out: &mut HirBody, arm: HirId, name: &str) -> Option<(Hel
         span: body.expr(arm).span,
         node: None,
         flags: HirFlags::default(),
+        scope: body.expr(arm).scope,
+        src: body.expr(arm).src,
     };
     let push = |b: &mut HirBody, e: HirExpr| {
         let id = HirId(b.exprs.len() as u32);
@@ -288,7 +288,7 @@ fn compact(body: &mut HirBody) {
             continue;
         }
         order.push(id);
-        stack.extend(children(body, id));
+        stack.extend(body.children(id));
     }
     order.sort_by_key(|id| id.0);
     let ids: HashMap<HirId, HirId> = order.iter().enumerate().map(|(i, &id)| (id, HirId(i as u32))).collect();

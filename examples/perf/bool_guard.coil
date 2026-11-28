@@ -1,4 +1,4 @@
-// Probe: boolean-variable guard (no compare to fuse into *Jmpf).
+// Probe: boolean-variable guard (no compare to fold into the branch).
 use io::sync::print;
 use string::format;
 

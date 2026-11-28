@@ -6,7 +6,7 @@
 //! scattered in the heap each read waits on memory; asking for the object
 //! a few elements ahead overlaps those waits. The pass only marks the
 //! element reads ([`MirFunc::prefetch_loads`]); dense emission sets
-//! [`common::dense::HEAP_PREFETCH`] on them and the VM issues the hint.
+//! the prefetch flag on them and the runtime issues the hint.
 //! A hint changes no result, so a wrong guess costs time only.
 
 use std::collections::{HashMap, HashSet};

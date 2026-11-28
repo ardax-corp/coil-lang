@@ -1,0 +1,64 @@
+// A `T: Neg` function called at a `Vec` (#2564): the `Vec`'s structural
+// `Neg` instance negates each element, as ground `-v` does, in a per-type
+// clone and on the shared body (the `clone-budget-0` cell, and a bounded
+// generic forwarding the bound). A `Vec` has no `Num` or `Add` .. `Pow`
+// instance: ground `v + v` does not zip dynamic lengths
+// (`compile_fail/vec_zip_operator.coil`, `num_bound_vec_arg.coil`).
+use tests::assert;
+
+class Money {
+    pub cents: int,
+}
+
+impl Neg for Money {
+    pub fn neg(Money a) -> Money {
+        return new Money(0 - a.cents);
+    }
+}
+
+fn neg<T: Neg>(T a) -> T {
+    return -a;
+}
+
+fn twice<T: Neg>(T a) -> T {
+    return neg(neg(a));
+}
+
+fn ground(Vec<int> v) -> Vec<int> {
+    return -v;
+}
+
+fn cents(Vec<Money> ms) -> string {
+    let out = "";
+    for m in ms {
+        out = out + m.cents.show() + ";";
+    }
+    return out;
+}
+
+test("Neg of a Vec of scalars") {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(-2);
+    assert!(neg(v).show() == "[-1, 2]");
+    assert!(neg(v).show() == ground(v).show());
+    assert!(v.show() == "[1, -2]");
+    assert!(twice(v).show() == "[1, -2]");
+    let f: Vec<float> = Vec::new();
+    f.push(1.5);
+    assert!(neg(f).show() == "[-1.5]");
+    let e: Vec<int> = Vec::new();
+    assert!(neg(e).len() == 0);
+}
+
+test("Neg of a Vec of a user type or a tuple") {
+    let ms: Vec<Money> = Vec::new();
+    ms.push(new Money(5));
+    ms.push(new Money(-7));
+    assert!(cents(neg(ms)) == "-5;7;");
+    assert!(cents(ms) == "5;-7;");
+    let ts: Vec<(int, int)> = Vec::new();
+    ts.push((1, 2));
+    ts.push((3, -4));
+    assert!(neg(ts).show() == "[(-1, -2), (-3, 4)]");
+}

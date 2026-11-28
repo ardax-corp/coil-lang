@@ -1,7 +1,7 @@
 // sum.c — a minimal C library exposed to userland via the
 // FFI mechanism. Defines a single `sum` function that adds
 // two integers. Compiled to a shared library and loaded by
-// the VM at startup via `dlopen` + `dlsym`.
+// the runtime at startup via `dlopen` + `dlsym`.
 //
 // Build:
 //   cc -shared -fPIC -o libsum.so sum.c
@@ -21,14 +21,15 @@
 /// }
 /// ```
 ///
-/// The VM's `dlopen("sum")` call looks for `libsum.so` on
+/// The runtime's `dlopen("sum")` call looks for `libsum.so` on
 /// the system library search path (or the current
 /// directory). The `dlsym("sum")` call resolves the symbol
-/// in that library. The VM then wraps the resolved function
-/// pointer in a `LibraryFn` and dispatches `NATIVE` opcodes
+/// in that library. The runtime then wraps the resolved function
+/// pointer in a `LibraryFn` and sends the calls
 /// that name `sum` to it.
 #include <stdarg.h>
 #include <stdint.h>
+#include <string.h>
 
 int64_t sum(int64_t a, int64_t b) {
     return a + b;
@@ -81,6 +82,13 @@ void fill_bytes(uint8_t *buf, int64_t n, int64_t v) {
     }
 }
 
+/// Multiply `n` int64s of `xs` by `k` in place (for `Vec<int>` write-back tests).
+void scale_ints(int64_t *xs, int64_t n, int64_t k) {
+    for (int64_t i = 0; i < n; i++) {
+        xs[i] *= k;
+    }
+}
+
 typedef struct {
     int32_t x;
     int32_t y;
@@ -106,7 +114,7 @@ int64_fn_int64 get_doubler(void) {
 static int64_t noted = 0;
 
 /// Add `a + b` to a running total; returns nothing (for void `extern`
-/// tests: each call must leave the VM's operand stack as it found it).
+/// tests: each call must leave the runtime's stack as it found it).
 void sum_note(void *tag, int64_t a, int64_t b) {
     (void)tag;
     noted += a + b;
@@ -132,4 +140,226 @@ int64_t sum_n(int64_t n, ...) {
     }
     va_end(args);
     return total;
+}
+
+/// Floating and bool scalars (direct extern call tests).
+double scale(double x, int64_t k) {
+    return x * (double)k;
+}
+
+_Bool is_even(int64_t x) {
+    return (x & 1) == 0;
+}
+
+int64_t pick(_Bool b, int64_t x, int64_t y) {
+    return b ? x : y;
+}
+
+/// Strings (direct extern call tests): a length, the argument back, and a
+/// constant.
+int64_t str_len(const char *s) {
+    int64_t n = 0;
+    while (s[n]) {
+        n++;
+    }
+    return n;
+}
+
+const char *echo(const char *s) {
+    return s;
+}
+
+const char *greeting(void) {
+    return "hello from C";
+}
+
+const char *no_string(void) {
+    return 0;
+}
+
+/// Structs by value (direct extern call tests): two doubles, an int and
+/// a double, three ints (passed in memory), and a nested struct.
+typedef struct {
+    double x;
+    double y;
+} Vec2;
+
+Vec2 vec2_add(Vec2 a, Vec2 b) {
+    Vec2 r = {a.x + b.x, a.y + b.y};
+    return r;
+}
+
+typedef struct {
+    int64_t id;
+    double w;
+} Tagged;
+
+Tagged tagged_scale(Tagged t, int64_t k) {
+    Tagged r = {t.id + 1, t.w * (double)k};
+    return r;
+}
+
+typedef struct {
+    int64_t a;
+    int64_t b;
+    int64_t c;
+} Triple;
+
+Triple triple_rot(Triple t) {
+    Triple r = {t.b, t.c, t.a};
+    return r;
+}
+
+int64_t triple_sum(int64_t k, Triple t) {
+    return k * (t.a + t.b + t.c);
+}
+
+Point point_swap(Point p) {
+    Point r = {p.y, p.x};
+    return r;
+}
+
+typedef struct {
+    Point at;
+    _Bool on;
+} Flag;
+
+Flag flag_flip(Flag f) {
+    Flag r = {{f.at.x + 1, f.at.y + 1}, !f.on};
+    return r;
+}
+
+Vec2 vec2_make(double x, double y) {
+    Vec2 r = {x, y};
+    return r;
+}
+
+Tagged tagged_make(int64_t id, double w) {
+    Tagged r = {id, w};
+    return r;
+}
+
+Triple triple_make(int64_t a, int64_t b, int64_t c) {
+    Triple r = {a, b, c};
+    return r;
+}
+
+Point point_make(int64_t x, int64_t y) {
+    Point r = {(int32_t)x, (int32_t)y};
+    return r;
+}
+
+Flag flag_make(int64_t x, int64_t y, _Bool on) {
+    Flag r = {{(int32_t)x, (int32_t)y}, on};
+    return r;
+}
+
+/// One number of each struct's fields, to check them from coil.
+double vec2_code(Vec2 v) {
+    return v.x * 100.0 + v.y;
+}
+
+double tagged_code(Tagged t) {
+    return (double)t.id * 100.0 + t.w;
+}
+
+int64_t triple_code(Triple t) {
+    return t.a * 100 + t.b * 10 + t.c;
+}
+
+int64_t point_code(Point p) {
+    return p.x * 10 + p.y;
+}
+
+int64_t flag_code(Flag f) {
+    return f.at.x * 100 + f.at.y * 10 + f.on;
+}
+
+/// Seven `int64_t`s, then a struct: the struct finds no registers left and
+/// goes on the stack (x86-64), after the seventh.
+int64_t late_vec2(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, Tagged t) {
+    return a + b + c + d + e + f + g + t.id;
+}
+
+/// C varargs of each kind, named in order by `kinds`: 'i' an `int64_t`, 'd'
+/// a `double`, 'b' a promoted `_Bool`, 's' a string (its length). Each
+/// counts times its position, so an argument read from the wrong place
+/// shows.
+double va_mix(const char *kinds, ...) {
+    va_list args;
+    va_start(args, kinds);
+    double total = 0;
+    int k = 1;
+    for (const char *p = kinds; *p; p++, k++) {
+        switch (*p) {
+        case 'i': total += k * (double)va_arg(args, int64_t); break;
+        case 'd': total += k * va_arg(args, double); break;
+        case 'b': total += k * (double)va_arg(args, int); break;
+        case 's': total += k * (double)strlen(va_arg(args, const char *)); break;
+        }
+    }
+    va_end(args);
+    return total;
+}
+
+/// A declared `double` and count, then that many `double`s, scaled.
+double va_scaled(double k, int64_t n, ...) {
+    va_list args;
+    va_start(args, n);
+    double total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        total += va_arg(args, double);
+    }
+    va_end(args);
+    return total * k;
+}
+
+/// Callbacks of each kind: C calls the coil function it is given.
+double apply_fcb(double (*cb)(double, int64_t), double x, int64_t k) {
+    return cb(x, k);
+}
+
+int64_t count_if(_Bool (*pred)(int64_t), int64_t n) {
+    int64_t count = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (pred(i)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+int64_t name_len(int64_t (*cb)(const char *)) {
+    return cb("callback");
+}
+
+int64_t call0(int64_t (*cb)(void)) {
+    return cb() + 1;
+}
+
+void each_up_to(void (*cb)(int64_t), int64_t n) {
+    for (int64_t i = 1; i <= n; i++) {
+        cb(i);
+    }
+}
+
+/// Sized integers (#2886): narrowed on the way in, widened on the way out.
+int32_t trunc32(int64_t x) {
+    return (int32_t)x;
+}
+
+int64_t widen32(int32_t x) {
+    return x;
+}
+
+uint8_t low_byte(int64_t x) {
+    return (uint8_t)x;
+}
+
+int64_t widen_u16(uint16_t x) {
+    return x;
+}
+
+int64_t sized_mix(int8_t a, uint32_t b, int16_t c) {
+    return (int64_t)a * 1000000 + (int64_t)b + (int64_t)c;
 }

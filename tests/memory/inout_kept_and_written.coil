@@ -1,0 +1,88 @@
+// A callee that keeps its parameter and writes it in place for the caller
+// copies what it keeps itself, so an inout parameter passed there is the
+// caller's place: the callee's writes reach the caller's object and the
+// kept value is the one it had at the store (#2850).
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+class Holder {
+    pub c: C,
+}
+
+fn keep_and_bump(Holder h, C p) {
+    h.c = p;
+    p.x += 10;
+}
+
+fn passes_on(Holder h, C p) {
+    keep_and_bump(h, p);
+    p.x += 100;
+}
+
+fn bump_then_keep(Holder h, C p) {
+    p.x += 10;
+    h.c = p;
+}
+
+fn passes_on_late(Holder h, C p) {
+    bump_then_keep(h, p);
+    p.x += 100;
+}
+
+fn keep_in(Vec<C> v, C p) {
+    v.push(p);
+    p.x += 10;
+}
+
+fn passes_to_push(Vec<C> v, C p) {
+    keep_in(v, p);
+    p.x += 100;
+}
+
+gen fn counts(C p) {
+    p.x += 1;
+    yield p.x;
+}
+
+fn passes_to_gen(C p) -> int {
+    let total = 0;
+    for n in counts(p) {
+        total += n;
+    }
+    p.x += 100;
+    return total;
+}
+
+test("an inout parameter passed to a callee that keeps and writes it gets the callee's writes") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    passes_on(h, a);
+    assert!(a.x == 111);
+    assert!(h.c.x == 1);
+}
+
+test("a callee that writes before it keeps keeps the written value") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    passes_on_late(h, a);
+    assert!(a.x == 111);
+    assert!(h.c.x == 11);
+}
+
+test("a kept element is the value at the push") {
+    let v: Vec<C> = [];
+    let a = new C(1);
+    passes_to_push(v, a);
+    assert!(a.x == 111);
+    assert!(v[0].x == 1);
+}
+
+test("a generator's parameter stays its own value") {
+    let a = new C(1);
+    let t = passes_to_gen(a);
+    assert!(t == 2);
+    assert!(a.x == 101);
+}

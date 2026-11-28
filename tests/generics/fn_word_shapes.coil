@@ -1,0 +1,183 @@
+// A function over a type parameter whose parameters and result are plain
+// words (a bare `T`, a closed type, a generic class's instance, a function,
+// a tuple of such words, an `Option` / `Result` of such functions) is one
+// closure word in every instance. So it is a local, a binding, a field, a
+// payload and an item at any depth, matched and bound with no refusal
+// (coil-lang#2493, #2571): `Option<fn(T) -> T>`, `fn(T) -> (T, T)`,
+// `fn(Vec<T>) -> T`, a tuple payload `(fn() -> T, int)`.
+//
+// fn_word_shapes_shared.coil runs the same with no mono clones.
+use tests::assert;
+use gc::collect;
+
+class Pt {
+    pub a: int,
+}
+
+class OptBox<T> {
+    pub o: Option<fn() -> T>,
+}
+
+impl OptBox<T> {
+    pub fn run() -> Option<T> {
+        return match self.o {
+            Some(f) => Some(f()),
+            None => None,
+        };
+    }
+}
+
+class Pairs<T> {
+    pub f: fn(T) -> (T, T),
+}
+
+impl Pairs<T> {
+    pub fn both(T x) -> (T, T) {
+        return (self.f)(x);
+    }
+}
+
+enum P<T> {
+    Find(Option<fn(T) -> T>),
+    Dup(fn(T) -> (T, T)),
+    First(fn(Vec<T>) -> T),
+    Thunk((fn() -> T, int)),
+    N,
+}
+
+fn step<T>(P<T> p, T x) -> T {
+    return match p {
+        P::Find(o) => match o {
+            Some(f) => f(x),
+            None => x,
+        },
+        P::Dup(f) => {
+            let (_, b) = f(x);
+            b
+        },
+        P::First(f) => f([x, x]),
+        P::Thunk(t) => {
+            let (f, _) = t;
+            f()
+        },
+        P::N => x,
+    };
+}
+
+fn get<T>(Option<fn() -> T> o) -> Option<T> {
+    return match o {
+        Some(f) => Some(f()),
+        None => None,
+    };
+}
+
+fn apply_opt<T>(Option<fn(T) -> T> o, T x) -> T {
+    let g = o;
+    return match g {
+        Some(f) => f(x),
+        None => x,
+    };
+}
+
+fn two() -> int {
+    return 2;
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn dup(int x) -> (int, int) {
+    return (x, x + 1);
+}
+
+fn second(Vec<int> xs) -> int {
+    return xs[1] + 10;
+}
+
+fn halve(float x) -> float {
+    return x / 2.0;
+}
+
+fn bang(string s) -> string {
+    return s + "!";
+}
+
+fn bump(Pt p) -> Pt {
+    return new Pt(p.a + 1);
+}
+
+fn three() -> string {
+    return "three";
+}
+
+test("a generic class's own method matches its Option<fn() -> T> field") {
+    assert!(new OptBox(Some(two)).run() == Some(2));
+    assert!(new OptBox(Some(three)).run() == Some("three"));
+    let none: OptBox<int> = new OptBox(None);
+    assert!(none.run() == None);
+}
+
+test("a generic class's own method calls its fn(T) -> (T, T) field") {
+    assert!(new Pairs(dup).both(3) == (3, 4));
+    assert!(new Pairs(fn (string s) => (s, s + "?")).both("a") == ("a", "a?"));
+    let (p, q) = new Pairs(fn (Pt p) => (p, bump(p))).both(new Pt(1));
+    assert!(p.a == 1 && q.a == 2);
+}
+
+test("a generic over an enum whose payloads hold functions") {
+    assert!(step(P::Find(Some(inc)), 3) == 4);
+    let none: P<int> = P::Find(None);
+    assert!(step(none, 3) == 3);
+    assert!(step(P::Dup(dup), 3) == 4);
+    assert!(step(P::First(second), 5) == 15);
+    assert!(step(P::Thunk((two, 0)), 9) == 2);
+    assert!(step(P::Find(Some(halve)), 3.0) == 1.5);
+    assert!(step(P::Find(Some(bang)), "a") == "a!");
+    assert!(step(P::Dup(fn (string s) => (s, s + s)), "b") == "bb");
+    assert!(step(P::Thunk((three, 1)), "x") == "three");
+    assert!(step(P::Find(Some(bump)), new Pt(4)).a == 5);
+    assert!(step(P::Find(Some(fn (bool b) => !b)), true) == false);
+}
+
+test("a generic matches an Option of a function") {
+    assert!(get(Some(two)) == Some(2));
+    assert!(get(Some(three)) == Some("three"));
+    let none: Option<fn() -> float> = None;
+    assert!(get(none) == None);
+    assert!(apply_opt(Some(inc), 1) == 2);
+    assert!(apply_opt(Some(halve), 1.0) == 0.5);
+    assert!(apply_opt(Some(bump), new Pt(0)).a == 1);
+}
+
+test("ground code holds the same shapes") {
+    let o: Option<fn(int) -> int> = Some(inc);
+    let p = (o, 1);
+    let (q, _) = p;
+    let r = match q {
+        Some(h) => h(3),
+        None => 0,
+    };
+    assert!(r == 4);
+    let e: P<string> = P::Dup(fn (string s) => (s, s + "!"));
+    let d = match e {
+        P::Dup(f) => f("z"),
+        default => ("", ""),
+    };
+    assert!(d == ("z", "z!"));
+}
+
+test("closures kept across a collection") {
+    let fs: Vec<P<string>> = [];
+    let i = 0;
+    while i < 20 {
+        let n = i;
+        fs.push(P::Find(Some(fn (string s) use (n) => s + n.show())));
+        fs.push(P::Thunk((fn () use (n) => "t" + n.show(), n)));
+        i = i + 1;
+    }
+    collect();
+    assert!(step(fs[6], "a") == "a3");
+    assert!(step(fs[7], "a") == "t3");
+    assert!(step(fs[39], "") == "t19");
+}

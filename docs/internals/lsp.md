@@ -59,7 +59,7 @@ coil lsp --root src --root .spool/deps --root ~/.coil/stdlib/src --allow-exit
 
 `--root DIR` (repeatable; relative to the server's working directory),
 `--allow-read` / `--allow-write` / `--allow-net` / `--allow-env`,
-`--allow-attach` / `--allow-exit` / `--allow-ffi-exec`,
+`--allow-exit` / `--allow-ffi-exec`,
 `-A`, `--allow-dload STEM` and `--ffi-search-path DIR`. The grants reach the
 project typecheck, so code that the project is allowed to compile is not
 flagged in the editor. The read / write / net / env / exit checks
@@ -73,8 +73,9 @@ hover text with links into [coil-website](https://github.com/ardax-corp/coil-web
 (`src/content/docs/`; site route `/docs/…`). Process clocks are virtual
 `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`).
 There is no virtual `time` / `regex` / `tls` / `crypto` module; those live
-in userland packages. `ffi::dload` / `declare` / `invoke` are documented as
-HostInvoke FFI stubs.
+in userland packages. `ffi` keeps only its `Error` / `ErrorKind` enums and
+`ffi::types`; libraries are called through `extern` blocks, or loaded while
+the program runs with the coil-ffi package.
 
 Function completion items use snippet insertion: selecting `fib` inserts
 parameter placeholders such as `fib(${1:n})$0` and advertises `(` / `,` as

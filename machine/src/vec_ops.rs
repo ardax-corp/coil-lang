@@ -15,6 +15,24 @@ fn pack_vec_option(heap: &mut Heap, value: Option<Value>) -> Value {
     })
 }
 
+/// [`pack_vec_option`] of an element taken out of an array whose element
+/// kind is `kind`: a boxed `Some` takes that kind for its payload (a byte
+/// element comes out a number). The builtin `Vec` thunks serve every `T`,
+/// so the call's own layout bits carry no payload kind.
+fn pack_vec_element(heap: &mut Heap, value: Option<Value>, kind: u8) -> Value {
+    let kind = match kind {
+        common::WORD_BYTE => common::WORD_SCALAR,
+        k @ (common::WORD_SCALAR | common::WORD_POINTER) => k,
+        _ => return pack_vec_option(heap, value),
+    };
+    let bits = crate::host_enum::current_host_enum_bits();
+    if common::host_layout_base(bits) != common::HOST_ENUM_LAYOUT_BOXED || value.is_none() {
+        return pack_vec_option(heap, value);
+    }
+    let bits = common::host_layout_base(bits) | u32::from(common::host_layout_with_kinds(kind, common::WORD_UNKNOWN));
+    crate::host_enum::with_host_enum_bits(bits, || pack_vec_option(heap, value))
+}
+
 /// `Vec::with_capacity(n) -> Vec<T>` — empty growable array with reserved capacity.
 pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
     let n = args.first().map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
@@ -26,8 +44,8 @@ pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.capacity() -> int`
 pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let cap = match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(gc)) => gc.as_ref().capacity(),
+    let cap = match heap.array_at(handle.bits()) {
+        Some(gc) => gc.as_ref().capacity(),
         _ => 0,
     };
     Value::from(cap as i64)
@@ -37,7 +55,7 @@ pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let extra = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
         gc.as_mut().reserve(extra);
         heap.account_array(gc.as_mut());
     }
@@ -47,7 +65,7 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.clear() -> ()`
 pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
         gc.as_mut().clear();
     }
     Value::from(0i64)
@@ -56,11 +74,12 @@ pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.pop() -> Option<T>`
 pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(mut gc)) => match gc.as_mut().pop() {
-            Some(v) => pack_vec_option(heap, Some(v)),
-            None => pack_vec_option(heap, None),
-        },
+    match heap.array_at(handle.bits()) {
+        Some(mut gc) => {
+            let kind = gc.as_ref().elem_kind();
+            let v = gc.as_mut().pop();
+            pack_vec_element(heap, v, kind)
+        }
         _ => pack_vec_option(heap, None),
     }
 }
@@ -70,7 +89,7 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(0);
     let value = args.get(2).copied().unwrap_or(Value::from(0i64));
-    let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) else {
+    let Some(mut gc) = heap.array_at(handle.bits()) else {
         return Err("Vec::insert on non-array".to_string());
     };
     let len = gc.as_ref().len();
@@ -86,25 +105,110 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
 pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(-1);
-    match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(mut gc)) => {
+    match heap.array_at(handle.bits()) {
+        Some(mut gc) => {
             let len = gc.as_ref().len();
             if index < 0 || (index as usize) >= len {
                 pack_vec_option(heap, None)
             } else {
+                let kind = gc.as_ref().elem_kind();
                 let v = gc.as_mut().remove(index as usize);
-                pack_vec_option(heap, Some(v))
+                pack_vec_element(heap, Some(v), kind)
             }
         }
         _ => pack_vec_option(heap, None),
     }
 }
 
+/// `vec_drain(v, from, to) -> ()`: drop elements `from..to`, in any array
+/// form (a lane array's whole elements). Lane code's `pop` and `remove`
+/// take the element out with it; a range past the end is cut to it.
+pub fn host_vec_drain(heap: &mut Heap, args: &[Value]) -> Value {
+    let handle = args.first().copied().unwrap_or(Value::from(0i64));
+    let from = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    let to = args.get(2).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
+        gc.as_mut().drain_range(from, to);
+    }
+    Value::from(0i64)
+}
+
+/// `vec_rotate_in(v, i) -> ()`: move the last element to `i`, the
+/// elements from `i` up one, in any array form. Lane code's `insert`
+/// pushes the element and then rotates it in; `i` past the end moves
+/// nothing.
+pub fn host_vec_rotate_in(heap: &mut Heap, args: &[Value]) -> Value {
+    let handle = args.first().copied().unwrap_or(Value::from(0i64));
+    let i = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
+        gc.as_mut().rotate_last_to(i);
+    }
+    Value::from(0i64)
+}
+
+/// `vec_drain` / `vec_rotate_in` (major 7 minor 3), after the lock primitives.
+pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
+    &[(common::VEC_DRAIN_NATIVE, 3, host_vec_drain), (common::VEC_ROTATE_IN_NATIVE, 2, host_vec_rotate_in)];
+
+/// `vec_stamp(v, kinds) -> ()`: stamp the word kinds of an object a shared
+/// generic body made of a type parameter's words. An array's element kind
+/// (`WORD_SCALAR` or `WORD_POINTER`, [`ObjArray::set_elem_kind`]); a tuple's or
+/// enum's payload kinds, packed (`common::pack_word_kinds`), added to those
+/// its construction recorded (by its tag with [`common::VEC_STAMP_BY_TAG`]); an instance's own kinds of its generic slots
+/// ([`crate::memory::ObjInstance::own_kinds`]), the same way.
+pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
+    let handle = args.first().copied().unwrap_or(Value::from(0i64));
+    let kinds = args.get(1).map_or(0, |v| v.as_int());
+    stamp(heap, handle, kinds);
+    Value::from(0i64)
+}
+
+fn stamp(heap: &mut Heap, handle: Value, kinds: i64) {
+    match heap.find_object_by_addr(handle.bits()) {
+        Some(Object::Array(mut gc)) => {
+            if let Ok(kind @ (common::WORD_SCALAR | common::WORD_POINTER)) = u8::try_from(kinds)
+                && gc.as_ref().elem_kind() == common::WORD_UNKNOWN
+            {
+                gc.as_mut().set_elem_kind(kind);
+            }
+        }
+        Some(Object::Enum(mut gc)) => {
+            let tag = gc.as_ref().tag;
+            let k = if kinds & common::VEC_STAMP_BY_TAG != 0 {
+                // Only a variant with words: a unit one is immortal.
+                (tag < 4 && !gc.as_ref().payload.is_empty()).then(|| ((kinds >> (8 * tag)) & 0xff) as common::PackedKinds)
+            } else {
+                common::PackedKinds::try_from(kinds).ok()
+            };
+            if let Some(k) = k.filter(|&k| k != 0) {
+                gc.as_mut().payload.add_kinds(k);
+            }
+        }
+        Some(Object::Fn(mut gc)) => {
+            if let Ok(k) = common::PackedKinds::try_from(kinds) {
+                gc.as_mut().word_kinds |= k;
+            }
+        }
+        Some(Object::Instance(mut gc)) => {
+            // Counts follow the new kinds ([`Heap::rc_add_instance_kinds`]);
+            // an array's walk reads a scalar kind as unknown and an enum's or
+            // closure's words are counted as made, so those need none.
+            if let Ok(k) = common::PackedKinds::try_from(kinds) {
+                heap.rc_add_instance_kinds(&mut gc, k);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `vec_stamp` (MIR section format 19), after `startup_restore`.
+pub const VEC_STAMP_WIRING: &[(&str, usize, crate::HostValueFn)] = &[(common::VEC_STAMP_NATIVE, 2, host_vec_stamp)];
+
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let arr = match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(gc)) => gc.as_ref().copy(),
+    let arr = match heap.array_at(handle.bits()) {
+        Some(gc) => gc.as_ref().copy(),
         _ => ObjArray::new(Vec::new()),
     };
     let (obj, _) = heap.alloc(arr, Object::Array);
@@ -124,20 +228,29 @@ pub fn host_vec_extend_range(heap: &mut Heap, args: &[Value]) -> Value {
     if dst == src {
         return Value::from(from);
     }
-    let Some(Object::Array(mut out)) = heap.find_object_by_addr(dst) else {
+    let Some(mut out) = heap.array_at(dst) else {
         return Value::from(from);
     };
     let (Ok(lo), Ok(hi)) = (usize::try_from(from), usize::try_from(to)) else {
         return Value::from(from);
     };
-    match heap.find_object_by_addr(src) {
-        Some(Object::Array(inp)) if lo <= hi && hi <= inp.as_ref().len() => out.as_mut().extend_from(inp.as_ref(), lo, hi),
-        Some(Object::String(s)) => match s.as_ref().data.as_bytes().get(lo..hi) {
+    let had = out.as_ref().len();
+    // `src` is an array or a string: one header kind says which.
+    if let Some(inp) = heap.array_at(src) {
+        if lo > hi || hi > inp.as_ref().len() {
+            return Value::from(from);
+        }
+        out.as_mut().extend_from(inp.as_ref(), lo, hi);
+    } else if let Some(s) = heap.str_at(src) {
+        match s.as_ref().data.as_bytes().get(lo..hi) {
             Some(bytes) => out.as_mut().extend_bytes(bytes),
             None => return Value::from(from),
-        },
-        _ => return Value::from(from),
+        }
+    } else {
+        return Value::from(from);
     }
+    // A leaf: the copies it appended are its only new words.
+    heap.rc_count_appended(out.as_ref(), had);
     heap.account_array(out.as_mut());
     Value::from(to)
 }
@@ -147,8 +260,11 @@ pub fn host_vec_extend_range(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_fill(heap: &mut Heap, args: &[Value]) -> Value {
     let arg = |i: usize| args.get(i).copied().unwrap_or(Value::from(0i64));
     let n = usize::try_from(arg(2).as_int()).unwrap_or(0);
-    if let Some(Object::Array(mut out)) = heap.find_object_by_addr(arg(0).bits()) {
+    if let Some(mut out) = heap.array_at(arg(0).bits()) {
+        let had = out.as_ref().len();
         out.as_mut().fill_push(arg(1), n);
+        // A leaf: counts the copies it appended itself.
+        heap.rc_count_appended(out.as_ref(), had);
         heap.account_array(out.as_mut());
     }
     Value::from(0i64)
@@ -210,6 +326,31 @@ mod tests {
             }
             _ => panic!("expected Option enum"),
         }
+    }
+
+    /// `vec_extend_range` and `vec_fill` are leaves: with counts on, each
+    /// copy they append gains an owner, as the snapshot diff around a call
+    /// that writes words gave, and the words already there do not.
+    #[test]
+    fn appended_copies_count_themselves() {
+        let mut heap = Heap::default();
+        heap.set_rc_counting(true);
+        let strs: Vec<Object> = (0..3).map(|i| heap.alloc(crate::memory::ObjString::from(format!("s{i}").as_str()), Object::String).0).collect();
+        let words: Vec<Value> = strs.iter().map(|o| Value::from(o.addr())).collect();
+        let mut src = ObjArray::new(words.clone());
+        src.set_elem_kind(common::WORD_POINTER);
+        let src = Value::from(heap.alloc(src, Object::Array).0.addr());
+        let mut dst = ObjArray::new(vec![words[0]]);
+        dst.set_elem_kind(common::WORD_POINTER);
+        let dst = Value::from(heap.alloc(dst, Object::Array).0.addr());
+        let counts = |strs: &[Object]| strs.iter().map(|o| o.rc_count()).collect::<Vec<_>>();
+        let before = counts(&strs);
+        let to = host_vec_extend_range(&mut heap, &[dst, src, Value::from(1i64), Value::from(3i64)]);
+        assert_eq!(to.as_int(), 3);
+        let after: Vec<u32> = counts(&strs).iter().zip(&before).map(|(a, b)| a - b).collect();
+        assert_eq!(after, vec![0, 1, 1], "a word already there gains nothing");
+        host_vec_fill(&mut heap, &[dst, words[2], Value::from(2i64)]);
+        assert_eq!(strs[2].rc_count(), before[2] + 3);
     }
 
     #[test]

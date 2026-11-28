@@ -122,9 +122,11 @@ fn duplicate_import_is_rejected() {
     expect("macro_duplicate_import", &["imported from more than one module"]);
 }
 
+/// Modules that need each other's derives import each other: the import
+/// cycle is the error (#2536).
 #[test]
 fn expansion_cycle_is_reported() {
-    expect("macro_cycle", &["macro expansion cycle"]);
+    expect("macro_cycle", &["import cycle: `macro_cycle_a -> macro_cycle_b -> macro_cycle_a`"]);
 }
 
 #[test]

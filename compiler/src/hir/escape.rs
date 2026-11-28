@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use super::{Builtin, BinOp, Callee, Cx, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind, Summary, Walk};
-use super::{is_vec, pat_binds, VEC_MUTATORS};
+use super::{is_vec, VEC_MUTATORS};
 use crate::typechecking::ty::Ty;
 
 /// Bit `i` of [`Src::sites`] for the first 63 allocation sites; later
@@ -73,10 +73,7 @@ pub(super) fn leaf(ty: Option<&Ty>) -> bool {
 pub(super) fn no_heap(ty: Option<&Ty>) -> bool {
     match ty {
         Some(Ty::Readonly(inner)) => no_heap(Some(inner)),
-        Some(Ty::Con(n)) => matches!(
-            n.as_str(),
-            "int" | "float" | "bool" | "byte" | "unit" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-        ),
+        Some(Ty::Con(n)) => crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.no_heap),
         _ => false,
     }
 }
@@ -87,7 +84,7 @@ pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
     let body = &cx.module.bodies[w.index];
     let lookup = |callee: &Callee, args: &[HirId]| match callee {
         Callee::Named { name, def, .. } => Some(cx.named(w, name, *def)),
-        Callee::Method { name } => cx.method(w, *args.first()?, name).map(|(s, _)| s),
+        Callee::Method { name } => cx.method(w, None, *args.first()?, name).map(|(s, _)| s),
         Callee::Value(f) => cx.fn_value(w, *f),
         Callee::Resolved(_) => None,
     };
@@ -296,7 +293,7 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     fn bind(&mut self, pat: &HirPat, s: Src) {
         let mut binds = Vec::new();
-        pat_binds(pat, &mut binds);
+        pat.for_each_bind(&mut |l| binds.push(l));
         for l in binds {
             if !no_heap(self.body.local(l).ty.as_ref()) {
                 self.add_local(l, s);
@@ -354,6 +351,11 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     /// What the value of `id` may reach.
     pub(super) fn src(&mut self, id: HirId) -> Src {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.src_level(id))
+    }
+
+    fn src_level(&mut self, id: HirId) -> Src {
         let body = self.body;
         let e = body.expr(id);
         if no_heap(e.ty.as_ref()) {
@@ -361,7 +363,7 @@ impl<'c, 'a> Escape<'c, 'a> {
         }
         match &e.kind {
             // A string literal is interned: immutable, and never freed early
-            // (the VM skips interned strings), so holding one is like
+            // (the runtime skips interned strings), so holding one is like
             // holding nothing.
             HirKind::Lit(_) => Src::EMPTY,
             HirKind::Local(l) => self.local(*l),
@@ -467,7 +469,7 @@ impl<'c, 'a> Escape<'c, 'a> {
                 }
             }
             HirKind::Builtin { op, args } => match op {
-                Builtin::Retype | Builtin::Relayout | Builtin::Stringify { .. } | Builtin::Cow { .. } | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
+                Builtin::Retype | Builtin::Relayout | Builtin::Stringify { .. } | Builtin::Cow { .. } | Builtin::CowPin | Builtin::CowUnpin | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
                 _ => {
                     for a in args {
                         let s = self.src(*a);
@@ -506,175 +508,9 @@ impl<'c, 'a> Escape<'c, 'a> {
     }
 }
 
-/// A way an object made inside a `region { … }` block leaves it (E0140).
-pub(super) struct RegionLeak {
-    /// The region block.
-    pub(super) region: crate::hir::Span,
-    /// The node the object leaves by.
-    pub(super) at: crate::hir::Span,
-    pub(super) how: String,
-}
-
-/// The objects made inside each `region { … }` block of `body` that can
-/// leave it: assigned to a local declared outside, stored into an object
-/// from outside or a static, passed where the callee keeps it, captured by
-/// a `defer`, yielded, or handed out as the block's value. A `return` (and
-/// `?`) out of a region may take an object along: the minor collection at
-/// the region's exit copies it. Callees the analysis cannot see are not
-/// errors either; the runtime keeps whatever they keep.
-pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> Vec<RegionLeak> {
-    // A region lowers to `Block { [enter, inner | let t = inner, exit] }`.
-    let regions: Vec<(crate::hir::Span, HirId, bool)> = body
-        .exprs
-        .iter()
-        .filter_map(|x| match &x.kind {
-            HirKind::Block { stmts, .. }
-                if stmts.len() == 3 && matches!(body.expr(stmts[0]).kind, HirKind::Builtin { op: Builtin::Region { enter: true }, .. }) =>
-            {
-                match body.expr(stmts[1]).kind {
-                    HirKind::Let { init: Some(inner), .. } => Some((x.span, inner, true)),
-                    _ => Some((x.span, stmts[1], false)),
-                }
-            }
-            _ => None,
-        })
-        .collect();
-    if regions.is_empty() {
-        return Vec::new();
-    }
-    let mut e = Escape::new(module, body, lookup);
-    e.solve_locals();
-    for i in 0..body.exprs.len() {
-        e.src(HirId(i as u32));
-    }
-    let mut out = Vec::new();
-    for (region, inner, valued) in regions {
-        let mut inside = std::collections::HashSet::new();
-        let mut work = vec![inner];
-        while let Some(at) = work.pop() {
-            if inside.insert(at) {
-                work.extend(crate::hir::lower::children(body, at));
-            }
-        }
-        let mut declared = std::collections::HashSet::new();
-        for &at in &inside {
-            match &body.expr(at).kind {
-                HirKind::Let { local, .. } => {
-                    declared.insert(*local);
-                }
-                HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
-                    let mut binds = Vec::new();
-                    pat_binds(pat, &mut binds);
-                    declared.extend(binds);
-                }
-                HirKind::Match { arms, .. } => {
-                    for arm in arms {
-                        let mut binds = Vec::new();
-                        pat_binds(&arm.pat, &mut binds);
-                        declared.extend(binds);
-                    }
-                }
-                _ => {}
-            }
-        }
-        // The region's own sites; the last bit is shared, so it never counts.
-        let made = e
-            .sites
-            .iter()
-            .filter(|(id, bit)| **bit < SITE_BITS - 1 && inside.contains(id))
-            .fold(0u64, |m, (_, bit)| m | (1 << bit));
-        if made == 0 {
-            continue;
-        }
-        let leaks = |e: &mut Escape<'_, '_>, value: HirId| {
-            let s = e.src(value);
-            e.close(s).sites & made != 0
-        };
-        // Whether `base` may reach anything but this region's objects.
-        let outside = |e: &mut Escape<'_, '_>, base: HirId| {
-            let b = e.src(base);
-            b.params != 0 || b.other || b.sites & !made != 0
-        };
-        let mut push = |at: HirId, how: String| out.push(RegionLeak { region, at: body.expr(at).span, how });
-        let mut ids: Vec<HirId> = inside.iter().copied().collect();
-        ids.sort_by_key(|id| id.0);
-        for id in ids {
-            match &body.expr(id).kind {
-                HirKind::Assign { place, value } => match &body.expr(*place).kind {
-                    HirKind::Local(l) if declared.contains(l) => {}
-                    HirKind::Local(l) => {
-                        if leaks(&mut e, *value) {
-                            push(id, format!("is assigned to `{}`, declared outside the region", body.local(*l).name));
-                        }
-                    }
-                    HirKind::Field { base, .. } | HirKind::Index { base, .. } => {
-                        if outside(&mut e, *base) && leaks(&mut e, *value) {
-                            push(id, "is stored into an object from outside the region".into());
-                        }
-                    }
-                    _ => {
-                        if leaks(&mut e, *value) {
-                            push(id, "is stored into a static".into());
-                        }
-                    }
-                },
-                HirKind::Append { base, value } => {
-                    if outside(&mut e, *base) && leaks(&mut e, *value) {
-                        push(id, "is appended to an object from outside the region".into());
-                    }
-                }
-                HirKind::Yield { value, .. } | HirKind::Resume { value: Some(value), .. } => {
-                    if leaks(&mut e, *value) {
-                        push(id, "is yielded".into());
-                    }
-                }
-                HirKind::Defer { captures, .. } => {
-                    for l in captures.iter().flatten() {
-                        let s = e.local(*l);
-                        if e.close(s).sites & made != 0 {
-                            push(id, format!("is captured by a `defer` (through `{}`)", body.local(*l).name));
-                        }
-                    }
-                }
-                HirKind::Call { callee, args } => {
-                    if let Callee::Method { name } = callee
-                        && VEC_MUTATORS.contains(&name.as_str())
-                        && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()))
-                    {
-                        if outside(&mut e, args[0]) && args[1..].iter().any(|a| leaks(&mut e, *a)) {
-                            push(id, format!("is added (`{name}`) to a vector from outside the region"));
-                        }
-                        continue;
-                    }
-                    let Some(s) = e.callee(id, callee, args) else { continue };
-                    for (j, a) in args.iter().enumerate() {
-                        if j < 64 && s.escapes & (1 << j) != 0 && leaks(&mut e, *a) {
-                            let name = match callee {
-                                Callee::Named { name, .. } | Callee::Method { name } => name.rsplit("::").next().unwrap_or(name).to_string(),
-                                Callee::Value(_) => "a function value".to_string(),
-                                Callee::Resolved(r) => r.key.rsplit("::").next().unwrap_or(&r.key).to_string(),
-                            };
-                            push(id, format!("is passed to `{name}`, which keeps it"));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if valued && leaks(&mut e, inner) {
-            let tail = match body.expr(inner).kind {
-                HirKind::Block { tail: Some(t), .. } => t,
-                _ => inner,
-            };
-            push(tail, "is the region's value".into());
-        }
-    }
-    out
-}
-
 /// Host natives that allocate their result and keep nothing they are
 /// passed. Early freeing frees what these return, so each is checked
-/// against the VM: `to_bytes`, `from_bytes` and `vec_with_capacity`
+/// against the runtime: `to_bytes`, `from_bytes` and `vec_with_capacity`
 /// allocate a new object, `string_slice_bytes` a new string (that may
 /// share its bytes, which are reference-counted), and `format` (also how
 /// `a + b` on strings runs) a new string.
@@ -686,16 +522,60 @@ const FRESH_HOSTS: &[&str] = &[
     "format",
     "vec_with_capacity",
     "with_capacity",
+    // `key_index::table`: a new, empty table (`HashMap::new`, #2821).
+    "key_index_table",
+    // `key_index::map_table`: a new, empty map table.
+    "map_table",
 ];
 
 /// Host natives with effects that still keep nothing they are passed: the
 /// buffer of a `write` is read during the call only.
-const NON_RETAINING_HOSTS: &[&str] = &["write", "write_from", "write_all", "read", "print", "println", "eprint", "eprintln"];
+/// The map table natives (`key_index::map_*`) read their key and keys and
+/// write numbers into the table only.
+const NON_RETAINING_HOSTS: &[&str] = &[
+    "write",
+    "write_from",
+    "write_all",
+    "read",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "map_find",
+    "map_upsert",
+    "map_probe",
+    "map_add",
+    "map_live",
+    "map_len",
+    "map_remove",
+    "map_compact",
+    "map_clear",
+    "map_word_mode",
+    "word_mode",
+];
 
-/// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`].
+/// Host natives that write their first argument and no other: the map
+/// table natives that change the table (`map_upsert` only reads the keys
+/// `Vec` it is handed), so copy-on-write makes only the table unique, and
+/// `map_put`, which writes its map object's fields and makes each of them
+/// unique itself.
+pub(super) fn writes_first_arg_only(name: &str) -> bool {
+    let name = name.rsplit("::").next().unwrap_or(name);
+    matches!(name, "map_upsert" | "map_add" | "map_remove" | "map_compact" | "map_clear" | "map_put")
+}
+
+/// The registry name of a host function export that is in [`FRESH_HOSTS`]
+/// under it, where its surface name differs (`key_index::table` is
+/// `key_index_table`): what its escape facts are known by.
+pub(super) fn fresh_registry(export: &crate::typechecking::virtual_modules::BuiltinExport) -> Option<&'static str> {
+    export.host_registry().filter(|r| FRESH_HOSTS.contains(r))
+}
+
+/// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`], or is
+/// `map_put`, whose facts [`host_summary`] gives argument by argument.
 pub(super) fn is_listed_host(name: &str) -> bool {
     let short = name.rsplit("::").next().unwrap_or(name);
-    FRESH_HOSTS.contains(&short) || NON_RETAINING_HOSTS.contains(&short)
+    FRESH_HOSTS.contains(&short) || NON_RETAINING_HOSTS.contains(&short) || short == "map_put"
 }
 
 /// [`Summary::of`] for host native `name`, with its escape facts: a pure
@@ -717,5 +597,17 @@ pub(super) fn host_summary(name: &str, mut s: Summary) -> Summary {
     // Only a host native keeps without sharing; other unknown code shares
     // what it stores (copy-on-write).
     s.keeps = if common::host_native_id(short).is_some() { s.escapes } else { 0 };
+    // `map_put` keeps the key and the value it stores in its map object,
+    // which copy-on-write shares. The map object itself is not kept, so it
+    // is not shared at the call, but it escapes all the same: the runtime
+    // finds it as a heap object, so it is never a frame's.
+    if short == "map_put" {
+        s.escapes = 0b1101;
+        s.keeps = 0b1100;
+        s.returns = 0;
+        s.returns_arg = 0;
+        s.returns_inner = 0;
+        s.shared_ret = false;
+    }
     s
 }

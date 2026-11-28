@@ -1,5 +1,5 @@
 //! Coil `int` arithmetic: every operation either gives the exact result or
-//! traps. The VM raises the trap as a Coil panic; a constant folder leaves
+//! traps. The runtime raises the trap as a Coil panic; a constant folder leaves
 //! the operation for run time instead.
 //!
 //! `MIN % -1` is `0` (the exact remainder), not a trap.

@@ -38,9 +38,9 @@ for path in "${BENCHES[@]}"; do
     hyc="$OUT_DIR/${name}.ccoil"
     echo "== compile ${path} -> ${hyc} =="
     if [[ "$name" == "fib" ]]; then
-        "$BIN" compile --auto-par off "$path" -o "$hyc" >/dev/null
+        "$BIN" compile --fold-calls off --auto-par off "$path" -o "$hyc" >/dev/null
     else
-        "$BIN" compile "$path" -o "$hyc" >/dev/null
+        "$BIN" compile --fold-calls off "$path" -o "$hyc" >/dev/null
     fi
     echo "== poop -d ${DURATION_MS} coil run ${name}.ccoil =="
     poop -d "$DURATION_MS" "$BIN run $hyc"

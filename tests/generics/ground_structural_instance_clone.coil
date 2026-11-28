@@ -1,0 +1,98 @@
+// A ground builtin shape around a class with bounded generic-head instances
+// (coil-lang#2580): `Show<Option<Box<int>>>`'s structural thunk shows its
+// payload through `Show<Box<int>>`'s per-type clone, which the thunk asks
+// for after the module's own clones are emitted. It must still be compiled:
+// the call named a body that was never emitted, and native code panicked.
+// The same for `Eq` and `Hash`, and for a `Result`, `Vec`, tuple or array
+// around the class. `Box`'s instances are not the structural ones (its
+// `==` compares tens, its `show` brackets, its `hash` is the tens), so a
+// result built without them differs.
+use tests::assert;
+
+class Box<T> {
+    pub item: T,
+}
+
+impl Show for Box<T: Show> {
+    fn show(Box<T> b) -> string {
+        return "[" + b.item.show() + "]";
+    }
+}
+
+impl Eq for Box<T: Eq + Hash> {
+    fn eq(Box<T> a, Box<T> b) -> bool {
+        return a.item.hash() / 10 == b.item.hash() / 10;
+    }
+}
+
+impl Hash for Box<T: Hash> {
+    fn hash(Box<T> b) -> int {
+        return b.item.hash() / 10;
+    }
+}
+
+fn shown<T: Show>(T x) -> string {
+    return x.show();
+}
+
+fn same<T: Eq>(T x, T y) -> bool {
+    return x == y;
+}
+
+test("Show of an Option, Result, Vec, tuple or array of a generic-head class") {
+    let o: Option<Box<int>> = Some(new Box(5));
+    assert!(o.show() == "Some([5])");
+    let n: Option<Box<Box<int>>> = Some(new Box(new Box(6)));
+    assert!(n.show() == "Some([[6]])");
+    let r: Result<Box<int>, string> = Ok(new Box(7));
+    assert!(r.show() == "Ok([7])");
+    let e: Result<int, Box<string>> = Err(new Box("x"));
+    assert!(e.show() == "Err([x])");
+    let v: Vec<Box<int>> = Vec::new();
+    v.push(new Box(8));
+    assert!(v.show() == "[[8]]");
+    let t: (Box<int>, int) = (new Box(9), 1);
+    assert!(t.show() == "([9], 1)");
+    let a: [Box<int>; 2] = [new Box(1), new Box(2)];
+    assert!(a.show() == "[[1], [2]]");
+}
+
+test("Eq of an Option, Result, Vec, tuple or array of a generic-head class") {
+    let o: Option<Box<int>> = Some(new Box(31));
+    assert!(o == Some(new Box(35)));
+    assert!(o != Some(new Box(45)));
+    let r: Result<Box<int>, string> = Ok(new Box(31));
+    assert!(r == Ok(new Box(39)));
+    assert!(r != Ok(new Box(41)));
+    let v: Vec<Box<int>> = Vec::new();
+    v.push(new Box(20));
+    let w: Vec<Box<int>> = Vec::new();
+    w.push(new Box(29));
+    assert!(v == w);
+    let t: (Box<int>, int) = (new Box(50), 1);
+    assert!(t == (new Box(55), 1));
+    assert!(t != (new Box(65), 1));
+    let a: [Box<int>; 2] = [new Box(10), new Box(20)];
+    assert!(a == [new Box(11), new Box(22)]);
+    assert!(a != [new Box(11), new Box(32)]);
+}
+
+test("Hash of an Option or Result of a generic-head class") {
+    let o: Option<Box<int>> = Some(new Box(31));
+    let p: Option<Box<int>> = Some(new Box(38));
+    assert!(o.hash() == p.hash());
+    let r: Result<Box<int>, string> = Ok(new Box(42));
+    let s: Result<Box<int>, string> = Ok(new Box(47));
+    assert!(r.hash() == s.hash());
+}
+
+test("a bounded generic called at a ground shape around a generic-head class") {
+    let o: Option<Box<int>> = Some(new Box(5));
+    assert!(shown(o) == "Some([5])");
+    assert!(shown((new Box("a"), [new Box(1)])) == "([a], [[1]])");
+    let v: Vec<Option<Box<int>>> = Vec::new();
+    v.push(o);
+    assert!(shown(v) == "[Some([5])]");
+    assert!(same(o, Some(new Box(7))));
+    assert!(!same([o], [None]));
+}

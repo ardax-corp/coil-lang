@@ -1,0 +1,260 @@
+// A `mut` borrow (`let w = mut a`, `use (mut a)`, a view, `for mut`) and
+// the place it borrows stay one object when `a` is handed to a callee that
+// only walks it (#2816). The walk's iterator shares the object while it
+// runs and dies before the callee returns; the next write through `a` must
+// not copy the object away from the borrow.
+use tests::assert;
+use string::format;
+use collections::map::HashMap;
+
+fn shm(HashMap<string, int> m) -> string {
+    let s = "{";
+    for p in m {
+        s = s + format("%s:%i,", p.key, p.value);
+    }
+    return s + "}";
+}
+
+// The walk one call further down.
+fn shm2(HashMap<string, int> m) -> string {
+    return "<" + shm(m) + ">";
+}
+
+fn count(HashMap<string, int> m) -> int {
+    let n = 0;
+    for p in m {
+        n += p.value;
+    }
+    return n;
+}
+
+fn shv(Vec<int> v) -> string {
+    let s = "[";
+    for x in v {
+        s = s + format("%i,", x);
+    }
+    return s + "]";
+}
+
+fn map1() -> HashMap<string, int> {
+    let m: HashMap<string, int> = HashMap::new();
+    let _ = m.insert("a", 1);
+    return m;
+}
+
+class Holder {
+    pub m: HashMap<string, int>,
+    pub n: int,
+}
+
+impl Holder {
+    pub fn show() -> string {
+        return shm(self.m);
+    }
+}
+
+class Outer {
+    pub h: Holder,
+}
+
+// A class holding a `Vec` that is walked through its own iterator, which
+// holds the class instance itself.
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    bag: Bag,
+    i: int,
+}
+
+impl BagIter {
+    pub fn next() -> Option<int> {
+        if self.i < self.bag.items.len() {
+            self.i += 1;
+            return Option::Some(self.bag.items[self.i - 1]);
+        }
+        return Option::None;
+    }
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    pub fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    pub fn next(BagIter it) -> Option<int> {
+        return it.next();
+    }
+}
+
+fn total(Bag b) -> int {
+    let n = 0;
+    for x in b {
+        n += x;
+    }
+    return n;
+}
+
+test("a let borrow and its source after a walking callee") {
+    let a = map1();
+    let w = mut a;
+    let _ = w.insert("c", 3);
+    assert!(shm(a) == "{a:1,c:3,}");
+    let _ = a.insert("e", 5);
+    let _ = w.insert("f", 6);
+    assert!(shm(w) == "{a:1,c:3,e:5,f:6,}");
+    assert!(shm(a) == "{a:1,c:3,e:5,f:6,}");
+}
+
+test("the borrow walked, then the source written") {
+    let a = map1();
+    let w = mut a;
+    assert!(count(w) == 1);
+    let _ = a.insert("b", 2);
+    let _ = w.insert("c", 3);
+    assert!(count(a) == 6 && count(w) == 6);
+}
+
+test("the walk in a callee's callee") {
+    let a = map1();
+    let w = mut a;
+    assert!(shm2(a) == "<{a:1,}>");
+    let _ = a.insert("b", 2);
+    let _ = w.insert("c", 3);
+    assert!(shm(a) == "{a:1,b:2,c:3,}" && shm(w) == "{a:1,b:2,c:3,}");
+}
+
+test("a use (mut a) closure after a walking callee") {
+    let a = map1();
+    let b = a;
+    let f = fn () use (mut a) {
+        let _ = a.insert("z", 26);
+        return shm(a);
+    };
+    assert!(f() == "{a:1,z:26,}");
+    assert!(shm(a) == "{a:1,z:26,}");
+    let _ = a.insert("e", 5);
+    assert!(f() == "{a:1,z:26,e:5,}");
+    assert!(shm(a) == "{a:1,z:26,e:5,}");
+    assert!(shm(b) == "{a:1,}");
+}
+
+test("a borrow of a field walked by a method") {
+    let h = new Holder(map1(), 0);
+    let w = mut h.m;
+    assert!(h.show() == "{a:1,}");
+    let _ = h.m.insert("b", 2);
+    let _ = w.insert("c", 3);
+    assert!(shm(h.m) == "{a:1,b:2,c:3,}" && shm(w) == "{a:1,b:2,c:3,}");
+}
+
+test("a borrow of a nested field, a sibling written") {
+    let o = new Outer(new Holder(map1(), 0));
+    let w = mut o.h.m;
+    assert!(shm(o.h.m) == "{a:1,}");
+    o.h.n = 7;
+    let _ = o.h.m.insert("b", 2);
+    let _ = w.insert("c", 3);
+    assert!(o.h.n == 7);
+    assert!(shm(o.h.m) == "{a:1,b:2,c:3,}" && shm(w) == "{a:1,b:2,c:3,}");
+}
+
+test("a borrow of the whole class whose map is walked") {
+    let o = new Outer(new Holder(map1(), 0));
+    let w = mut o;
+    assert!(o.h.show() == "{a:1,}");
+    let _ = o.h.m.insert("b", 2);
+    let _ = w.h.m.insert("c", 3);
+    assert!(shm(o.h.m) == "{a:1,b:2,c:3,}" && shm(w.h.m) == "{a:1,b:2,c:3,}");
+}
+
+test("a Vec borrow and its source after a walking callee") {
+    let a: Vec<int> = Vec::new();
+    a.push(1);
+    let w = mut a;
+    assert!(shv(a) == "[1,]");
+    a.push(2);
+    w.push(3);
+    assert!(shv(a) == "[1,2,3,]" && shv(w) == "[1,2,3,]");
+}
+
+test("a class holding a Vec, walked through its own iterator") {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    let a = new Bag(v);
+    let w = mut a;
+    assert!(total(a) == 1);
+    a.items.push(2);
+    w.items.push(3);
+    assert!(total(a) == 6 && total(w) == 6);
+    assert!(a.items.len() == 3);
+}
+
+test("a walk and writes in a loop while the borrow lives") {
+    let a = map1();
+    let w = mut a;
+    let i = 0;
+    while i < 3 {
+        let _ = a.insert(format("k%i", i), i);
+        assert!(count(a) == 1 + i * (i + 1) / 2);
+        i += 1;
+    }
+    let _ = w.insert("z", 100);
+    assert!(count(a) == 104 && count(w) == 104);
+}
+
+test("a walk in a loop that writes a nested path") {
+    let o = new Outer(new Holder(map1(), 0));
+    let w = mut o;
+    let i = 0;
+    while i < 3 {
+        let _ = o.h.m.insert(format("k%i", i), 10);
+        o.h.n = o.h.n + count(o.h.m);
+        i += 1;
+    }
+    let _ = w.h.m.insert("z", 1);
+    assert!(o.h.n == 11 + 21 + 31);
+    assert!(count(o.h.m) == 32 && count(w.h.m) == 32);
+}
+
+test("after the borrow is done the source is a value again") {
+    let a = map1();
+    let w = mut a;
+    let _ = w.insert("b", 2);
+    assert!(shm(a) == "{a:1,b:2,}");
+    let c = a;
+    let _ = a.insert("x", 9);
+    assert!(shm(c) == "{a:1,b:2,}" && shm(a) == "{a:1,b:2,x:9,}");
+}
+
+test("a walk over the source in the borrowing body itself") {
+    let a = map1();
+    let w = mut a;
+    let seen = 0;
+    for p in a {
+        seen += p.value;
+    }
+    let _ = a.insert("b", 2);
+    let _ = w.insert("q", 0);
+    assert!(seen == 1);
+    assert!(shm(w) == "{a:1,b:2,q:0,}" && shm(a) == "{a:1,b:2,q:0,}");
+}
+
+test("a walk over the borrow itself") {
+    let a = map1();
+    let w = mut a;
+    let seen = 0;
+    for p in w {
+        seen += p.value;
+    }
+    let _ = a.insert("b", 2);
+    let _ = w.insert("q", 0);
+    assert!(seen == 1);
+    assert!(shm(w) == "{a:1,b:2,q:0,}" && shm(a) == "{a:1,b:2,q:0,}");
+}

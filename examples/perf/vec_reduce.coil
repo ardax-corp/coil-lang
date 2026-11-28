@@ -1,7 +1,9 @@
 // Counted reduce and map loops over 8192 elements: a sum whose function
 // is only the loop, the same sum after an early return, a dot product, a
-// scaled copy, a max, a count of one value and an xor. Prints ns per call; the compiler runs each loop 8 lanes
+// scaled copy, a max, a count of one value, an xor, and two sums that also
+// store: a map with its total and a product kept with its sum. Prints ns per call; the compiler runs each loop 8 lanes
 // at a time in one op (`mir/vec_loop.rs`).
+// @skip auto-par prints the nanoseconds each call took
 use clock::mono_nanos;
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -89,16 +91,42 @@ fn xor(Vec<int> xs, int from) -> int {
     return h;
 }
 
+fn map_total(Vec<int> out, Vec<int> xs, int from) -> int {
+    let s = 0;
+    let i = from;
+    while i < xs.len() {
+        let v = xs[i];
+        out[i] = v * 2 + 1;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn dot_keep(Vec<float> out, Vec<float> a, Vec<float> b, int from) -> float {
+    let s = 0.0;
+    let i = from;
+    while i < a.len() {
+        let x = a[i] * b[i];
+        out[i] = x;
+        s = s + x;
+        i = i + 1;
+    }
+    return s;
+}
+
 fn main() {
     let n = 8192;
     let xs: Vec<int> = Vec::new();
     let fs: Vec<float> = Vec::new();
     let out: Vec<float> = Vec::new();
+    let iout: Vec<int> = Vec::new();
     let j = 0;
     while j < n {
         xs.push(j % 1000);
         fs.push((j % 100) as float);
         out.push(0.0);
+        iout.push(0);
         j = j + 1;
     }
     let reps = 2000;
@@ -147,7 +175,19 @@ fn main() {
         k = k + 1;
     }
     let t7 = mono_nanos();
-    say(format("acc=%i facc=%f out=%f\n", acc, facc, out[777]));
+    k = 0;
+    while k < reps {
+        acc = acc + map_total(iout, xs, k % 3);
+        k = k + 1;
+    }
+    let t8 = mono_nanos();
+    k = 0;
+    while k < reps {
+        facc = facc + dot_keep(out, fs, fs, k % 3);
+        k = k + 1;
+    }
+    let t9 = mono_nanos();
+    say(format("acc=%i facc=%f out=%f iout=%i\n", acc, facc, out[777], iout[777]));
     say(format("sum          %i ns\n", (t1 - t0) / reps));
     say(format("sum_guarded  %i ns\n", (t2 - t1) / reps));
     say(format("dot          %i ns\n", (t3 - t2) / reps));
@@ -155,4 +195,6 @@ fn main() {
     say(format("max          %i ns\n", (t5 - t4) / reps));
     say(format("count        %i ns\n", (t6 - t5) / reps));
     say(format("xor          %i ns\n", (t7 - t6) / reps));
+    say(format("map_total    %i ns\n", (t8 - t7) / reps));
+    say(format("dot_keep     %i ns\n", (t9 - t8) / reps));
 }

@@ -1,0 +1,79 @@
+// A value stored into a place of its own object is the value it had
+// before the store, as with any other share (#2880): `a.next = Some(a)`
+// gives `a` a `next` that is the old `a`, whose `next` is still `None`.
+// Value classes never form a cycle.
+use tests::assert;
+
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+
+class Holder {
+    pub items: Vec<Holder>,
+    pub n: int,
+}
+
+fn depth(Option<Node> n) -> int {
+    let d = 0;
+    let cur = n;
+    while let Option::Some(x) = cur {
+        d += 1;
+        if d > 10 {
+            return -1;
+        }
+        cur = x.next;
+    }
+    return d;
+}
+
+fn next_of(Node n) -> Option<Node> {
+    return n.next;
+}
+
+test("a value stored into its own field is its old value") {
+    let a = new Node(1, Option::None);
+    a.next = Option::Some(a);
+    assert!(depth(Option::Some(a)) == 2);
+    assert!(depth(next_of(a)) == 1);
+}
+
+test("the old value does not see a later write") {
+    let a = new Node(1, Option::None);
+    a.next = Option::Some(a);
+    a.v = 9;
+    let inner = match a.next {
+        Option::Some(n) => n.v,
+        Option::None => -1,
+    };
+    assert!(a.v == 9 && inner == 1);
+}
+
+test("a value stored twice into its own field nests its old values") {
+    let a = new Node(1, Option::None);
+    a.next = Option::Some(a);
+    a.next = Option::Some(a);
+    assert!(depth(Option::Some(a)) == 3);
+}
+
+test("a value pushed into its own vector is its old value") {
+    let h = new Holder(Vec::new(), 1);
+    h.items.push(h);
+    assert!(h.items.len() == 1 && h.items[0].items.len() == 0);
+}
+
+test("a value stored into its own element is its old value") {
+    let h = new Holder(Vec::new(), 1);
+    h.items.push(new Holder(Vec::new(), 2));
+    h.items[0] = h;
+    assert!(h.items[0].n == 1 && h.items[0].items[0].n == 2);
+    assert!(h.items[0].items[0].items.len() == 0);
+}
+
+test("a value stored into a field of another name for it is its old value") {
+    let a = new Node(1, Option::None);
+    let b = a;
+    a.next = Option::Some(b);
+    assert!(depth(Option::Some(a)) == 2);
+    assert!(depth(Option::Some(b)) == 1);
+}

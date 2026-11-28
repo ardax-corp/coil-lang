@@ -1,0 +1,95 @@
+// A `static let` of a two-word type keeps its two words in two static
+// slots: its initializer returns both at startup, a store writes both and
+// a read loads both, whatever the payload, through collections and in a
+// spawned thread's copy of the statics.
+use tests::assert;
+use string::format;
+use gc::collect;
+use thread::{join, spawn};
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+static let best: Option<int> = Option::None;
+
+static let span = 2..5;
+
+static let last: Result<int, string> = Result::Err(format("e%i", 7));
+
+class Counter {
+    static top: (int, float) = (1, 0.5),
+}
+
+fn keep(int i) {
+    let h = half(i);
+    if h != None {
+        best = h;
+    }
+}
+
+test("a static Option is read and written as two words") {
+    assert!(best == None);
+    for i in 0..9 {
+        keep(i);
+    }
+    assert!(best == Some(4));
+}
+
+test("a static range iterates from its two words") {
+    let s = 0;
+    for i in span {
+        s += i;
+    }
+    assert!(s == 9);
+    span = 0..3;
+    s = 0;
+    for i in span {
+        s += i;
+    }
+    assert!(s == 3);
+}
+
+test("a static tuple class field") {
+    Counter::top = (Counter::top[0] + 1, Counter::top[1] * 2.0);
+    assert!(Counter::top[0] == 2 && Counter::top[1] == 1.0);
+}
+
+test("a static whose payload is a heap word under some tags survives collections") {
+    collect();
+    assert!(last == Err("e7"));
+    for i in 0..100 {
+        last = if i % 2 == 0 {
+            Ok(i)
+        } else {
+            Err(format("e%i", i))
+        };
+        collect();
+    }
+    assert!(last == Err("e99"));
+    last = Ok(3);
+    collect();
+    assert!(last == Ok(3));
+}
+
+test("a thread reads its copy of a two-word static") {
+    last = Err("from main");
+    let t = match spawn(
+        fn () => match last {
+            Ok(v) => format("%i", v),
+            Err(e) => e,
+        },
+    ) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    let got = match join(t) {
+        Result::Ok(s) => s,
+        Result::Err(_) => "join failed",
+    };
+    assert!(got == "from main");
+}

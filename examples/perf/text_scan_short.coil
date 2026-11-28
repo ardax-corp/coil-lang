@@ -3,6 +3,7 @@
 // byte loops over 54-byte lines and the stdlib `is_ascii` / `find` /
 // `split` on them. Byte-lane SIMD (docs/internals/byte-simd.md) covers the
 // tail of a scan with one padded chunk.
+// @skip auto-par prints the nanoseconds each call took
 use clock::mono_nanos;
 use io::{stdout, write};
 use string::{format, to_bytes};

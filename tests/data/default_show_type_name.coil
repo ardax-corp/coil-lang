@@ -15,7 +15,7 @@ class Bare {
 test("enum without Show prints its variant name") {
     assert!(format("%v", Plain::B(3)) == "Plain::B", format("%v", Plain::B(3)));
     assert!(format("%v", Plain::A) == "Plain::A");
-    assert!(show(Plain::A) == "Plain::A");
+    assert!(Plain::A.show() == "Plain::A");
 }
 
 test("class without Show prints its type name") {

@@ -1,0 +1,27 @@
+// An inherent method's `(int, int)` result: two words back to the direct
+// call, no tuple boxed per call (#2333).
+use io::sync::print;
+use string::format;
+
+class H {
+    pub d: int,
+}
+
+impl H {
+    #[inline(never)]
+    pub fn split(int i) -> (int, int) {
+        return (i / 3 + self.d, i % 3);
+    }
+}
+
+fn main() {
+    let h = new H(1);
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        let (q, r) = h.split(i);
+        s += q * r;
+        i += 1;
+    }
+    let _ = print(format("%i", s));
+}

@@ -7,11 +7,19 @@ use libffi::middle::{Arg, Cif, CodePtr, Type};
 
 use crate::memory::{CStructLayout, FfiType, Heap, ObjString, Object};
 
+use super::direct::{array_buffer_from_value, byte_arg_from_value, copy_array_buffers_back, copy_byte_buffers_back};
 use super::signature::{FfiError, FfiSignature};
 
 pub struct PreparedCall {
     pub cif: Cif,
     pub addr: CodePtr,
+}
+
+impl PreparedCall {
+    /// The C function's address, for a direct call.
+    pub fn address(&self) -> u64 {
+        self.addr.as_ptr() as u64
+    }
 }
 
 pub struct InvokeContext {
@@ -43,7 +51,7 @@ impl InvokeContext {
     }
 
     fn heap(&mut self) -> &mut Heap {
-        // SAFETY: VM is single-threaded; reentrant callbacks may borrow the heap
+        // SAFETY: runtime is single-threaded; reentrant callbacks may borrow the heap
         // while libffi is active, so this cannot overlap with `&mut Heap` borrows
         // held across the native call.
         unsafe { &mut *self.heap }
@@ -198,8 +206,10 @@ impl Drop for FfiStringReset {
 /// The slot of `layout`'s field `i` in a record: records are slotted
 /// objects whose slots are their fields sorted by name.
 fn struct_record_slot(layout: &CStructLayout, i: usize) -> usize {
-    let name = &layout.fields[i].0;
-    layout.fields.iter().filter(|(f, _)| f < name).count()
+    layout.slots.get(i).copied().unwrap_or_else(|| {
+        let name = &layout.fields[i].0;
+        layout.fields.iter().filter(|(f, _)| f < name).count()
+    })
 }
 
 fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) -> Result<Value, FfiError> {
@@ -209,16 +219,10 @@ fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) 
         .ok_or_else(|| FfiError::Unsupported("struct value not found on heap".into()))?;
     match obj {
         // A record: the field's slot.
-        Object::Instance(gc) if gc.as_ref().slot_len().is_some() => gc
+        Object::Instance(gc) => gc
             .as_ref()
             .slot(struct_record_slot(layout, i))
             .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`"))),
-        Object::Instance(gc) => {
-            let key = heap.intern(fname.to_string());
-            gc.as_ref()
-                .get(key)
-                .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`")))
-        }
         _ => Err(FfiError::Unsupported(
             "struct argument must be a record/dict instance".into(),
         )),
@@ -296,6 +300,68 @@ fn pack_struct(
         write_field_at(out, off, &val, *fty, heap, layouts)?;
     }
     Ok(())
+}
+
+/// Struct `id`'s C bytes of the record `value` into `out` (at least the
+/// layout's size), for a direct extern call; `false` when it cannot be
+/// packed here (the runtime's call then packs it and reports the error).
+pub fn pack_struct_into(heap: &mut Heap, value: Value, id: u32, layouts: &[CStructLayout], out: &mut [u8]) -> bool {
+    /// The record at `addr` as `layout`'s bytes at `base`: numbers and
+    /// bools only, nested records in place, no allocation.
+    fn put(heap: &Heap, addr: u64, layout: &CStructLayout, layouts: &[CStructLayout], out: &mut [u8], base: usize, depth: u32) -> Option<()> {
+        let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else { return None };
+        for (i, ((_, fty), &off)) in layout.fields.iter().zip(&layout.offsets).enumerate() {
+            let v = gc.as_ref().slot(struct_record_slot(layout, i))?;
+            let at = base + off;
+            let mut put_bytes = |b: &[u8]| out.get_mut(at..at + b.len()).map(|d| d.copy_from_slice(b));
+            match *fty {
+                FfiType::Int | FfiType::UInt64 => put_bytes(&v.as_int().to_ne_bytes())?,
+                FfiType::Int32 | FfiType::UInt32 => put_bytes(&(v.as_int() as i32).to_ne_bytes())?,
+                FfiType::Int16 | FfiType::UInt16 => put_bytes(&(v.as_int() as i16).to_ne_bytes())?,
+                FfiType::Int8 | FfiType::UInt8 => put_bytes(&[v.as_int() as u8])?,
+                FfiType::Float => put_bytes(&v.as_float().to_ne_bytes())?,
+                FfiType::Bool => put_bytes(&[u8::from(v.as_bool())])?,
+                FfiType::Struct(sub) if depth < 64 => put(heap, v.bits(), layouts.get(sub as usize)?, layouts, out, at, depth + 1)?,
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+    layouts.get(id as usize).is_some_and(|layout| put(heap, value.bits(), layout, layouts, out, 0, 0).is_some())
+}
+
+/// A new record of struct `id` from its C bytes `buf`, as a direct extern
+/// call's result; `None` when the layout is unknown.
+pub fn unpack_struct_from(heap: &mut Heap, id: u32, layouts: &[CStructLayout], buf: &[u8]) -> Option<Value> {
+    /// A record of `layout`'s bytes at `base`: numbers and bools, nested
+    /// records made the same way.
+    fn take(heap: &mut Heap, layout: &CStructLayout, layouts: &[CStructLayout], buf: &[u8], base: usize, depth: u32) -> Option<Value> {
+        use crate::memory::ObjInstance;
+        let mut slots = vec![Value::default(); layout.fields.len()];
+        for (i, ((_, fty), &off)) in layout.fields.iter().zip(&layout.offsets).enumerate() {
+            let at = base + off;
+            let bytes = |n: usize| buf.get(at..at + n);
+            let v = match *fty {
+                FfiType::Int => Value::from(i64::from_ne_bytes(bytes(8)?.try_into().ok()?)),
+                FfiType::UInt64 => Value::from(u64::from_ne_bytes(bytes(8)?.try_into().ok()?) as i64),
+                FfiType::Float => Value::from(f64::from_ne_bytes(bytes(8)?.try_into().ok()?)),
+                FfiType::Int32 => Value::from(i64::from(i32::from_ne_bytes(bytes(4)?.try_into().ok()?))),
+                FfiType::UInt32 => Value::from(i64::from(u32::from_ne_bytes(bytes(4)?.try_into().ok()?))),
+                FfiType::Int16 => Value::from(i64::from(i16::from_ne_bytes(bytes(2)?.try_into().ok()?))),
+                FfiType::UInt16 => Value::from(i64::from(u16::from_ne_bytes(bytes(2)?.try_into().ok()?))),
+                FfiType::Int8 => Value::from(i64::from(bytes(1)?[0] as i8)),
+                FfiType::UInt8 => Value::from(i64::from(bytes(1)?[0])),
+                FfiType::Bool => Value::from(bytes(1)?[0] != 0),
+                FfiType::Struct(sub) if depth < 64 => take(heap, layouts.get(sub as usize)?, layouts, buf, at, depth + 1)?,
+                _ => return None,
+            };
+            *slots.get_mut(struct_record_slot(layout, i))? = v;
+        }
+        let (obj, _) = heap.alloc(ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots), Object::Instance);
+        Some(Value::from(obj.addr()))
+    }
+    let layout = layouts.get(id as usize)?;
+    take(heap, layout, layouts, buf, 0, 0)
 }
 
 fn field_byte_size(fty: FfiType, layouts: &[CStructLayout]) -> Result<usize, FfiError> {
@@ -378,113 +444,16 @@ fn unpack_struct(
             .get(i)
             .ok_or_else(|| FfiError::Unsupported("struct layout missing field offset".into()))?;
         let (val, _nbytes) = read_field_bytes(buf, off, *fty, heap, layouts)?;
+        // A nested record is a new object the record owns (reference
+        // counts); the allocation counted only its initial words.
+        if matches!(fty, FfiType::Struct(_)) {
+            heap.rc_retain(val);
+        }
         gc.as_mut().set_slot(struct_record_slot(layout, i), val);
     }
     Ok(Value::from(obj.addr()))
 }
 
-fn array_buffer_from_value(
-    heap: &Heap,
-    value: &Value,
-    bufs: &mut Vec<Vec<i64>>,
-) -> Result<(*mut c_void, Option<u64>), FfiError> {
-    let addr = value.bits();
-    if let Some(obj) = heap.find_object_by_addr(addr) {
-        let mut buf: Vec<i64> = match &obj {
-            Object::Array(gc) => gc.as_ref().iter().map(|v| v.as_int()).collect(),
-            Object::Tuple(gc) => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
-            _ => Vec::new(),
-        };
-        if !buf.is_empty() {
-            let ptr = buf.as_mut_ptr() as *mut c_void;
-            bufs.push(buf);
-            return Ok((ptr, Some(addr)));
-        }
-    }
-    Ok((value.raw() as *mut c_void, None))
-}
-
-/// Backing for an empty byte view, so C never gets a dangling pointer.
-static EMPTY_CONST_BYTES: [u8; 1] = [0];
-
-/// A byte argument as C sees it: a `Vec<byte>` (or byte tuple) as `Bytes`
-/// (`uint8_t *`, `writable`), or a `string` / `Vec<byte>` (or byte tuple) as
-/// `ConstBytes` (read-only `const uint8_t *`). No NUL terminator; the callee
-/// takes the length separately. `Some(addr)` when the bytes are a copy that
-/// goes back into that array after the call.
-///
-/// A string is lent in place: its bytes never move or change while the
-/// string lives (`memory::strbuf`), and the VM roots the call's arguments
-/// until it returns. A packed array is lent in place too when `lend` (no
-/// coil callback can run during the call, so nothing can grow, unpack or
-/// free it) and no other argument names the same array (so C sees no
-/// aliasing a copy would not have had): a `Bytes` callee then writes the
-/// array itself, which is what copying back gave. Anything else (a
-/// word-stored array, a tuple, an empty array) is copied in, and a
-/// `Bytes` array copied back, as before.
-fn byte_arg_from_value(
-    heap: &Heap,
-    value: &Value,
-    writable: bool,
-    lend: bool,
-    bufs: &mut Vec<Vec<u8>>,
-) -> Result<(*mut c_void, Option<u64>), FfiError> {
-    let addr = value.bits();
-    if addr == 0 && !writable {
-        return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
-    }
-    let (mut buf, copy_back): (Vec<u8>, bool) = match heap.find_object_by_addr(addr) {
-        Some(Object::String(gc)) if !writable => {
-            let bytes = gc.as_ref().data.as_bytes();
-            if bytes.is_empty() {
-                return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
-            }
-            return Ok((bytes.as_ptr() as *mut c_void, None));
-        }
-        Some(Object::Array(mut gc)) => {
-            if lend
-                && let Some(bytes) = gc.as_mut().bytes_mut()
-                && !bytes.is_empty()
-            {
-                return Ok((bytes.as_mut_ptr() as *mut c_void, None));
-            }
-            (gc.as_ref().to_byte_vec(), writable)
-        }
-        Some(Object::Tuple(gc)) => {
-            (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
-        }
-        _ => {
-            return Err(FfiError::Unsupported(if writable {
-                "Bytes argument must be a Vec<byte>".into()
-            } else {
-                "ConstBytes argument must be a string or Vec<byte>".into()
-            }));
-        }
-    };
-    // Never hand C a dangling pointer for an empty buffer.
-    buf.reserve(1);
-    let ptr = buf.as_mut_ptr() as *mut c_void;
-    bufs.push(buf);
-    Ok((ptr, copy_back.then_some(addr)))
-}
-
-fn copy_byte_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<u8>]) {
-    for &(addr, buf_idx) in targets {
-        let Some(buf) = bufs.get(buf_idx) else {
-            continue;
-        };
-        heap.update_array_bytes(addr, buf);
-    }
-}
-
-fn copy_array_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<i64>]) {
-    for &(addr, buf_idx) in targets {
-        let Some(buf) = bufs.get(buf_idx) else {
-            continue;
-        };
-        heap.update_array_elements(addr, buf);
-    }
-}
 
 pub fn invoke_via_libffi(
     prepared: &PreparedCall,
@@ -581,9 +550,8 @@ pub fn invoke_via_libffi(
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(effective_types.len());
 
     fn value_is_stream(heap: &Heap, value: &Value) -> bool {
-        let v = crate::io::peel_one_boxed(heap, *value);
         matches!(
-            heap.find_object_by_addr(v.bits()),
+            heap.find_object_by_addr(value.bits()),
             Some(Object::Stream(_))
         )
     }
@@ -800,7 +768,6 @@ pub fn invoke_via_libffi(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Member;
     use crate::ffi::FfiSignatureBuilder;
     use crate::ffi::library_candidates;
 
@@ -1134,7 +1101,7 @@ mod tests {
                 return;
             }
         };
-        resolve_symbol(&lib, "system").expect("hand-written bytecode may resolve system");
+        resolve_symbol(&lib, "system").expect("hand-written code may resolve system");
     }
 
     #[test]
@@ -1152,7 +1119,7 @@ mod tests {
         // POSIX `execve` is not exported by Windows CRT; `_wsystem` is the
         // classified FFI-exec symbol that opens with the same libc handle.
         let name = if cfg!(windows) { "_wsystem" } else { "execve" };
-        resolve_symbol(&lib, name).expect("hand-written bytecode may resolve FFI exec symbols");
+        resolve_symbol(&lib, name).expect("hand-written code may resolve FFI exec symbols");
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1418,16 +1385,12 @@ mod tests {
         assert_eq!(layout.align, 4);
 
         let mut heap = Heap::default();
-        let ka = heap.intern("a".into());
-        let kb = heap.intern("b".into());
-        let kc = heap.intern("c".into());
-        let (obj, mut gc) = heap.alloc(crate::memory::ObjInstance::default(), Object::Instance);
-        {
-            let inst = gc.as_mut();
-            inst.set(ka, Member::Value(Value::from(1i64)));
-            inst.set(kb, Member::Value(Value::from(0x11223344i64)));
-            inst.set(kc, Member::Value(Value::from(7i64)));
-        }
+        // A record: its slots are the fields sorted by name.
+        let slots = vec![Value::from(1i64), Value::from(0x11223344i64), Value::from(7i64)];
+        let (obj, _) = heap.alloc(
+            crate::memory::ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots),
+            Object::Instance,
+        );
         let value = Value::from(obj.addr());
         let mut packed = Vec::new();
         pack_struct(

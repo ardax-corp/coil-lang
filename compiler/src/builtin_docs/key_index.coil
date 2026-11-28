@@ -51,3 +51,61 @@ fn eq_mode<K>(K k) -> int {}
 /// `-1`. `mode` is what `eq_mode(k)` gave: `find` compares the keys
 /// itself, in one call. With mode `0` it finds nothing.
 fn find<K>(Vec<int> table, Vec<int> hashes, Vec<K> keys, int h, K k, int mode) -> int {}
+
+// Map tables (archive 8.16): one `Vec<int>` per index, `{hash, slot}` cells
+// then one word per slot (its cell, or -1 once removed). The caller keeps
+// keys, and anything stored with them, in its own `Vec`s by slot, and passes
+// the keys `Vec` where a call compares keys. Native code runs `map_find`,
+// `map_upsert`, `map_live` and `map_len` in place, with no host call.
+
+/// An empty map table with room for `n` entries before it grows.
+fn map_table(int n) -> Vec<int> {}
+
+/// The slot whose key in `keys` equals `k` (hash `h`), or `-1`. `mode` is
+/// what `eq_mode(k)` gave; with mode `0` it finds nothing (use `map_probe`).
+fn map_find<K>(Vec<int> ix, Vec<K> keys, int h, K k, int mode) -> int {}
+
+/// The slot of `k` as `map_find` gives it; when `k` is absent, a new slot
+/// `s` (the number of slots so far) is registered for it and `-1 - s` is
+/// returned, and the caller pushes `k` (and its value) next.
+fn map_upsert<K>(Vec<int> ix, Vec<K> keys, int h, K k, int mode) -> int {}
+
+/// Finds or adds `k` (hash `h`) in the map object `m`, an instance whose
+/// first three fields are its table, keys and values. Returns the slot of
+/// a key that is there, after replacing its value with `v` when `replace`
+/// is `1`, or `-1 - s` for a key it added at slot `s` with value `v`.
+/// `mode` is what `eq_mode(k)` gave and `vmode` what `word_mode(v)` gave;
+/// both must be above `0`. A malformed `m` gets `-1` and is not changed.
+fn map_put<M, K, V>(M m, int h, K k, V v, int mode, int vmode, int replace) -> int {}
+
+/// How `map_put` may store values of `v`'s type: `1` a number word, `2`
+/// one object word, `0` otherwise. The compiler turns the call into that
+/// constant wherever the type is known, as with `eq_mode`.
+fn word_mode<V>(V v) -> int {}
+
+/// The next live slot whose hash is `h`, in probe order after slot `after`
+/// (`-1` starts at the first), or `-1`. The caller checks each candidate's
+/// key with `==`.
+fn map_probe(Vec<int> ix, int h, int after) -> int {}
+
+/// Registers a new slot for a key with hash `h` the caller checked is
+/// absent, and returns it. The table grows when it would pass half full.
+fn map_add(Vec<int> ix, int h) -> int {}
+
+/// Whether slot `s` holds a key (it was added and not removed).
+fn map_live(Vec<int> ix, int s) -> bool {}
+
+/// The number of live entries.
+fn map_len(Vec<int> ix) -> int {}
+
+/// Removes slot `s`; other slots keep their numbers. False when it was not
+/// live.
+fn map_remove(Vec<int> ix, int s) -> bool {}
+
+/// Drops the removed slots and numbers the live ones from `0` in order,
+/// after the caller compacted its own `Vec`s the same way. Returns the live
+/// count.
+fn map_compact(Vec<int> ix) -> int {}
+
+/// Removes every entry and slot. The table keeps its size.
+fn map_clear(Vec<int> ix) {}

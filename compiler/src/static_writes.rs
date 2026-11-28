@@ -25,6 +25,11 @@ pub fn collect_written_names(ast: &Output<'_>, into: &mut HashSet<String>) {
 }
 
 fn walk(ast: &Output<'_>, aliases: &mut HashMap<String, String>, written: &mut HashSet<String>) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| walk_level(ast, aliases, written))
+}
+
+fn walk_level(ast: &Output<'_>, aliases: &mut HashMap<String, String>, written: &mut HashSet<String>) {
     match ast.1.as_ref() {
         Expression::Use { name, alias: Some(alias), .. } => {
             aliases.insert(alias.clone(), name.clone());

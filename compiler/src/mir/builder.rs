@@ -1,7 +1,7 @@
 //! Braun-style SSA builder for the numeric subset.
 //!
-//! Locals are IL slots. Sealing a block completes incomplete φs. This is
-//! construction only — fuse-IL stays the production lowering; dense exec is P1.
+//! Locals are frame slots. Sealing a block completes incomplete φs. This is
+//! construction only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -9,8 +9,8 @@ use common::DebugLoc;
 
 use super::func::{MirBlock, MirFunc};
 use super::inst::{
-    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
-    ValueId,
+    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirLaneShape, MirUnaryOp,
+    Terminator, ValueId,
 };
 use super::ty::MirTy;
 
@@ -49,7 +49,7 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
-    /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
+    /// MIR lowering: type non-W4 HostInvoke as Value-word edges without the
     /// map-lift shortcuts `allow_effects` enables in lowering.
     pub allow_host_edges: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
@@ -57,12 +57,13 @@ pub struct MirBuilder {
     /// Locals kept in a home ([`MirInst::HomeStore`]): each
     /// [`Self::def_local`] of one also writes its home.
     pub homed: HashMap<LocalId, u16>,
-    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]).
-    bound: Vec<ValueId>,
-    /// Field names announced for the next heap field access at their slot
-    /// ([`Self::note_slot_field`]): `(note, slot, bit)`.
-    field_notes: Vec<(u32, u32, u64)>,
-    next_note: u32,
+    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]),
+    /// with their locals.
+    bound: Vec<(LocalId, ValueId)>,
+    /// The other words [`Self::def_local`] bound, with their locals.
+    unbound: Vec<(LocalId, ValueId)>,
+    /// The local each of [`Self::var_phis`] merges.
+    phi_locals: Vec<(LocalId, ValueId)>,
     /// Bumped by every [`Self::def_local`]: the write a read sees.
     def_count: u32,
     /// Each local's last [`Self::def_local`] number.
@@ -89,8 +90,8 @@ impl MirBuilder {
             pending_loc: DebugLoc::unknown(),
             homed: HashMap::new(),
             bound: Vec::new(),
-            field_notes: Vec::new(),
-            next_note: 0,
+            phi_locals: Vec::new(),
+            unbound: Vec::new(),
             def_count: 0,
             def_gen: HashMap::new(),
             origins: HashMap::new(),
@@ -103,13 +104,21 @@ impl MirBuilder {
 
     /// Let a call to `target` whose result the block returns be a
     /// `TailCall` ([`MirFunc::tail_targets`]).
-    pub fn allow_tail_call(&mut self, target: crate::il::Label) {
+    pub fn allow_tail_call(&mut self, target: crate::bodies::Label) {
         self.func.tail_targets.insert(target);
     }
 
     /// `dest` reads a field no store changes ([`MirFunc::invariant_loads`]).
     pub fn mark_invariant_load(&mut self, dest: ValueId) {
         self.func.invariant_loads.insert(dest);
+    }
+
+    /// Item `slot` of the tuple `object` (a dictionary, an existential
+    /// pack): a `ProductLoad` no store changes, as tuples are immutable.
+    pub fn ins_tuple_item(&mut self, object: ValueId, slot: u32, dest_ty: MirTy) -> Result<ValueId, MirError> {
+        let dest = self.ins_product_load(object, slot, dest_ty)?;
+        self.mark_invariant_load(dest);
+        Ok(dest)
     }
 
     /// `dest` is an `Index` read of a `byte` element
@@ -130,39 +139,14 @@ impl MirBuilder {
         self.func.steady_calls.insert(dest);
     }
 
-    /// The call defining `dest` may touch only `fields`
-    /// ([`MirFunc::call_fields`]).
-    pub fn mark_call_fields(&mut self, dest: ValueId, fields: u64) {
-        self.func.call_fields.insert(dest, fields);
-    }
-
-    /// The next heap field access at `slot` reads or writes field `name`
-    /// ([`MirFunc::slot_fields`]); the note ends at [`Self::end_field_note`]
-    /// if no access took it. An access at a slot with no note may be any
-    /// field, so it makes the slot's names unknown.
-    pub fn note_slot_field(&mut self, slot: u32, name: &str) -> u32 {
-        let note = self.next_note;
-        self.next_note += 1;
-        self.field_notes.push((note, slot, crate::hir::effects::field_bit(name)));
-        note
-    }
-
-    pub fn end_field_note(&mut self, note: u32) {
-        self.field_notes.retain(|&(n, ..)| n != note);
-    }
-
-    fn name_slot(&mut self, slot: u32) {
-        let bits = match self.field_notes.iter().rposition(|&(_, s, _)| s == slot) {
-            Some(at) => self.field_notes.remove(at).2,
-            None => crate::hir::effects::ALL_FIELDS,
-        };
-        *self.func.slot_fields.entry(slot).or_insert(0) |= bits;
-    }
-
-    /// `dest` is the low word of a pair a call returns that may carry a
-    /// heap payload ([`MirFunc::heap_pair_calls`]).
-    pub fn mark_heap_pair_call(&mut self, dest: ValueId) {
-        self.func.heap_pair_calls.insert(dest);
+    /// `dest`, an `i64` word, is the low word of a pair that may carry a
+    /// heap payload (a call's result or a parameter): it becomes a
+    /// [`MirTy::MaybeObj`]. A heap word stays what it is.
+    pub fn mark_maybe_obj(&mut self, dest: ValueId) {
+        let v = self.resolve(dest);
+        if self.func.ty(v) == MirTy::I64 {
+            self.func.types[v.index()] = MirTy::MaybeObj;
+        }
     }
 
     pub fn entry(&self) -> BlockId {
@@ -188,9 +172,10 @@ impl MirBuilder {
         let b = self.cur()?;
         if self.func.ty(val).is_heap_word() {
             self.func.heap_slots.insert(local);
-            self.bound.push(val);
+            self.bound.push((local, val));
         } else {
             self.func.word_slots.insert(local);
+            self.unbound.push((local, val));
         }
         self.write_variable(local, b, val);
         self.def_count += 1;
@@ -378,7 +363,7 @@ impl MirBuilder {
             if !ok(lt) || !ok(rt) {
                 return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
             }
-            // The dense compare is a word compare, but VM `EQ` is structural
+            // The dense compare is a word compare, but `==` on objects is structural
             // (strings by content, arrays and tuples element-wise). The two
             // agree only against an integer constant such as a niche `0`.
             if !self.is_int_const(lhs) && !self.is_int_const(rhs) {
@@ -445,7 +430,7 @@ impl MirBuilder {
 
     pub fn ins_not(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         let t = self.resolve_ty(src);
-        // VM `LogNot` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
+        // `!` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
         if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
             return Err(MirError::msg(format!("lnot on {t}")));
         }
@@ -540,6 +525,8 @@ impl MirBuilder {
             // A generic edge's boxed result may be a heap reference, as its
             // arguments may.
             Some(t) if super::host_allow::host_result_ok(native_id, spec.ret, t) => t,
+            // A two-word result's payload is any word.
+            Some(t) if u32::from(layout) == common::HOST_ENUM_LAYOUT_PAIR && t.is_word_lane() => t,
             Some(t) => {
                 return Err(MirError::msg(format!("host {} result {t} vs {}", spec.name, spec.ret)));
             }
@@ -547,14 +534,28 @@ impl MirBuilder {
         let dest = self.alloc(ret);
         self.push(MirInst::HostInvoke {
             dest,
+            dest_hi: None,
             native_id,
             layout,
             args,
         })?;
-        if !super::effects::host_is_pure(native_id) {
-            self.snapshot_slots(dest);
-        }
         Ok(dest)
+    }
+
+    /// [`Self::ins_host_invoke_as`] of a two-word result
+    /// (`common::HOST_ENUM_LAYOUT_PAIR`): its payload word, typed `lo`, and
+    /// its tag.
+    pub fn ins_host_invoke_pair(&mut self, native_id: u16, args: Vec<ValueId>, lo: MirTy) -> Result<(ValueId, ValueId), MirError> {
+        let layout = common::HOST_ENUM_LAYOUT_PAIR as u8;
+        let dest = self.ins_host_invoke_as(native_id, args, layout, Some(lo))?;
+        let hi = self.alloc(MirTy::I64);
+        let b = self.cur()?;
+        match self.func.block_mut(b).insts.last_mut() {
+            Some(MirInst::HostInvoke { dest: d, dest_hi, .. }) if *d == dest => *dest_hi = Some(hi),
+            _ => return Err(MirError::msg("host pair call")),
+        }
+        self.func.value_locs.insert(hi, self.pending_loc);
+        Ok((dest, hi))
     }
 
     /// An FFI opcode over `args` (its stack operands in push order): the
@@ -569,16 +570,51 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Ffi { dest, op, operand, args })?;
-        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
+    /// A call of an `extern` function: `args` are its library and function
+    /// id words, then its arguments; the result is a `ret` word.
+    pub fn ins_extern_call(&mut self, sig: super::inst::MirExternSig, args: Vec<ValueId>, ret: MirTy) -> Result<ValueId, MirError> {
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &a) in args.iter().enumerate() {
+            if !self.resolve_ty(a).is_word_lane() {
+                return Err(MirError::msg(format!("extern {} arg {i} is {}", sig.symbol, self.resolve_ty(a))));
+            }
+        }
+        let dest = self.alloc(ret);
+        self.push(MirInst::ExternCall { dest, sig: Box::new(sig), args })?;
         Ok(dest)
     }
 
     pub fn ins_call(
         &mut self,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
-        abi: &crate::layout::DenseAbi,
+        abi: &crate::layout::CallAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
+        self.ins_call_more(target, args, abi, &[]).map(|(dest, dest_hi, _)| (dest, dest_hi))
+    }
+
+    /// [`Self::ins_call`] of a callee that returns more than two words:
+    /// `more` types words 3.. (`MirInst::Call::dest_more`), which needs the
+    /// two-word `abi.ret_hi`.
+    pub fn ins_call_more(
+        &mut self,
+        target: crate::bodies::Label,
+        args: Vec<ValueId>,
+        abi: &crate::layout::CallAbi,
+        more: &[MirTy],
+    ) -> Result<(ValueId, Option<ValueId>, Vec<ValueId>), MirError> {
+        if !more.is_empty() && abi.ret_hi.is_none() {
+            return Err(MirError::msg("call of more than two words without a second"));
+        }
+        if more.len() > super::MAX_CALL_RET_MORE {
+            return Err(MirError::msg(format!("call returns {} words", 2 + more.len())));
+        }
+        if let Some(ty) = more.iter().find(|t| !t.is_word_lane()) {
+            return Err(MirError::msg(format!("call result word is {ty}")));
+        }
         if abi.params.len() != args.len() {
             return Err(MirError::msg(format!(
                 "call arity {} vs {}",
@@ -614,14 +650,15 @@ impl MirBuilder {
             }
             None => None,
         };
+        let dest_more: Vec<ValueId> = more.iter().map(|&ty| self.alloc(ty)).collect();
         self.push(MirInst::Call {
             dest,
             dest_hi,
+            dest_more: dest_more.clone(),
             target,
             args,
         })?;
-        self.snapshot_slots(dest);
-        Ok((dest, dest_hi))
+        Ok((dest, dest_hi, dest_more))
     }
 
     /// `CallIndirect`: call the function value `callee` (or an `i64` code
@@ -633,6 +670,31 @@ impl MirBuilder {
     /// [`Self::ins_call_indirect`] whose last `dicts` arguments are
     /// instance dictionaries a `PolyFn` callee takes.
     pub fn ins_call_indirect_dicts(&mut self, callee: ValueId, args: Vec<ValueId>, dicts: u32, ret: MirTy) -> Result<ValueId, MirError> {
+        self.call_indirect(callee, args, dicts, ret, None).map(|(dest, _)| dest)
+    }
+
+    /// [`Self::ins_call_indirect`] of a two-word result, its words typed
+    /// `lo` / `hi`: the callee's two-word twin, or the callee then
+    /// `unpair` on its one word ([`MirInst::CallIndirect`]).
+    pub fn ins_call_indirect_pair(
+        &mut self,
+        callee: ValueId,
+        args: Vec<ValueId>,
+        (lo, hi): (MirTy, MirTy),
+        unpair: crate::bodies::Label,
+    ) -> Result<(ValueId, ValueId), MirError> {
+        let (dest, h) = self.call_indirect(callee, args, 0, lo, Some((hi, unpair)))?;
+        Ok((dest, h.expect("a pair call's second word")))
+    }
+
+    fn call_indirect(
+        &mut self,
+        callee: ValueId,
+        args: Vec<ValueId>,
+        dicts: u32,
+        ret: MirTy,
+        pair: Option<(MirTy, crate::bodies::Label)>,
+    ) -> Result<(ValueId, Option<ValueId>), MirError> {
         if dicts as usize > args.len() {
             return Err(MirError::msg("CallIndirect dicts exceed args".to_string()));
         }
@@ -649,15 +711,21 @@ impl MirBuilder {
         if !ret.is_word_lane() {
             return Err(MirError::msg(format!("CallIndirect dest is {ret}")));
         }
+        if let Some((hi, _)) = pair
+            && !hi.is_word_lane()
+        {
+            return Err(MirError::msg(format!("CallIndirect second word is {hi}")));
+        }
         let dest = self.alloc(ret);
+        let pair = pair.map(|(hi, unpair)| (self.alloc(hi), unpair));
         self.push(MirInst::CallIndirect {
             dest,
             callee: self.resolve(callee),
             args,
             dicts,
+            pair,
         })?;
-        self.snapshot_slots(dest);
-        Ok(dest)
+        Ok((dest, pair.map(|(h, _)| h)))
     }
 
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
@@ -726,7 +794,7 @@ impl MirBuilder {
 
     /// Heap LoadField of slot `index`. `object` is heapref; dest is the
     /// field word.
-    pub fn ins_heap_field_load(
+    pub fn ins_product_load(
         &mut self,
         object: ValueId,
         index: u32,
@@ -734,19 +802,18 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
-                "HeapFieldLoad object {}",
+                "ProductLoad object {}",
                 self.resolve_ty(object)
             )));
         }
         if !dest_ty.is_specialized() {
-            return Err(MirError::msg(format!("HeapFieldLoad dest {dest_ty}")));
+            return Err(MirError::msg(format!("ProductLoad dest {dest_ty}")));
         }
-        self.name_slot(index);
         let dest = self.alloc(dest_ty);
-        self.push(MirInst::HeapFieldLoad {
+        self.push(MirInst::ProductLoad {
             dest,
             object: self.resolve(object),
-            index,
+            slot: index,
         })?;
         Ok(dest)
     }
@@ -759,6 +826,18 @@ impl MirBuilder {
         value: ValueId,
         index: u32,
     ) -> Result<ValueId, MirError> {
+        self.ins_field_store(object, value, index, false)
+    }
+
+    /// [`Self::ins_heap_field_store`] of a field whose static type is a
+    /// number when `scalar` (`MirInst::HeapFieldStore::scalar`).
+    pub fn ins_field_store(
+        &mut self,
+        object: ValueId,
+        value: ValueId,
+        index: u32,
+        scalar: bool,
+    ) -> Result<ValueId, MirError> {
         if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldStore object {}",
@@ -769,7 +848,8 @@ impl MirBuilder {
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
         }
-        self.name_slot(index);
+        // Only a number word is stored as one (a boxed word is an object).
+        let scalar = scalar && matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::Bool);
         let dest = self.alloc(ty);
         let value = self.resolve(value);
         self.push(MirInst::HeapFieldStore {
@@ -777,6 +857,7 @@ impl MirBuilder {
             object: self.resolve(object),
             value,
             index,
+            scalar,
         })?;
         Ok(dest)
     }
@@ -810,6 +891,73 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Element `index` of a lane array: its two words, typed `lo` / `hi`.
+    pub fn ins_lane_index(&mut self, array: ValueId, index: ValueId, lo: MirTy, hi: MirTy) -> Result<(ValueId, ValueId), MirError> {
+        let w = self.ins_lane_index_words(array, index, &[lo, hi], MirLaneShape::default())?;
+        Ok((w[0], w[1]))
+    }
+
+    /// Element `index` of a lane array of `tys.len()` words per element
+    /// (two, or a wide element's three to sixteen, boxed as `shape` says):
+    /// its words, typed `tys`.
+    pub fn ins_lane_index_words(&mut self, array: ValueId, index: ValueId, tys: &[MirTy], shape: MirLaneShape) -> Result<Vec<ValueId>, MirError> {
+        if self.resolve_ty(array) != MirTy::HeapRef || !self.resolve_ty(index).is_int() {
+            return Err(MirError::msg("LaneIndex operand type"));
+        }
+        if !(2..=2 + super::MAX_RET_MORE).contains(&tys.len()) || tys.iter().any(|t| !t.is_word_lane()) {
+            return Err(MirError::msg(format!("LaneIndex dest is {tys:?}")));
+        }
+        let words: Vec<ValueId> = tys.iter().map(|&t| self.alloc(t)).collect();
+        // A two-word element's read needs no shape.
+        let shape = if tys.len() > 2 { shape } else { MirLaneShape::default() };
+        self.push(MirInst::LaneIndex { dest: words[0], dest_hi: words[1], dest_more: words[2..].to_vec(), array: self.resolve(array), index: self.resolve(index), shape })?;
+        Ok(words)
+    }
+
+    /// Store `words` (an element's two words, or a wide element's three or
+    /// four) as element `index` of a lane array.
+    pub fn ins_lane_store_words(&mut self, array: ValueId, index: ValueId, words: &[ValueId], shape: MirLaneShape) -> Result<ValueId, MirError> {
+        if self.resolve_ty(array) != MirTy::HeapRef || !self.resolve_ty(index).is_int() {
+            return Err(MirError::msg("LaneStore operand type"));
+        }
+        let words = self.lane_words(words, "LaneStore")?;
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::LaneStore { dest, array: self.resolve(array), index: self.resolve(index), lo: words[0], hi: words[1], more: words[2..].to_vec(), shape })?;
+        Ok(dest)
+    }
+
+    /// Append the element of `words` (two, or a wide element's three or
+    /// four) to a lane array in place (a safepoint, as
+    /// [`Self::ins_array_push`]).
+    pub fn ins_lane_push_words(&mut self, array: ValueId, words: &[ValueId], shape: MirLaneShape) -> Result<ValueId, MirError> {
+        if self.resolve_ty(array) != MirTy::HeapRef {
+            return Err(MirError::msg("LanePush array type"));
+        }
+        let words = self.lane_words(words, "LanePush")?;
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::LanePush { dest, array: self.resolve(array), lo: words[0], hi: words[1], more: words[2..].to_vec(), shape })?;
+        Ok(dest)
+    }
+
+    /// A lane element's words, resolved: two to four word lanes.
+    fn lane_words(&mut self, words: &[ValueId], op: &str) -> Result<Vec<ValueId>, MirError> {
+        if !(2..=2 + super::MAX_RET_MORE).contains(&words.len()) || words.iter().any(|&w| !self.resolve_ty(w).is_word_lane()) {
+            return Err(MirError::msg(format!("{op} value type")));
+        }
+        Ok(words.iter().map(|&w| self.resolve(w)).collect())
+    }
+
+    /// A lane array turned into one word per element in place (a
+    /// safepoint, as [`Self::ins_array_push`]).
+    pub fn ins_lanes_to_words(&mut self, array: ValueId, shape: MirLaneShape) -> Result<ValueId, MirError> {
+        if self.resolve_ty(array) != MirTy::HeapRef {
+            return Err(MirError::msg("LanesToWords array type"));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::LanesToWords { dest, array: self.resolve(array), shape })?;
+        Ok(dest)
+    }
+
     /// Heap index store (S3). Dest is the stored value.
     pub fn ins_store_index(
         &mut self,
@@ -817,6 +965,19 @@ impl MirBuilder {
         index: ValueId,
         value: ValueId,
         unchecked: bool,
+    ) -> Result<ValueId, MirError> {
+        self.ins_index_store(array, index, value, unchecked, false)
+    }
+
+    /// [`Self::ins_store_index`] of an element whose static type is a
+    /// number when `scalar` (`MirInst::StoreIndex::scalar`).
+    pub fn ins_index_store(
+        &mut self,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
+        unchecked: bool,
+        scalar: bool,
     ) -> Result<ValueId, MirError> {
         let at = self.resolve_ty(array);
         if at != MirTy::HeapRef && at != MirTy::Value {
@@ -830,6 +991,8 @@ impl MirBuilder {
         if !vt.is_word_lane() {
             return Err(MirError::msg(format!("StoreIndex value is {vt}")));
         }
+        // Only a number word is stored as one (a boxed word is an object).
+        let scalar = scalar && matches!(vt, MirTy::I64 | MirTy::F64 | MirTy::Bool);
         let dest = self.alloc(vt);
         self.push(MirInst::StoreIndex {
             dest,
@@ -837,6 +1000,7 @@ impl MirBuilder {
             index: self.resolve(index),
             value: self.resolve(value),
             unchecked,
+            scalar,
         })?;
         Ok(dest)
     }
@@ -1057,7 +1221,6 @@ impl MirBuilder {
             array: self.resolve(array),
             value: self.resolve(value),
         })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1077,7 +1240,7 @@ impl MirBuilder {
         &mut self,
         kind: super::inst::MirAllocKind,
         elems: Vec<ValueId>,
-        kinds: u8,
+        kinds: common::PackedKinds,
     ) -> Result<ValueId, MirError> {
         let elems: Vec<ValueId> = elems.into_iter().map(|v| self.resolve(v)).collect();
         for (i, &e) in elems.iter().enumerate() {
@@ -1090,35 +1253,24 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Alloc { dest, kind, elems, kinds })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
-    /// GC safepoint (I5). Dest is a heapref token. `roots` is a seed;
-    /// [`super::gc::fill_live_roots`] replaces it with live heap words.
-    pub fn ins_gc_barrier(
-        &mut self,
-        kind: super::inst::MirGcKind,
-        roots: Vec<ValueId>,
-    ) -> Result<ValueId, MirError> {
-        let roots: Vec<ValueId> = roots.into_iter().map(|v| self.resolve(v)).collect();
-        for (i, &r) in roots.iter().enumerate() {
-            if !self.resolve_ty(r).is_heap_word() {
-                return Err(MirError::msg(format!(
-                    "GcBarrier root {i} is {}",
-                    self.resolve_ty(r)
-                )));
-            }
+    /// GC safepoint (I5) after the allocating op that made `object`. Dest
+    /// is that word from the safepoint on ([`super::barrier_pairs`]).
+    pub fn ins_gc_barrier(&mut self, kind: super::inst::MirGcKind, object: ValueId) -> Result<ValueId, MirError> {
+        let object = self.resolve(object);
+        if !self.resolve_ty(object).is_heap_word() {
+            return Err(MirError::msg(format!("GcBarrier object is {}", self.resolve_ty(object))));
         }
         let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::GcBarrier { dest, kind, roots })?;
-        self.snapshot_slots(dest);
+        self.push(MirInst::GcBarrier { dest, kind, object })?;
         Ok(dest)
     }
 
     /// Const string-table push (I4 / Q9 R1).
     /// `CodePtr` of the function at `target`: an `int` word.
-    pub fn ins_code_ptr(&mut self, target: crate::il::Label) -> Result<ValueId, MirError> {
+    pub fn ins_code_ptr(&mut self, target: crate::bodies::Label) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::I64);
         self.push(MirInst::CodePtr { dest, target })?;
         Ok(dest)
@@ -1167,7 +1319,6 @@ impl MirBuilder {
             fmt: self.resolve(fmt),
             args,
         })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1184,12 +1335,42 @@ impl MirBuilder {
         let src = self.resolve(src);
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Cow { dest, src, unique, field })?;
-        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
+    /// [`MirInst::CowIndex`]: unique element `index` of `array` in place.
+    pub fn ins_cow_index(&mut self, array: ValueId, index: ValueId) -> Result<ValueId, MirError> {
+        let (array, index) = (self.resolve(array), self.resolve(index));
+        let at = self.resolve_ty(array);
+        if at != MirTy::HeapRef {
+            return Err(MirError::msg(format!("CowIndex array is {at}")));
+        }
+        if !self.resolve_ty(index).is_int() {
+            return Err(MirError::msg("CowIndex index is no int"));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::CowIndex { dest, array, index })?;
+        Ok(dest)
+    }
+
+    /// [`MirInst::CowPin`] of `src`: whether its object was pinned.
+    pub fn ins_cow_pin(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        let src = self.resolve(src);
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::CowPin { dest, src })?;
+        Ok(dest)
+    }
+
+    /// [`MirInst::CowUnpin`] of `src`, with what its pin gave (`saved`).
+    pub fn ins_cow_unpin(&mut self, src: ValueId, saved: ValueId) -> Result<ValueId, MirError> {
+        let (src, saved) = (self.resolve(src), self.resolve(saved));
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::CowUnpin { dest, src, saved })?;
         Ok(dest)
     }
 
     /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
-    /// (`ValueTag`) or, with `None`, a word the VM inspects.
+    /// (`ValueTag`) or, with `None`, a word the runtime inspects.
     pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
@@ -1200,7 +1381,6 @@ impl MirBuilder {
             src: self.resolve(src),
             tag,
         })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1282,18 +1462,33 @@ impl MirBuilder {
                 self.func.ret_layout = ty.layout();
             }
         }
-        self.set_term(Terminator::Return { lo, hi: None })
+        self.set_term(Terminator::Return { lo, hi: None, more: Vec::new() })
     }
 
     pub fn ret_pair(&mut self, lo: ValueId, hi: ValueId) -> Result<(), MirError> {
+        self.ret_words(lo, hi, &[])
+    }
+
+    /// A return of `2 + more.len()` words to direct calls: [`Self::ret_pair`]
+    /// plus words 3.. (`Terminator::Return::more`, typed on
+    /// `MirFunc::ret_more_tys`).
+    pub fn ret_words(&mut self, lo: ValueId, hi: ValueId, more: &[ValueId]) -> Result<(), MirError> {
+        if more.len() > super::MAX_CALL_RET_MORE {
+            return Err(MirError::msg(format!("return of {} words", 2 + more.len())));
+        }
         let lo = self.resolve(lo);
         let hi = self.resolve(hi);
+        let more: Vec<ValueId> = more.iter().map(|&v| self.resolve(v)).collect();
         self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(lo)));
         self.func.ret_hi_ty = Some(self.func.ret_hi_ty.unwrap_or_else(|| self.resolve_ty(hi)));
+        if self.func.ret_more_tys.is_empty() {
+            self.func.ret_more_tys = more.iter().map(|&v| self.resolve_ty(v)).collect();
+        }
         self.func.ret_layout = crate::layout::MirLayout::TwoSlot;
         self.set_term(Terminator::Return {
             lo: Some(lo),
             hi: Some(hi),
+            more,
         })
     }
 
@@ -1303,12 +1498,18 @@ impl MirBuilder {
         self.rewrite_subst();
         self.finished = true;
         self.func.debug_slots = self.snapshot_debug_slots();
-        let bound: HashSet<ValueId> = self.bound.iter().chain(&self.var_phis).map(|&v| self.resolve(v)).collect();
+        let bound: HashSet<ValueId> = self.bound.iter().map(|&(_, v)| v).chain(self.var_phis.iter().copied()).map(|v| self.resolve(v)).collect();
         self.func.bound_words = bound;
-        if self.func.has_gc_edge() {
-            super::gc::fill_live_roots(&mut self.func);
-        }
-        super::deopt::fill_deopt_maps(&mut self.func);
+        let mut binds: Vec<(LocalId, ValueId)> = self
+            .bound
+            .iter()
+            .chain(&self.unbound)
+            .chain(&self.phi_locals)
+            .map(|&(l, v)| (l, self.resolve(v)))
+            .collect();
+        binds.sort_unstable_by_key(|&(l, v)| (l.0, v.0));
+        binds.dedup();
+        self.func.local_binds = binds;
         self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
     }
@@ -1342,18 +1543,6 @@ impl MirBuilder {
         out
     }
 
-    fn snapshot_slots(&mut self, at: ValueId) {
-        let Ok(b) = self.cur() else {
-            return;
-        };
-        let mut env: Vec<(LocalId, ValueId)> = self.current_def[b.index()]
-            .iter()
-            .map(|(&l, &v)| (l, self.resolve(v)))
-            .collect();
-        env.sort_by_key(|(l, _)| l.0);
-        self.func.slot_env.insert(at, env);
-    }
-
     fn cur(&self) -> Result<BlockId, MirError> {
         self.current
             .ok_or_else(|| MirError::msg("no current block"))
@@ -1368,10 +1557,17 @@ impl MirBuilder {
     fn push(&mut self, inst: MirInst) -> Result<(), MirError> {
         let b = self.cur()?;
         let dest = inst.dest();
+        let dest_more = match &inst {
+            MirInst::Call { dest_more, .. } | MirInst::LaneIndex { dest_more, .. } => dest_more.clone(),
+            _ => Vec::new(),
+        };
         let dest_hi = match inst {
             MirInst::Call {
                 dest_hi: Some(h), ..
-            } => Some(h),
+            }
+            | MirInst::HostInvoke { dest_hi: Some(h), .. }
+            | MirInst::LaneIndex { dest_hi: h, .. }
+            | MirInst::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             _ => None,
         };
         let block = self.func.block_mut(b);
@@ -1391,6 +1587,9 @@ impl MirBuilder {
         self.func.value_locs.insert(dest, self.pending_loc);
         if let Some(h) = dest_hi {
             self.func.value_locs.insert(h, self.pending_loc);
+        }
+        for w in dest_more {
+            self.func.value_locs.insert(w, self.pending_loc);
         }
         Ok(())
     }
@@ -1426,7 +1625,7 @@ impl MirBuilder {
 
     fn read_variable_recursive(&mut self, local: LocalId, ty: MirTy, block: BlockId) -> ValueId {
         if !self.sealed[block.index()] {
-            let phi = self.make_phi(block, ty);
+            let phi = self.make_phi(local, block, ty);
             self.incomplete_phis[block.index()].push((local, phi));
             self.write_variable(local, block, phi);
             return phi;
@@ -1448,7 +1647,7 @@ impl MirBuilder {
                 v
             }
             _ => {
-                let phi = self.make_phi(block, ty);
+                let phi = self.make_phi(local, block, ty);
                 self.write_variable(local, block, phi);
                 self.add_phi_operands(local, phi, block);
                 self.resolve(phi)
@@ -1456,9 +1655,10 @@ impl MirBuilder {
         }
     }
 
-    fn make_phi(&mut self, block: BlockId, ty: MirTy) -> ValueId {
+    fn make_phi(&mut self, local: LocalId, block: BlockId, ty: MirTy) -> ValueId {
         let dest = self.alloc(ty);
         self.var_phis.insert(dest);
+        self.phi_locals.push((local, dest));
         let inst = MirInst::Phi {
             dest,
             ty,
@@ -1483,14 +1683,22 @@ impl MirBuilder {
             args.push((pred, self.resolve(v)));
         }
         args.sort_by_key(|(b, _)| *b);
+        // A φ of an `i64` local that merges a maybe-object word is one.
+        let ty = if ty == MirTy::I64 && args.iter().any(|&(_, v)| self.func.ty(v) == MirTy::MaybeObj) {
+            self.func.types[phi.index()] = MirTy::MaybeObj;
+            MirTy::MaybeObj
+        } else {
+            ty
+        };
         if let Some(inst) = self
             .func
             .block_mut(block)
             .insts
             .iter_mut()
             .find(|i| i.dest() == phi)
-            && let MirInst::Phi { args: slot, .. } = inst {
+            && let MirInst::Phi { args: slot, ty: phi_ty, .. } = inst {
                 *slot = args;
+                *phi_ty = ty;
             }
         self.try_remove_trivial_phi(phi, block);
     }
@@ -1575,8 +1783,11 @@ impl MirBuilder {
         self.resolve_ty(v)
     }
 
+    /// `v`'s type as the builder checks and derives types: a
+    /// [`MirTy::MaybeObj`] word is the `i64` it stands for
+    /// ([`MirTy::word_class`]).
     fn resolve_ty(&self, v: ValueId) -> MirTy {
-        self.func.ty(self.resolve(v))
+        self.func.ty(self.resolve(v)).word_class()
     }
 
     fn rewrite_subst(&mut self) {
@@ -1605,12 +1816,6 @@ impl MirBuilder {
         for p in &mut self.func.params {
             *p = map(*p);
         }
-        // Trivial-phi subst must follow into IL slot snapshots (D0).
-        for env in self.func.slot_env.values_mut() {
-            for (_, v) in env.iter_mut() {
-                *v = map(*v);
-            }
-        }
     }
 }
 
@@ -1624,7 +1829,7 @@ mod tests {
         let x = b.add_param(MirTy::HeapRef).unwrap();
         let y = b.add_param(MirTy::HeapRef).unwrap();
         let w = b.add_param(MirTy::I64).unwrap();
-        // Two heap words (or a heap word and an unknown i64) need the VM's
+        // Two heap words (or a heap word and an unknown i64) need the runtime's
         // structural EQ: strings by content, arrays element-wise.
         assert!(b.ins_cmp(MirCmpOp::Eq, x, y).is_err());
         assert!(b.ins_cmp(MirCmpOp::Ne, w, x).is_err());
@@ -1674,14 +1879,14 @@ mod tests {
     }
 
     #[test]
-    fn array_push_loop_slot_env_survives_trivial_phi() {
+    fn array_push_loop_survives_trivial_phi() {
         use crate::mir::inst::{MirAllocKind, MirBinOp, MirCmpOp, MirConst, MirGcKind};
         let mut b = MirBuilder::new("grow");
         let n = b.add_param(MirTy::I64).unwrap();
         b.def_local(LocalId(0), n).unwrap();
         let empty = b.ins_alloc(MirAllocKind::Array, Vec::new()).unwrap();
         let g0 = b
-            .ins_gc_barrier(MirGcKind::Safepoint, vec![empty])
+            .ins_gc_barrier(MirGcKind::Safepoint, empty)
             .unwrap();
         b.def_local(LocalId(1), g0).unwrap();
         let i0 = b.ins_const(MirConst::I64(0)).unwrap();
@@ -1701,7 +1906,7 @@ mod tests {
         let one = b.ins_const(MirConst::I64(1)).unwrap();
         let grown = b.ins_array_push(xs, one).unwrap();
         let g = b
-            .ins_gc_barrier(MirGcKind::Safepoint, vec![grown])
+            .ins_gc_barrier(MirGcKind::Safepoint, grown)
             .unwrap();
         b.def_local(LocalId(1), g).unwrap();
         let i1 = b.ins_binop(MirBinOp::Add, i, one).unwrap();
@@ -1741,7 +1946,7 @@ mod tests {
         let mut b = MirBuilder::new("mk");
         let n = b.ins_const(MirConst::I64(1)).unwrap();
         let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
-        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, a).unwrap();
         b.ret(Some(g)).unwrap();
         let f = b.finish().unwrap();
         assert_eq!(f.ty(a), MirTy::HeapRef);
@@ -1761,12 +1966,12 @@ mod tests {
         let mut b = MirBuilder::new("word");
         let word = b.add_param(MirTy::I64).unwrap();
         let heap = b.add_param(MirTy::HeapRef).unwrap();
-        let abi = |p| crate::layout::DenseAbi {
+        let abi = |p| crate::layout::CallAbi {
             params: vec![p],
             ret: MirTy::I64,
             ret_hi: None,
         };
-        assert!(b.ins_call(crate::il::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
-        assert!(b.ins_call(crate::il::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
     }
 }

@@ -1,0 +1,90 @@
+// A direct call passes an arity-3 or arity-4 tuple of scalars to its
+// callee in registers when the callee only reads its items or passes it
+// on; a callee that keeps the object still gets it.
+use tests::assert;
+
+#[inline(never)]
+fn sum3((int, int, int) t) -> int {
+    let (a, b, c) = t;
+    return a + b * 10 + c * 100;
+}
+
+#[inline(never)]
+fn mixed4((int, float, bool, int) t) -> float {
+    let (a, f, b, n) = t;
+    if b {
+        return f * (a as float) - (n as float);
+    }
+    return f + (n as float);
+}
+
+#[inline(never)]
+fn second((int, int, int) t, int k) -> int {
+    return t[1] * k;
+}
+
+#[inline(never)]
+fn both((int, int, int) a, (float, float, float) b) -> float {
+    return (a[0] + a[1] + a[2]) as float + b[0] * b[1] - b[2];
+}
+
+#[inline(never)]
+fn forward((int, int, int) t) -> int {
+    return sum3(t) + second(t, 2);
+}
+
+#[inline(never)]
+fn walk((int, int, int) t, int n) -> int {
+    if n == 0 {
+        return t[0] + t[1] + t[2];
+    }
+    return walk((t[1], t[2], t[0] + 1), n - 1);
+}
+
+#[inline(never)]
+fn keep((int, int, int) t) -> Vec<(int, int, int)> {
+    return [t, t];
+}
+
+#[inline(never)]
+fn half_kept((int, int, int) t, int k) -> int {
+    let kept = keep(t);
+    return kept[1][2] + t[0] * k;
+}
+
+test("an arity-3 tuple argument") {
+    assert!(sum3((1, 2, 3)) == 321);
+    let s = 0;
+    let i = 0;
+    while i < 1000 {
+        s += sum3((i, i % 7, i % 3));
+        i += 1;
+    }
+    assert!(s == 1000 * 999 / 2 + 29970 + 99900);
+}
+
+test("an arity-4 tuple of mixed scalars") {
+    assert!(mixed4((3, 1.5, true, 2)) == 2.5);
+    assert!(mixed4((3, 1.5, false, 2)) == 3.5);
+}
+
+test("two wide arguments and a scalar one") {
+    assert!(second((4, 5, 6), 3) == 15);
+    assert!(both((1, 2, 3), (2.0, 3.0, 1.0)) == 11.0);
+}
+
+test("passed on to other callees") {
+    assert!(forward((1, 2, 3)) == 325);
+}
+
+test("a tail call taking a wide argument runs deep") {
+    assert!(walk((0, 0, 0), 300000) == 300000);
+}
+
+test("a callee that keeps the object") {
+    let kept = keep((7, 8, 9));
+    assert!(kept.len() == 2);
+    assert!(kept[0][0] == 7);
+    assert!(kept[1][2] == 9);
+    assert!(half_kept((2, 3, 4), 5) == 14);
+}

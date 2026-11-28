@@ -18,7 +18,7 @@ fn size_of<T: Measurable>(T x) -> int {
 }
 
 fn size_of_ufcs<T: Measurable>(T x) -> int {
-    return size(x);
+    return Measurable::size(x);
 }
 
 // Second method exercises Index slot selection under an open bound.

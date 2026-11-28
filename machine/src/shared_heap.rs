@@ -13,16 +13,7 @@ use std::sync::{Arc, Mutex};
 use common::Value;
 
 use crate::memory::{Heap, Object};
-use crate::thread::{is_immediate_value, ThreadProgram};
-
-/// GC frame maps are mandatory for shared-heap steal: S2b stack maps or
-/// precise frame maps (archive minor 21+). A program with neither (pre-14,
-/// or empty) spawns isolate.
-pub fn program_has_real_maps(program: &ThreadProgram) -> bool {
-    program.stack_maps.iter().any(|m| {
-        !m.frame_slots.is_empty() || m.safepoints.iter().any(|s| !s.slots.is_empty())
-    }) || program.precise_frames.iter().any(|m| m.any_pc.is_some() || !m.at_pc.is_empty())
-}
+use crate::thread::is_immediate_value;
 
 /// C1 share whitelist: immediates, immortal unit enums, Arc handles already
 /// on this Heap. Arrays / strings / Fn / cycles stay isolate.
@@ -89,45 +80,5 @@ mod tests {
         let heap = Heap::default();
         assert!(is_c1_shareable(&heap, Value::from(42_i64)));
         assert!(is_c1_shareable(&heap, Value::from(0_i64)));
-    }
-
-    #[test]
-    fn empty_maps_are_not_real() {
-        let p = ThreadProgram {
-            code: std::sync::Arc::new(Vec::new()),
-            constants: std::sync::Arc::new(Vec::new()),
-            strings: std::sync::Arc::new(Vec::new()),
-            static_slot_count: 0,
-            debug: common::ProgramDebug::default(),
-            operand_stack_slots: 8,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::default(),
-            class_word_kinds: Arc::default(),
-            static_word_kinds: Arc::default(),
-        };
-        assert!(!program_has_real_maps(&p));
-    }
-
-    #[test]
-    fn precise_frames_are_real_maps() {
-        let p = ThreadProgram {
-            code: std::sync::Arc::new(Vec::new()),
-            constants: std::sync::Arc::new(Vec::new()),
-            strings: std::sync::Arc::new(Vec::new()),
-            static_slot_count: 0,
-            debug: common::ProgramDebug::default(),
-            operand_stack_slots: 8,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::new(vec![common::PreciseFrameMap {
-                entry_pc: 0,
-                end_pc: 4,
-                any_pc: None,
-                at_pc: vec![common::SlotMap { pc: 2, slots: vec![0] }],
-                frame_words: 0,
-            }]),
-            class_word_kinds: Arc::default(),
-            static_word_kinds: Arc::default(),
-        };
-        assert!(program_has_real_maps(&p));
     }
 }

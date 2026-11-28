@@ -1,7 +1,8 @@
-// `ord` maps a one-character string (codepoint <= 255) to its byte and
+// `text::ord` maps a one-character string (codepoint <= 255) to its byte and
 // `char` maps a byte back; other inputs give `Err`. One-byte literals
 // coerce to `byte` in annotations.
 use tests::assert;
+use text::{ord, char};
 
 fn is_err(Result<byte, string> r) -> bool {
     return match r {

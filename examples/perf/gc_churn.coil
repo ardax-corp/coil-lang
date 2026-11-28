@@ -1,4 +1,4 @@
-// GC tracking: alloc + forced collect (not a CPU fuse target).
+// GC tracking: alloc + forced collect (not a CPU-bound canary).
 // N=125000, ROUNDS=8 (~1e6 Nodes); live set drops between rounds.
 use gc::collect;
 use io::sync::print;

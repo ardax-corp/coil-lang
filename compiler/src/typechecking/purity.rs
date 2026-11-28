@@ -1,23 +1,29 @@
-//! Whole-function purity / effects for auto-par, LICM, and the typed sidecar.
+//! The effect walk over the AST, for the two questions asked before there
+//! is any HIR:
 //!
-//! A function is **pure** when its body has no observable host side effects
-//! (IO / threads / FFI / yield / attach) and only calls other pure user
-//! functions. Unknown callees are conservatively impure. **Recursive pure**
-//! functions may be auto-parallelized at `f(a) ⊕ f(b)` sites.
+//! - which functions can never change an array's length
+//!   ([`record_length_stability`]), for the checker's bounds proofs
+//!   (`index_facts`);
+//! - whether a `fn drop()` anywhere in the compile may
+//!   ([`finalizer_may_resize`]), for the pipeline.
+//!
+//! Everything else that asks about effects (purity, auto-par, `uses {…}`,
+//! copy-on-write, escape) reads the HIR summaries (`hir::effects`).
+//!
+//! The walk still tracks every effect bit, not only `RESIZE`: when a `drop`
+//! may resize, a finalizer can run at any allocation, and only a pure call
+//! is length-stable then.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
 use parser::ast::{EnumConstructPayload, Expression, LetPattern, Output, PatternOutput};
 
+use crate::effects::{LengthStability, classify_host_name};
+
 use super::bare_cases::BareCases;
 use super::id::walk_children;
-use super::virtual_modules::{BuiltinExport, VirtualModules};
 
-/// Names of user functions that are pure and self-recursive.
-pub type RecursivePureSet = HashSet<String>;
-
-pub use common::EffectFlags;
+use common::EffectFlags;
 
 #[derive(Default)]
 struct FnFacts {
@@ -38,6 +44,19 @@ struct FnFacts {
     /// them are settled by [`settle_statics`].
     free: HashSet<String>,
     free_writes: HashSet<String>,
+    /// Operand spans of the operators a trait impl may stand behind
+    /// (`a < b`, `-a`, `a += b`), and the spans of `for … in` loops. With
+    /// the checker's types, [`settle_operators`] turns the ones that run
+    /// user code into effects; a lone-file walk has no types and leaves
+    /// them pure.
+    operands: Vec<(usize, usize)>,
+    for_ins: Vec<(usize, usize)>,
+    /// `Owner::name(..)` and `Owner::name`, written like an enum
+    /// constructor (the flag is the form without arguments). The checker
+    /// says which are one; [`settle_constructs`] makes the rest a call of
+    /// `Owner::name` (a static method, a trait's static method, a module's
+    /// function) or a class static. A lone-file walk leaves them pure.
+    constructs: Vec<(String, String, bool)>,
 }
 
 /// Record `f` under `name`. Methods are keyed by bare name, so two impls with
@@ -51,6 +70,9 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
     entry.method_calls.extend(f.method_calls);
     entry.free.extend(f.free);
     entry.free_writes.extend(f.free_writes);
+    entry.operands.extend(f.operands);
+    entry.for_ins.extend(f.for_ins);
+    entry.constructs.extend(f.constructs);
 }
 
 /// `static let` names declared anywhere in `ast`.
@@ -100,9 +122,49 @@ fn settle_method_calls(facts: &mut HashMap<String, FnFacts>, target: &MethodTarg
     }
 }
 
+/// An operator on a class, an enum or a type parameter runs the type's
+/// trait impl, and a `for … in` over anything but an array, a tuple or a
+/// range runs an iterator's `next` or resumes a generator: user code this
+/// walk does not follow, so unknown, and free to resize (#2388).
+/// `operand_runs` and `for_in_runs` answer for an operand's and a loop's
+/// span.
+fn settle_operators(
+    facts: &mut HashMap<String, FnFacts>,
+    operand_runs: &dyn Fn((usize, usize)) -> bool,
+    for_in_runs: &dyn Fn((usize, usize)) -> bool,
+) {
+    for f in facts.values_mut() {
+        let operands = std::mem::take(&mut f.operands);
+        let for_ins = std::mem::take(&mut f.for_ins);
+        if operands.into_iter().any(operand_runs) || for_ins.into_iter().any(for_in_runs) {
+            f.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
+        }
+    }
+}
+
+/// `Owner::name(..)` that is not an enum constructor is a call of
+/// `Owner::name`, and so are `Owner::name()` and the bare `Owner::name`
+/// (its value, #2746) when `name` is a static method (`is_call`). Any other
+/// bare `Owner::name` that is no constructor reads or writes a class static
+/// (#2407). `is_variant` answers for an owner and a name.
+fn settle_constructs(facts: &mut HashMap<String, FnFacts>, is_variant: &dyn Fn(&str, &str) -> bool, is_call: &dyn Fn(&str, &str) -> bool) {
+    for f in facts.values_mut() {
+        for (owner, name, bare) in std::mem::take(&mut f.constructs) {
+            if is_variant(&owner, &name) {
+                continue;
+            }
+            if bare && !is_call(&owner, &name) {
+                f.local.insert(EffectFlags::HOST | EffectFlags::HEAP_MUT);
+            } else {
+                f.callees.insert(format!("{owner}::{name}"));
+            }
+        }
+    }
+}
+
 /// Every name `ast` binds, at any depth: params, `let`, `const`, for-in and
 /// match / `if let` pattern bindings.
-fn collect_binders(ast: &Output<'_>, cases: &BareCases, out: &mut HashSet<String>) {
+pub(super) fn collect_binders(ast: &Output<'_>, cases: &BareCases, out: &mut HashSet<String>) {
     each_binder(ast, cases, &mut |n| {
         out.insert(n.to_string());
     });
@@ -212,149 +274,19 @@ fn collect_fn_facts(ast: &Output<'_>, cases: &BareCases) -> HashMap<String, FnFa
     facts
 }
 
-/// Names of user functions that appear in a call-graph cycle (self or mutual).
-///
-/// Only **top-level / module** `fn`s are considered. Impl methods are skipped:
-/// an Identifier call equal to the method name usually resolves to an imported
-/// free function (`join(self.thread)`), not a self-call.
-pub fn analyze_recursive_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
-    let mut facts: HashMap<String, FnFacts> = HashMap::new();
-    collect_toplevel_fns(ast, &mut facts, cases);
-    let user_fns: HashSet<String> = facts.keys().cloned().collect();
-    let mut in_cycle = HashSet::new();
-
-    for (name, f) in &facts {
-        if f.callees.contains(name) {
-            in_cycle.insert(name.clone());
-        }
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Color {
-        White,
-        Gray,
-        Black,
-    }
-    let mut color: HashMap<String, Color> =
-        user_fns.iter().map(|n| (n.clone(), Color::White)).collect();
-    let mut stack: Vec<String> = Vec::new();
-
-    fn dfs(
-        name: &str,
-        facts: &HashMap<String, FnFacts>,
-        user_fns: &HashSet<String>,
-        color: &mut HashMap<String, Color>,
-        stack: &mut Vec<String>,
-        in_cycle: &mut HashSet<String>,
-    ) {
-        color.insert(name.to_string(), Color::Gray);
-        stack.push(name.to_string());
-        if let Some(f) = facts.get(name) {
-            for c in &f.callees {
-                if !user_fns.contains(c) {
-                    continue;
-                }
-                match color.get(c).copied().unwrap_or(Color::White) {
-                    Color::White => dfs(c, facts, user_fns, color, stack, in_cycle),
-                    Color::Gray => {
-                        if let Some(start) = stack.iter().position(|n| n == c) {
-                            for n in &stack[start..] {
-                                in_cycle.insert(n.clone());
-                            }
-                        }
-                    }
-                    Color::Black => {}
-                }
-            }
-        }
-        stack.pop();
-        color.insert(name.to_string(), Color::Black);
-    }
-
-    for name in &user_fns {
-        if color.get(name) == Some(&Color::White) {
-            dfs(
-                name,
-                &facts,
-                &user_fns,
-                &mut color,
-                &mut stack,
-                &mut in_cycle,
-            );
-        }
-    }
-    in_cycle
-}
-
-fn collect_toplevel_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
-    match ast.1.as_ref() {
-        Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
-            for item in items {
-                collect_toplevel_fns(item, facts, cases);
-            }
-        }
-        Expression::Module(_, body) => collect_toplevel_fns(body, facts, cases),
-        Expression::Statement(inner)
-        | Expression::Expr(inner)
-        | Expression::ExprStatement(inner)
-        | Expression::Group(inner) => collect_toplevel_fns(inner, facts, cases),
-        Expression::Function {
-            name,
-            args,
-            body: Some(body),
-            ..
-        } => {
-            insert_facts(facts, name, fn_facts(args, body, cases));
-            // Nested fns inside this body still count as top-level for recursion.
-            collect_toplevel_fns(body, facts, cases);
-        }
-        // Skip `impl` methods — see [`analyze_recursive_fns`].
-        _ => {}
-    }
-}
-
 /// Per-function effect flags after call-graph closure (unknown → impure).
 pub fn analyze_fn_effects(ast: &Output<'_>, cases: &BareCases) -> HashMap<String, EffectFlags> {
     let facts = collect_fn_facts(ast, cases);
     effect_closure(&facts)
 }
 
-/// Names of user functions with no observable side effects.
-///
-/// Unlike [`analyze_recursive_pure`] this keeps non-recursive functions, so
-/// callers that only need "safe to evaluate on another thread" (loop IPA) can
-/// admit ordinary helpers such as `fn sq(int i) -> int { i * i }`.
-#[cfg(test)]
-pub fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
-    analyze_fn_effects(ast, cases)
-        .into_iter()
-        .filter(|(_, flags)| flags.is_pure())
-        .map(|(name, _)| name)
-        .collect()
-}
-
-/// What the loop length proofs may assume about calls (see
-/// `docs/internals/limitations.md`, impure calls in counted loops).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LengthStability {
-    /// User functions that cannot change the length of any array, even one
-    /// they can reach. Always a superset of the pure set.
-    pub fns: HashSet<String>,
-    /// No `fn drop()` can change an array length. Finalizers run at
-    /// allocation safepoints, so when this is false only pure calls are
-    /// length-stable and allocating ops stay barriers.
-    pub alloc_stable: bool,
-}
-
-/// Whether `ast` declares a `fn drop()`, and whether one may change an
-/// array's length.
+/// Whether a `fn drop()` declared in `ast` may change an array's length.
 ///
 /// This runs before the checker, so every bare pattern name counts as a
 /// binding. Only a function or static that shares a unit case's name and is
 /// used in the same body could tell the difference.
-pub fn finalizer_facts(ast: &Output<'_>) -> (bool, bool) {
-    let effects = analyze_fn_effects(ast, BareCases::none());
-    (effects.contains_key("drop"), finalizers_resize(&effects))
+pub fn finalizer_may_resize(ast: &Output<'_>) -> bool {
+    finalizers_resize(&analyze_fn_effects(ast, BareCases::none()))
 }
 
 fn finalizers_resize(effects: &HashMap<String, EffectFlags>) -> bool {
@@ -383,27 +315,6 @@ pub fn length_stability(
         .map(|(name, _)| name.clone())
         .collect();
     LengthStability { fns, alloc_stable }
-}
-
-/// Analyze top-level / nested `fn` declarations and return self-recursive pure names.
-pub fn analyze_recursive_pure(ast: &Output<'_>, cases: &BareCases) -> RecursivePureSet {
-    let facts = collect_fn_facts(ast, cases);
-    let impure = impure_closure(&facts);
-    facts
-        .iter()
-        .filter(|(name, f)| !impure.contains(*name) && f.callees.contains(*name))
-        .map(|(name, _)| name.clone())
-        .collect()
-}
-
-/// Fixed point of "impure if locally impure, or any callee is impure / not a
-/// user `fn`" over the call graph.
-fn impure_closure(facts: &HashMap<String, FnFacts>) -> HashSet<String> {
-    effect_closure(facts)
-        .into_iter()
-        .filter(|(_, flags)| !flags.is_pure())
-        .map(|(name, _)| name)
-        .collect()
 }
 
 fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFlags> {
@@ -455,105 +366,6 @@ fn effect_closure_with(
 /// Host / virtual-module names that are not user `fn`s.
 fn classify_unknown_callee(name: &str) -> EffectFlags {
     classify_host_name(name)
-}
-
-/// Effect bits for a host / virtual-module callee (I6), by registry name
-/// (`math_sin`, `fs_exists`) or by the short name a virtual module exports
-/// (`exists`).
-///
-/// Registry names read the `effects` column of [`common::HOST_NATIVES`]. A
-/// short name takes the union of every row it is exported as (`close` is both
-/// `io::close` and `thread::close`). Unknown names fail closed
-/// (`UNKNOWN | HOST | RESIZE`) so they are never treated as hoistable.
-pub fn classify_host_name(name: &str) -> EffectFlags {
-    let short = name.rsplit("::").next().unwrap_or(name);
-    host_effect_table()
-        .get(short)
-        .copied()
-        .unwrap_or(UNKNOWN_CALLEE)
-}
-
-const UNKNOWN_CALLEE: EffectFlags = EffectFlags::from_bits(
-    EffectFlags::UNKNOWN | EffectFlags::HOST | EffectFlags::RESIZE,
-);
-
-fn host_effect_table() -> &'static HashMap<&'static str, EffectFlags> {
-    static TABLE: OnceLock<HashMap<&'static str, EffectFlags>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table: HashMap<&'static str, EffectFlags> = HashMap::new();
-        for row in common::HOST_NATIVES {
-            table.insert(row.name, row.effects);
-        }
-        for (_, export) in VirtualModules::new().all_exports() {
-            let Some(flags) = export_effects(export) else {
-                continue;
-            };
-            let entry = table.entry(export_surface(export)).or_default();
-            *entry = entry.union(flags);
-        }
-        // Names that are neither a host row nor a virtual export but reach
-        // this table unresolved (methods and stdlib helpers called by name).
-        for (name, bits) in [
-            ("len", EffectFlags::HOST | EffectFlags::UNKNOWN),
-            ("write_all", EffectFlags::WRITE),
-            ("fd", EffectFlags::ATTACH_PARK | EffectFlags::RESIZE),
-        ] {
-            table.entry(name).or_insert(EffectFlags::from_bits(bits));
-        }
-        table
-    })
-}
-
-fn export_surface(export: &BuiltinExport) -> &'static str {
-    match export {
-        BuiltinExport::Enum { name }
-        | BuiltinExport::TypeClass { name }
-        | BuiltinExport::OpaqueType { name } => name,
-        BuiltinExport::FfiTag { variant } => variant,
-        BuiltinExport::FfiFn { kind } => kind.as_str(),
-        BuiltinExport::Fn { kind } => kind.as_str(),
-        BuiltinExport::IoFn { kind } => kind.as_str(),
-        BuiltinExport::StringFn { kind } => kind.as_str(),
-        BuiltinExport::ThreadFn { kind } => kind.as_str(),
-        BuiltinExport::GcFn { kind } => kind.as_str(),
-        BuiltinExport::HostFn { surface, .. } => surface,
-    }
-}
-
-/// Effects of calling a virtual-module export; `None` for types.
-fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
-    let row = |registry: &str| {
-        common::HOST_NATIVES
-            .iter()
-            .find(|n| n.name == registry)
-            .map(|n| n.effects)
-            .unwrap_or(UNKNOWN_CALLEE)
-    };
-    Some(match export {
-        BuiltinExport::Enum { .. }
-        | BuiltinExport::TypeClass { .. }
-        | BuiltinExport::OpaqueType { .. }
-        | BuiltinExport::FfiTag { .. } => return None,
-        BuiltinExport::FfiFn { .. } => {
-            EffectFlags::from_bits(EffectFlags::FFI | EffectFlags::RESIZE)
-        }
-        BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::BlackBox } => row(common::BLACK_BOX_NATIVE),
-        // `fn_key()` is an `int` literal by the time anything runs.
-        BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::FnKey } => EffectFlags::empty(),
-        // `ord`, `char`, matrix helpers: compiled inline or in userland,
-        // not a host row.
-        BuiltinExport::Fn { .. } => UNKNOWN_CALLEE,
-        BuiltinExport::IoFn { kind } => row(kind.native_name()),
-        BuiltinExport::StringFn { kind } => match kind.native_name() {
-            Some(registry) => row(registry),
-            // `format` lowers to the FORMAT opcode. Kept impure like the
-            // other text helpers (see `TEXT` in `common::host`).
-            None => EffectFlags::from_bits(EffectFlags::ALLOC),
-        },
-        BuiltinExport::ThreadFn { kind } => row(kind.native_name()),
-        BuiltinExport::GcFn { kind } => row(kind.native_name()),
-        BuiltinExport::HostFn { registry, .. } => row(registry),
-    })
 }
 
 /// `by_owner` keys impl methods `Owner::m` (so method calls can resolve to
@@ -619,6 +431,11 @@ fn method_fn<'n, 's>(m: &'n Output<'s>) -> Option<(&'s str, &'n Output<'s>, &'n 
 }
 
 fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| collect_nested_fns_level(ast, facts, cases))
+}
+
+fn collect_nested_fns_level(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
@@ -723,7 +540,7 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, ca
                     collect_nested_fns(&f.value, facts, cases);
                 }
             }
-            EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
         },
         Expression::Loop {
             contracts: _,
@@ -769,6 +586,11 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, ca
 }
 
 fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| walk_body_level(ast, facts))
+}
+
+fn walk_body_level(ast: &Output<'_>, facts: &mut FnFacts) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
@@ -787,14 +609,15 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         | Expression::ImplicitReturn(inner)
         | Expression::Raise(inner)
         | Expression::Try(inner)
-        | Expression::Negate(inner)
-        | Expression::Not(inner)
         | Expression::LogicalNot(inner)
-        | Expression::Positive(inner)
         | Expression::Cast(inner, _)
         | Expression::TypeOf(inner)
         | Expression::Readonly(inner)
         | Expression::OptionalAccess(inner, _) => walk_body(inner, facts),
+        Expression::Negate(inner) | Expression::Not(inner) | Expression::Positive(inner) => {
+            facts.operands.push((inner.0.start, inner.0.end));
+            walk_body(inner, facts);
+        }
         // The resumer (or the resumed body) runs arbitrary code.
         Expression::Yield(_) | Expression::YieldFrom(_) | Expression::Resume(_, _) => {
             facts.local.insert(EffectFlags::YIELD | EffectFlags::RESIZE);
@@ -816,16 +639,21 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         | Expression::Shl(a, b)
         | Expression::Shr(a, b)
         | Expression::Xor(a, b)
-        | Expression::And(a, b)
         | Expression::BitAnd(a, b)
-        | Expression::Or(a, b)
         | Expression::BitOr(a, b)
         | Expression::Eq(a, b)
         | Expression::Neq(a, b)
         | Expression::Leq(a, b)
         | Expression::Geq(a, b)
         | Expression::Le(a, b)
-        | Expression::Gt(a, b)
+        | Expression::Gt(a, b) => {
+            facts.operands.push((a.0.start, a.0.end));
+            facts.operands.push((b.0.start, b.0.end));
+            walk_body(a, facts);
+            walk_body(b, facts);
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
         | Expression::Coalesce(a, b)
         | Expression::Range {
             start: a, end: b, ..
@@ -842,6 +670,10 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             }
             if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 facts.free_writes.insert((*n).to_string());
+            }
+            if matches!(ast.1.as_ref(), Expression::CompoundAssign(..)) {
+                facts.operands.push((lhs.0.start, lhs.0.end));
+                facts.operands.push((rhs.0.start, rhs.0.end));
             }
             walk_body(lhs, facts);
             walk_body(rhs, facts);
@@ -863,7 +695,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 Expression::QualifiedAccess { owner, member } => {
                     facts.callees.insert(format!("{owner}::{member}"));
                 }
-                Expression::Access(recv, member) => {
+                // `(recv.field)(..)` is no method call: it calls whatever
+                // function the field holds (#2472).
+                Expression::Access(recv, member) if matches!(name.1.as_ref(), Expression::Access(..)) => {
                     facts
                         .method_calls
                         .push(((recv.0.start, recv.0.end), (*member).to_string()));
@@ -898,8 +732,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         }
         // Constructor payloads hold arbitrary expressions — skipping them hid
         // both impure calls and enum-building self-recursion.
-        Expression::Construct { fields, .. } => match fields {
+        Expression::Construct { enum_name, variant_name, fields } => match fields {
             EnumConstructPayload::Tuple(items) => {
+                facts.constructs.push(((*enum_name).to_string(), (*variant_name).to_string(), false));
                 for item in items {
                     walk_body(item, facts);
                 }
@@ -909,15 +744,22 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                     walk_body(&f.value, facts);
                 }
             }
-            EnumConstructPayload::Unit => {}
+            // A static method's value (bare) counts as its call: the
+            // value is called somewhere.
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {
+                facts.constructs.push(((*enum_name).to_string(), (*variant_name).to_string(), true));
+            }
         },
         Expression::Loop {
             contracts: _,
             identifier,
-            pattern: _,
+            pattern,
             iterable,
             body,
         } => {
+            if identifier.is_some() || pattern.is_some() {
+                facts.for_ins.push((ast.0.start, ast.0.end));
+            }
             if let Some(id) = identifier {
                 walk_body(id, facts);
             }
@@ -1009,6 +851,11 @@ fn fresh_lets(ast: &Output<'_>, out: &mut HashSet<String>) {
 /// Mark every name in `fresh` that `ast` uses other than through `x[i]`,
 /// `x.f`, a write through one, or `return x`.
 fn private_uses(ast: &Output<'_>, fresh: &HashSet<String>, escaped: &mut HashSet<String>) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| private_uses_level(ast, fresh, escaped))
+}
+
+fn private_uses_level(ast: &Output<'_>, fresh: &HashSet<String>, escaped: &mut HashSet<String>) {
     let base_name = |e: &Output<'_>| match peel(e).1.as_ref() {
         Expression::Identifier(n) if fresh.contains(*n) => Some((*n).to_string()),
         _ => None,
@@ -1064,78 +911,67 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
     }
 }
 
-/// Fill [`Checker::fn_effects`] / [`Checker::pure_fn_names`] after infer.
-///
-/// Effects are also kept per [`DefId`] for the whole program, so a module
-/// checked later sees an imported function's real effects instead of
-/// treating the call as unknown (modules are checked in dependency order).
-pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) {
-    checker.fn_effects.clear();
-    checker.pure_fn_names.clear();
-    let effects = {
-        let checker = &*checker;
-        let resolve = |name: &str| {
-            if let Some(&fx) = checker.program_method_effects.get(name) {
-                return Some(fx);
-            }
-            let id = checker.def_id_of(name).or_else(|| {
-                let (module, short) = name.rsplit_once("::")?;
-                checker.interned_def(module, short)
-            })?;
-            checker.program_fn_effects.get(&id).copied()
-        };
-        let mut facts = HashMap::new();
-        collect_fns(ast, &mut facts, true, checker.bare_cases());
-        let target = |span: (usize, usize), m: &str| {
-            let owner = checker.class_owner_at_span(span)?;
-            let local = owner
-                .strip_prefix(checker.current_module_name())
-                .and_then(|o| o.strip_prefix("::"))
-                .unwrap_or(&owner);
-            Some(format!("{local}::{m}"))
-        };
-        settle_method_calls(&mut facts, &target);
-        settle_statics(&mut facts, ast);
-        effect_closure_with(&facts, &resolve)
+/// The effects of this file's functions (keyed `f`) and impl methods
+/// (keyed `Owner::m`), settled with the checker's types and with what the
+/// modules checked before it recorded.
+fn checked_fn_effects(checker: &super::infer::Checker, ast: &Output<'_>) -> HashMap<String, EffectFlags> {
+    let resolve = |name: &str| {
+        if let Some(&fx) = checker.program_method_effects.get(name) {
+            return Some(fx);
+        }
+        let id = checker.def_id_of(name).or_else(|| {
+            let (module, short) = name.rsplit_once("::")?;
+            checker.interned_def(module, short)
+        })?;
+        checker.program_fn_effects.get(&id).copied()
     };
-    checker.length_stability = length_stability(
-        &effects,
-        checker.program_finalizers_resize.unwrap_or(false),
-    );
+    let mut facts = HashMap::new();
+    collect_fns(ast, &mut facts, true, checker.bare_cases());
+    let target = |span: (usize, usize), m: &str| {
+        let owner = checker.class_owner_at_span(span)?;
+        let local = owner
+            .strip_prefix(checker.current_module_name())
+            .and_then(|o| o.strip_prefix("::"))
+            .unwrap_or(&owner);
+        Some(format!("{local}::{m}"))
+    };
+    settle_method_calls(&mut facts, &target);
+    settle_statics(&mut facts, ast);
+    let operand_runs = |span| crate::effects::operator_runs_user_code(checker.ty_at_span(span).as_ref());
+    let for_in_runs = |(start, end)| {
+        use super::infer::ForInKind;
+        !matches!(
+            checker.for_in_info_for_span(start, end).map(|i| &i.kind),
+            Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
+        )
+    };
+    settle_operators(&mut facts, &operand_runs, &for_in_runs);
+    settle_constructs(&mut facts, &|owner, name| checker.tag_for(owner, name).is_some(), &|owner, name| {
+        super::index_facts::static_method_call(checker, owner, name)
+    });
+    effect_closure_with(&facts, &resolve)
+}
+
+/// Fill [`Checker::length_stability`] after infer: what the checker's
+/// bounds proofs (`index_facts`) may assume of a call. They run before
+/// there is any HIR, so this walk is their only source.
+///
+/// The effects are also kept for the whole program (per [`DefId`] for a
+/// function, by `module::Owner::m` for a method), so the walk of a module
+/// checked later sees an imported function's effects instead of treating
+/// the call as unknown (modules are checked in dependency order).
+///
+/// [`DefId`]: super::def_id::DefId
+pub fn record_length_stability(checker: &mut super::infer::Checker, ast: &Output<'_>) {
+    let effects = checked_fn_effects(checker, ast);
+    checker.length_stability = length_stability(&effects, checker.program_finalizers_resize.unwrap_or(false));
     let module = checker.current_module_name().to_string();
-    // Impl methods are keyed `Owner::m`. A bare `m` stays listed when every
-    // fn or method of that short name is pure, as before methods had owners.
-    let mut by_short: HashMap<&str, EffectFlags> = HashMap::new();
-    for (name, flags) in &effects {
-        let short = name.rsplit_once("::").map_or(name.as_str(), |(_, s)| s);
-        let e = by_short.entry(short).or_insert(EffectFlags::empty());
-        *e = e.union(*flags);
-    }
-    for (short, flags) in by_short {
-        if flags.is_pure() {
-            checker.pure_fn_names.insert(short.to_string());
-        }
-    }
-    for (name, flags) in &effects {
+    for (name, flags) in effects {
         if name.contains("::") {
-            let qualified = if module.is_empty() {
-                name.clone()
-            } else {
-                format!("{module}::{name}")
-            };
-            if flags.is_pure() {
-                checker.pure_fn_names.insert(name.clone());
-                checker.pure_fn_names.insert(qualified.clone());
-            }
-            checker.program_method_effects.insert(qualified, *flags);
-            continue;
-        }
-        if flags.is_pure() {
-            checker.pure_fn_names.insert(name.clone());
-        }
-        if let Some(id) = checker.def_id_of(name) {
-            checker.fn_effects.insert(id, *flags);
-            checker.program_fn_effects.insert(id, *flags);
+            let qualified = if module.is_empty() { name } else { format!("{module}::{name}") };
+            checker.program_method_effects.insert(qualified, flags);
+        } else if let Some(id) = checker.def_id_of(&name) {
+            checker.program_fn_effects.insert(id, flags);
         }
     }
 }
@@ -1145,10 +981,34 @@ mod tests {
     use super::*;
     use parser::Pratt;
 
-    fn pure_set(src: &str) -> RecursivePureSet {
+    /// A lone file's pure functions: the ones that stay length-stable when
+    /// a finalizer may resize.
+    fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
+        length_stability(&analyze_fn_effects(ast, cases), true).fns
+    }
+
+    /// The walk's verdicts for the file a checker checked last, by the
+    /// walk's keys (`f`, `Owner::m`).
+    struct Checked(HashMap<String, EffectFlags>);
+
+    impl Checked {
+        fn of(checker: &crate::typechecking::infer::Checker, ast: &Output<'_>) -> Self {
+            Self(checked_fn_effects(checker, ast))
+        }
+
+        fn name_is_pure(&self, name: &str) -> bool {
+            self.0.get(name).is_some_and(|f| f.is_pure())
+        }
+
+        fn fn_effects(&self) -> &HashMap<String, EffectFlags> {
+            &self.0
+        }
+    }
+
+    fn pure_set(src: &str) -> HashSet<String> {
         let owned = src.to_string();
         let ast = Pratt::default().parse(owned.as_str()).expect("parse");
-        analyze_recursive_pure(&ast, BareCases::none())
+        analyze_pure_fns(&ast, BareCases::none())
     }
 
     #[test]
@@ -1230,7 +1090,7 @@ fn main() { return; }
     }
 
     #[test]
-    fn fib_is_recursive_pure() {
+    fn recursive_fib_is_pure() {
         let set = pure_set(
             r#"
 fn fib(int n) -> int {
@@ -1240,51 +1100,12 @@ fn fib(int n) -> int {
 fn main() { return; }
 "#,
         );
-        assert!(set.contains("fib"), "fib should be recursive pure: {set:?}");
-        assert!(!set.contains("main"));
+        assert!(set.contains("fib"), "fib should be pure: {set:?}");
     }
 
     fn parse_ast(src: &str) -> parser::ast::Output<'static> {
         let owned = Box::leak(src.to_string().into_boxed_str());
         Pratt::default().parse(owned).expect("parse")
-    }
-
-    #[test]
-    fn analyze_recursive_fns_detects_mutual_cycle() {
-        let ast = parse_ast(
-            r#"
-fn ping(int n) -> int { return pong(n); }
-fn pong(int n) -> int { return ping(n); }
-fn main() { return; }
-"#,
-        );
-        let rec = analyze_recursive_fns(&ast, BareCases::none());
-        assert!(rec.contains("ping") && rec.contains("pong"), "{rec:?}");
-        assert!(!rec.contains("main"));
-    }
-
-    #[test]
-    fn analyze_recursive_fns_skips_impl_methods() {
-        // Identifier `join` inside an impl method must not invent a self-cycle
-        // on the method name (see analyze_recursive_fns docs).
-        let ast = parse_ast(
-            r#"
-class T {
-    pub x: int,
-}
-impl T {
-    pub fn join() -> int {
-        return join(self);
-    }
-}
-fn main() { return; }
-"#,
-        );
-        let rec = analyze_recursive_fns(&ast, BareCases::none());
-        assert!(
-            !rec.contains("join"),
-            "impl methods must be excluded from recursion SCC: {rec:?}"
-        );
     }
 
     #[test]
@@ -1303,20 +1124,9 @@ fn main() { return; }
         assert!(!set.contains("speak"), "speak uses IO: {set:?}");
     }
 
+    /// A helper that does not recurse is pure all the same.
     #[test]
-    fn pure_non_recursive_excluded() {
-        let set = pure_set(
-            r#"
-fn add(int a, int b) -> int { return a + b; }
-fn main() { return; }
-"#,
-        );
-        assert!(!set.contains("add"));
-    }
-
-    /// `analyze_pure_fns` keeps the non-recursive helpers that loop IPA needs.
-    #[test]
-    fn analyze_pure_fns_keeps_non_recursive_helpers() {
+    fn non_recursive_helpers_are_pure() {
         let ast = parse_ast(
             r#"
 use io::{stdout, write};
@@ -1356,7 +1166,7 @@ fn main() { return; }
         assert!(!set.contains("leaf"), "leaf uses IO: {set:?}");
         assert!(
             !set.contains("rec"),
-            "rec must not be recursive-pure when it reaches impure leaf: {set:?}"
+            "rec must not be pure when it reaches impure leaf: {set:?}"
         );
     }
 
@@ -1418,27 +1228,6 @@ fn main() { return; }
         );
     }
 
-    #[test]
-    fn mutual_recursion_without_self_call_excluded() {
-        let set = pure_set(
-            r#"
-fn a(int n) -> int {
-    if n <= 0 { return 0; }
-    return b(n - 1);
-}
-fn b(int n) -> int {
-    if n <= 0 { return 1; }
-    return a(n - 1);
-}
-fn main() { return; }
-"#,
-        );
-        assert!(
-            !set.contains("a") && !set.contains("b"),
-            "only self-recursive pure fns are auto-par candidates: {set:?}"
-        );
-    }
-
     /// Skipping `Construct` payloads hid IO inside `Tree::Node(shout(n), …)`.
     #[test]
     fn impure_call_in_enum_ctor_payload_marks_impure() {
@@ -1467,10 +1256,10 @@ fn main() { return; }
         );
     }
 
-    /// Self-calls that only appear inside `Tree::Node(…)` must still mark the
-    /// builder recursive-pure so EnumCtor IPA can fire.
+    /// Self-calls that only appear inside `Tree::Node(…)` are walked, and the
+    /// builder stays pure so EnumCtor IPA can fire.
     #[test]
-    fn self_recursion_only_via_enum_ctor_is_recursive_pure() {
+    fn self_recursion_only_via_enum_ctor_is_pure() {
         let set = pure_set(
             r#"
 enum Tree {
@@ -1486,7 +1275,7 @@ fn main() { return; }
         );
         assert!(
             set.contains("build"),
-            "enum-building self-recursion must be recursive-pure: {set:?}"
+            "enum-building self-recursion must be pure: {set:?}"
         );
     }
 
@@ -1517,19 +1306,6 @@ fn main() { return; }
     }
 
     #[test]
-    fn classify_host_name_math_is_pure_clocks_and_io_are_not() {
-        assert!(classify_host_name("math_sin").is_pure());
-        assert!(classify_host_name("packed_dot").is_pure());
-        assert!(classify_host_name("simd_axpy_reduce").is_pure());
-        assert!(classify_host_name("mono_nanos").contains(EffectFlags::HOST));
-        assert!(classify_host_name("clock_sleep_ms").contains(EffectFlags::HOST));
-        assert!(classify_host_name("write").contains(EffectFlags::IO));
-        assert!(classify_host_name("gc_collect").contains(EffectFlags::GC));
-        assert!(classify_host_name("invoke").contains(EffectFlags::FFI));
-        assert!(!classify_host_name("mystery").is_pure());
-    }
-
-    #[test]
     fn float_helper_is_pure_clock_helper_is_not() {
         let ast = parse_ast(
             r#"
@@ -1548,7 +1324,7 @@ fn main() { return; }
     }
 
     #[test]
-    fn sidecar_records_pure_helper_and_host_callee() {
+    fn the_checked_walk_records_a_pure_helper_and_a_host_callee() {
         use crate::typechecking::infer::Checker;
 
         let ast = parse_ast(
@@ -1565,18 +1341,122 @@ fn main() { return; }
         );
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &ast);
         assert!(side.name_is_pure("add"), "add must stay pure");
         assert!(!side.name_is_pure("shout"), "host write must be impure");
-        let add_id = c.def_id_of("add").expect("add DefId");
-        let shout_id = c.def_id_of("shout").expect("shout DefId");
-        assert!(side.is_pure_def(add_id));
-        assert!(!side.is_pure_def(shout_id));
-        let shout_fx = side.effects(shout_id).expect("shout effects");
+        assert!(side.fn_effects()["add"].is_pure());
+        let shout_fx = side.fn_effects()["shout"];
         assert!(
             shout_fx.contains(EffectFlags::IO) || shout_fx.contains(EffectFlags::UNKNOWN),
             "shout should record IO/unknown, got {shout_fx:?}"
         );
+    }
+
+    /// `Owner::name(..)` parses like an enum constructor; one that is not
+    /// is a call, with the effects of what it calls (#2407).
+    #[test]
+    fn construct_shaped_calls_carry_their_effects() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+static let CALLS: int = 0;
+enum Shape {
+    Dot,
+    Circle(int),
+}
+class Counter {
+    pub n: int,
+    static count: int = 0,
+}
+impl Counter {
+    pub static fn quiet(int n) -> int { return n + 1; }
+    pub static fn loud(int n) -> int {
+        CALLS++;
+        return n;
+    }
+}
+trait Make<T> {
+    static fn make(int n) -> T {}
+}
+impl Make for Shape {
+    pub static fn make(int n) -> Shape {
+        CALLS++;
+        return Shape::Circle(n);
+    }
+}
+fn variant(int n) -> Shape { return Shape::Circle(n); }
+fn unit_variant() -> Shape { return Shape::Dot; }
+fn some(int n) -> Option<int> { return Option::Some(n); }
+fn inherent(int n) -> int { return Counter::quiet(n); }
+fn inherent_loud(int n) -> int { return Counter::loud(n); }
+fn built(int n) -> Shape { return Shape::make(n); }
+fn made<T: Make>(int n) -> T { return T::make(n); }
+fn reads() -> int { return Counter::count; }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = Checked::of(&c, &ast);
+        for name in ["variant", "unit_variant", "some", "inherent"] {
+            assert!(side.name_is_pure(name), "`{name}` only builds a value or calls a pure method");
+        }
+        for name in ["inherent_loud", "built", "made", "reads"] {
+            assert!(!side.name_is_pure(name), "`{name}` is not pure");
+        }
+    }
+
+    /// An operator on a class or a type parameter, and a `for … in` over a
+    /// user iterator, run user code; on built-in types they do not (#2388).
+    #[test]
+    fn user_operators_and_iterators_are_not_pure() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+class Money {
+    pub cents: int,
+}
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool { return a.cents < b.cents; }
+}
+impl Neg for Money {
+    pub fn neg(Money a) -> Money { return new Money(0 - a.cents); }
+}
+impl Add for Money {
+    pub fn add(Money a, Money b) -> Money { return new Money(a.cents + b.cents); }
+}
+class Count {
+    pub cur: int,
+}
+impl Iterator for Count {
+    type Item = int;
+    fn next(Count c) -> Option<int> { return Option::None; }
+}
+fn less(Money a, Money b) -> bool { return a < b; }
+fn less_of<T: Lt>(T a, T b) -> bool { return a < b; }
+fn flipped(Money a) -> int { let b = -a; return b.cents; }
+fn summed(Money a, Money b) -> int { let c = a; c += b; return c.cents; }
+fn drain(Count c) -> int { let s = 0; for x in c { s = s + x; } return s; }
+fn via(Money a, Money b) -> bool { return less(a, b); }
+fn ints(int a, int b) -> bool { return a < b && -a != b; }
+fn strs(string a, string b) -> bool { return a + b == b; }
+fn opts(Option<int> a, (int, float) t) -> bool { return a == Option::None && t == (1, 2.0); }
+fn each(Vec<int> xs) -> int { let s = 0; for x in xs { s += x; } for i in 0..3 { s += i; } return s; }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = Checked::of(&c, &ast);
+        for name in ["less", "less_of", "flipped", "summed", "drain", "via"] {
+            assert!(!side.name_is_pure(name), "`{name}` runs user code");
+            assert!(!c.typed_sidecar().length_stability().fns.contains(name), "`{name}` may resize");
+        }
+        for name in ["ints", "strs", "opts", "each"] {
+            assert!(side.name_is_pure(name), "`{name}` only uses built-in operators");
+        }
     }
 
     #[test]
@@ -1622,7 +1502,7 @@ fn main() { return; }
 "#,
         );
         let _ = c.check_program(&app);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &app);
         assert!(side.name_is_pure("area"), "pure import keeps the caller pure");
         assert!(side.name_is_pure("qualified"), "qualified call resolves too");
         assert!(!side.name_is_pure("loud"), "impure import stays impure");
@@ -1671,7 +1551,7 @@ fn main() { return; }
         );
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &ast);
         assert!(side.name_is_pure("Point::norm1"));
         assert!(side.name_is_pure("Point::twice"), "self call resolves");
         assert!(side.name_is_pure("size"), "pure method keeps caller pure");
@@ -1679,18 +1559,32 @@ fn main() { return; }
         assert!(!side.name_is_pure("loud"), "IO method");
         // Same method name on another class: the receiver type decides.
         assert!(!side.name_is_pure("other"));
-        assert!(!side.name_is_pure("norm1"), "bare name is the union");
     }
 
+    /// `(b.f)(1)` calls the function the field `f` holds, whatever a method
+    /// `f` of the class does (#2472).
     #[test]
-    fn sidecar_mono_stem_matches_pure_name() {
-        let ast = parse_ast("fn sq(int x) -> int { return x * x; } fn main() { return; }");
-        let mut c = crate::typechecking::infer::Checker::new();
+    fn a_parenthesized_field_callee_is_no_method_call() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+class Both {
+    pub f: fn(int) -> int,
+}
+impl Both {
+    pub fn f(int x) -> int { return x + 100; }
+}
+fn via_method(Both b) -> int { return b.f(1); }
+fn via_field(Both b) -> int { return (b.f)(1); }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
-        assert!(side.name_is_pure("sq$mono$1$0"));
-        assert!(side.name_is_pure("util::sq"));
-        assert!(!side.name_is_pure("mod::Type::sq"));
+        let side = Checked::of(&c, &ast);
+        assert!(side.name_is_pure("via_method"), "the pure method");
+        assert!(!side.name_is_pure("via_field"), "an unknown function value");
     }
 
     /// `if let` bodies used to be skipped, hiding IO from purity.
@@ -1832,53 +1726,6 @@ fn main() { return; }
         );
         assert!(!st.alloc_stable);
         assert!(!st.fns.contains("absorb"), "{:?}", st.fns);
-    }
-
-    #[test]
-    fn every_virtual_export_reaches_a_host_row() {
-        // A new export whose registry name has no HOST_NATIVES row would fall
-        // back to UNKNOWN: give it a row (with its effects) instead.
-        for (module, export) in VirtualModules::new().all_exports() {
-            let registry = match export {
-                BuiltinExport::IoFn { kind } => Some(kind.native_name()),
-                BuiltinExport::StringFn { kind } => kind.native_name(),
-                BuiltinExport::ThreadFn { kind } => Some(kind.native_name()),
-                BuiltinExport::GcFn { kind } => Some(kind.native_name()),
-                BuiltinExport::HostFn { registry, .. } => Some(*registry),
-                _ => None,
-            };
-            if let Some(registry) = registry {
-                assert!(
-                    common::HOST_NATIVES.iter().any(|n| n.name == registry),
-                    "{module}::{} -> `{registry}` has no host row",
-                    export_surface(export)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn host_effects_come_from_the_table_not_the_name() {
-        // `close` is exported by both `io` and `thread`: union of both rows.
-        let close = classify_host_name("close");
-        assert!(close.contains(EffectFlags::IO) && close.contains(EffectFlags::THREAD));
-        // `io::fs` and `env` short names used to fall through to UNKNOWN.
-        assert!(classify_host_name("exists").contains(EffectFlags::IO));
-        assert!(!classify_host_name("exists").contains(EffectFlags::UNKNOWN));
-        assert!(classify_host_name("var").contains(EffectFlags::ENV));
-        assert!(classify_host_name("exit").contains(EffectFlags::EXEC));
-        assert!(classify_host_name("connect").contains(EffectFlags::NET));
-        assert!(classify_host_name("wait_ready").contains(EffectFlags::SUSPEND));
-        assert!(!classify_host_name("wait_ready").contains(EffectFlags::IO));
-        assert!(classify_host_name("remove_file").contains(EffectFlags::WRITE));
-        assert!(!classify_host_name("exists").contains(EffectFlags::WRITE));
-        assert!(classify_host_name("get").contains(EffectFlags::GC));
-        // Same row by registry name and by surface name.
-        assert_eq!(classify_host_name("fs_exists"), classify_host_name("exists"));
-        assert_eq!(classify_host_name("wait_readable"), classify_host_name("await_readable"));
-        // An unresolved name is unknown, even if it looks like math.
-        assert_eq!(classify_host_name("log"), UNKNOWN_CALLEE);
-        assert!(classify_host_name("vec_push_like").contains(EffectFlags::UNKNOWN));
     }
 
     #[test]

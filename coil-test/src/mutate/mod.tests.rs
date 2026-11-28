@@ -123,7 +123,7 @@ fn weak_suite_end_to_end() {
     std::fs::write(root.join("tests/mathx.coil"), TESTS).unwrap();
     let options = |jobs: usize| MutateOptions {
         test: TestOptions {
-            root: root.join("tests"),
+            paths: vec![root.join("tests")],
             fail_fast: false,
             order: Order::Shuffled(1),
             jobs,
@@ -135,7 +135,6 @@ fn weak_suite_end_to_end() {
             contracts: None,
             fold_calls: None,
             early_free: None,
-            nursery: None,
             auto_par: None,
             contract_runs: 0,
             grants: HostGrants::deny_all(),
@@ -143,6 +142,8 @@ fn weak_suite_end_to_end() {
             report: Default::default(),
             doc_tests: crate::runner::DocTests::Off,
             wall_timeout: None,
+            engine: Default::default(),
+            cell: None,
         },
         files: Vec::new(),
         operators: Operator::ALL.to_vec(),

@@ -1,11 +1,328 @@
 # Archive version history
 
 The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
-[`common/src/archive.rs`](../../common/src/archive.rs), which also carries the
-entries from minor 24 on. That file is the ledger: bump the minor there (and
-note what it adds) for an append-only change; an incompatible change bumps
-the major and resets the minor. This page keeps the older notes that used to
-live in AGENTS.md and [pipeline.md](pipeline.md) (#1874).
+[`common/src/archive.rs`](../../common/src/archive.rs). Bump the minor there for an
+additive change; any other change to the format bumps the major and resets the
+minor. A runtime loads an archive of its own major and a minor it knows, and no
+other: there are no legacy decoders. The format of the MIR section has a version of
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (28 today; a reader takes
+28 only and refuses any other).
+
+## Major 8
+
+Major 8 minor 0 drops what no engine reads or makes any more. It is the one
+format break of the 2026-11 cleanup: feature/native is not merged to `main`
+(#2265), so no 8.x archive has shipped, and later PRs of the same wave that
+change the format again stay on major 8 and list their change here: those that
+only add something to the format raise the minor (minor 20, below, is the
+current version, 8.20 with MIR section `FORMAT` 29). A runtime refuses a major
+7 archive with its version error, as any other major.
+
+- MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
+  empty since `Deopt` went, #2343) or `call_fields` / `slot_fields`
+  (unread since `promote_fields` went). Instruction tags 41 / 42
+  (`PanicStore` / `Deopt`) stay reserved.
+- Heap object kind 8 (a boxed scalar, `ObjBoxed`) and snapshot object
+  kind 6 (`SnapObject::Boxed`) are gone; no engine allocated one. Both
+  numbers stay free, as heap kind 11 is.
+- Host native `values_eq_shaped` (**161**) is a panic stub: the compiler
+  stopped emitting it in #2330 (`==` on such a type calls compiler-made
+  glue). Its id is kept.
+- A tuple is an enum object of `PRODUCT_TAG` (`u32::MAX`): heap kind 5,
+  `ALLOC_TUPLE` (1), MIR allocation kind 1, snapshot object kind 3
+  (`SnapObject::Tuple`) and snapshot word tag 3 (`SnapWord::EmptyTuple`,
+  now `UnitEnum` of `PRODUCT_TAG`) are free. An `Alloc`'s words are in
+  declaration order for every kind; engines no longer reverse an enum's.
+  MIR section `FORMAT` 15.
+- `HeapFieldLoad` is `ProductLoad` (same tag, `I_FIELD`; text `productload`):
+  slot `k` of any product object, a constant-index tuple read among them.
+  Helpers `coil_native_field` (which read `0` from a wrong object) and
+  `coil_native_enum_payload` are gone; `coil_native_product_load` bails.
+  MIR section `FORMAT` 16.
+- Host native `packed_vec_arith` (**91**): meta bit 28 says the elements
+  are `byte`, and the kernel wraps each result modulo 256 (#2401). An
+  archive made before this has the bit clear and keeps the int results.
+- Byte cells in the linear-algebra kernels (#2403): `packed_dot` (**87**)
+  meta bit 17 and `packed_matmul` (**88**) meta bit 27 say `byte`, and the
+  result wraps modulo 256. The byte bits `packed_matrix_zip` and
+  `packed_matrix_neg` already had (29 and 20) now wrap `+`, `-` and
+  arithmetic negation too, not only the bitwise cells.
+- A `Cow` takes and gives a heap word again: the `I64` share #2567 added
+  (a shared generic body's type parameter word, which may be no object) is
+  gone; the body tests its `kinds` word and shares the object instead
+  (#2506). The op's encoding never changed: MIR section `FORMAT` stays 16.
+- A shared generic free function or inherent method takes one more entry
+  word after its dictionaries, its `kinds` mask (#2506, [cow-calls.md](cow-calls.md)):
+  every call, a coroutine's `MakeCoro`, a partial application's filled
+  words and a `PolyFn` value's captured words pass it. The calling
+  convention changed, not the encoding: no new op, MIR section `FORMAT`
+  stays 16.
+- A trait dictionary holds a `kinds` word after its methods:
+  `(methods.., kinds, context.., superclass dictionaries..)` (#2506). A
+  trait method with type parameters of its own takes their `kinds` word
+  after its own bounds' dictionaries. Layout and convention only: `FORMAT`
+  stays 16.
+- A call through a `PolyFn` passes, after its dictionaries, one bit per
+  type variable of the type it sees, in order of first appearance, and
+  their count at bit 56 (`common::KINDS_CALL_COUNT_SHIFT`). A
+  `MakePolyFnCapture` word after the `kinds` word with bit 62 set and bit
+  63 clear (`common::kinds_from_call`) sets one bit of that `kinds` word
+  from the call's (`machine::apply`) and is no argument (#2506, #2621; it
+  replaces #2602's word `1`, `KINDS_FROM_CALL`). A shared generic entry
+  takes at most 63 type parameters, so its `kinds` word has bit 63 set.
+  `FORMAT` stays 16.
+- A call through a `PolyFn` passes its constraints' dictionaries in the
+  order of the type it sees (`kinds::value_constraint_order`), and a
+  `MakePolyFnCapture` dictionary word with bits 61 and 62 set, bit 63 clear
+  (`common::dict_from_call(j)`) is the call's dictionary `j` (#2636). A `0`
+  word still takes the call's dictionary at its own index. `FORMAT` stays
+  16.
+- A method's own bare type parameter (`fn m<U>(U x) -> U` on a plain
+  class, unbounded, static or with `self`, and a trait instance method's
+  own) takes and returns a niche `Option` / `Result` as its niche word, as
+  a free generic function's does; the call no longer boxes it to the enum
+  object (#2716). Convention only, inside one compilation: `FORMAT` stays
+  16.
+
+Minor 1 (#2578) adds inline scopes, additively: MIR section `FORMAT` 17 writes
+the scope table (`common::write_inline_scopes`: per scope the callee's name, the
+call's file, start, end and scope, and an `at_call` byte) right after the format
+byte, and after each location map of a body the keys whose location is in a scope,
+with the scope (`DebugLoc::scope`, see [debug-info.md](debug-info.md)). The reader
+takes format 16 too (no scopes). `debug_locs` is stored as `SpanLoc`, the same
+three words as before. Outside the archive, the code image (`FORMAT` 3) and an AOT
+object's site table (five words per site) carry the scope as well.
+
+Minor 2 (#2842 step 1) adds the copy-on-write pin, additively: MIR section
+`FORMAT` 18 has two more instructions, `CowPin` (tag 49: dest, src; `dest` is
+whether the object was pinned, and the op pins it) and `CowUnpin` (tag 50: dest,
+src, saved; clears the pin when `saved` is `false`). Its layout is format 17's
+otherwise, and the reader takes 17 and 16 too; a format 17 or 16 section that holds
+tag 49 or 50 is refused. The pin is a byte of the heap header beside the shared flag
+(`machine::COW_PINNED_OFFSET`), in what was padding: no slot grows. A share of a
+pinned object hands out a copy instead of setting the shared flag, and a copy's
+pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects").
+The AOT layout fingerprint covers the pin's offset, so an object built against the
+old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins).
+
+Minor 3 (direct extern calls, steps 1 and 2) adds `ExternCall`, additively: MIR
+section `FORMAT` 19 has one more instruction (tag 51: dest, the C symbol, the
+declared parameters' tags, the result's tag, a variadic byte and, when it is set, the
+tags of the call's arguments, then the argument values: library, function id, the
+function's C address and the arguments' words), and FFI op index 3 of an `Ffi`
+instruction is `addr` (`common::FFI_OP_ADDR`, 4: a declared function's C address, as
+a `Result`), which module setup stores in a static beside each function id. An `extern` block's call lowers to it instead of `Ffi` `invoke`
+on an argument tuple with its `Result` unwrapped: the runtime's FFI op 3
+(`common::FFI_OP_CALL`) takes the words as they are, returns the C function's word
+and panics with a call's error. Format 18 is format 19 without tag 51 and FFI op 3, and the
+reader takes it (and 17 and 16); an older section that holds tag 51 is refused. An 8.2
+archive loads and runs unchanged: its extern calls are `invoke`s.
+
+Minor 4 (direct extern calls, step 4) gives an `ExternCall` signature the C layout
+of each `extern struct` it passes or returns by value, additively: in MIR section
+`FORMAT` 20, tag 51 writes, after the variadic tags, a count and per struct its id
+(the tag's aux), size, alignment and its scalar fields with nested structs flattened
+(a count, then each field's byte offset and FFI tag), before the argument values.
+Native code places such a struct in registers or memory by the platform's C calling
+convention from that layout. Format 19 is format 20 without the layouts; the reader
+takes it (and 18 to 16), and an extern call of it that passes a struct goes through
+the runtime's call. An 8.3 archive loads and runs unchanged.
+
+Minor 5 (reference counts, plan step 2) changes what words mean, so its MIR
+section is a new `FORMAT`, 21, and the reader refuses 16 to 20: a shared generic
+entry's `kinds` word holds two bits per type parameter `p`, bit `2p` for a
+copy-on-write object and bit `2p + 1` for a heap reference (31 parameters, 16 for
+a dictionary's word, 28 for a call through a function value), where older formats'
+constant `kinds` words have one bit per parameter; and an `Alloc`'s construction
+`kinds` is a `u32` (it was a byte): packed word kinds, two bits a word, of up to 16
+words (`common::PackedKinds`, `PACKED_KIND_WORDS`); and a `HostInvoke`'s layout
+byte, with `HOST_ENUM_LAYOUT_BOXED`, carries the word kinds of the boxed `Some` /
+`Ok` payload at bits 2-3 and of the `Err` payload at bits 4-5
+(`common::host_layout_with_kinds`). Its layout is format 20's
+otherwise, so an 8.4 archive's code is compiled again. The snapshot additions are
+additive: an enum object's header `aux` field holds the packed kinds of up to 12
+payload words in its 24 bits (it held 4 words' kinds in its low byte) and its type id
+word's high half the next 4 words' (an older reader ignores it); an instance's
+`aux`, `0` before, holds the packed kinds of its first 12 own slots that its class row leaves
+unknown (generic fields, `ObjInstance::own_kinds`); and an array's element kind may
+be `WORD_SCALAR` as well as `WORD_POINTER`. An 8.4 snapshot reads as before.
+Format 21 also holds the reference count ops of plan step 3, `RcInc` (tag 52) and
+`RcDec` (tag 53): a dest, a source word and an optional `bool` guard, each a value
+id (the guard as an optional one).
+
+Minor 6 (reference counts, plan step 9) marks the classes whose objects can close
+a reference cycle: the finalizer registry's `gc_register_finalizer` (**101**) call
+for such a class sets `common::CYCLIC_TYPE_FLAG` (bit 16) on its type id, and one
+for a class with no `drop` passes `0` as the entry. The cycle collector starts its
+walks from those classes' objects. An 8.5 archive loads unchanged and marks none:
+its cycles are left to the collector.
+
+Minor 7 (reference counts, plan step 10) adds MIR tag 54 to format 21: a
+`HeapFieldStore` of a field whose static type is a number (`scalar`), laid out
+as tag 13's. Its old and new words are numbers, so native code stores it in place
+in a run that keeps counts instead of calling the runtime. An 8.6 archive loads
+unchanged: its field stores all take the counted path.
+
+Minor 8 (reference counts, plan step 10) keeps counts by default: the compiler
+inserts `RcInc` / `RcDec` in every body and the runtime frees at count zero with
+no tracing collector (`COIL_RC_CHECK=0` is the old collector, until step 10 deletes
+it). A body that counts nothing would have its words freed under it, so the MIR
+section is a new `FORMAT`, 22, with format 21's layout, and the reader refuses 21:
+an 8.7 archive's code is compiled again.
+
+Minor 9 (reference counts, plan step 10) adds MIR tag 55 to format 22: a
+`StoreIndex` of an element whose static type is a number (`scalar`), laid out
+as tag 12's. Its old and new words are numbers, so native code stores it in place
+with no count change and no test of either word. An 8.8 archive loads unchanged:
+its index stores all take the counted path.
+
+Minor 10 (reference counts, plan step 10) drops the live-root records: frames
+are no longer collector roots, so nothing read them. A `GcBarrier` (tag 15)
+writes its dest and then its object (the word of the allocating op before it)
+where it wrote a counted list of live roots, and a body writes neither its
+IL slot snapshots (`slot_env`) nor its live roots at each safepoint (`gc_roots`)
+before its debug slots. The layout changes, so the MIR section is a new `FORMAT`,
+23, and the reader refuses 22: an 8.9 archive's code is compiled again.
+
+Minor 11 (reuse in place, #2889) adds MIR tags 56 and 57 to format 23:
+`RcReuse` (dest, src, moved mask), a decrement that keeps a dead plain
+enum's or instance's slot and returns its address (`0` when the object lives
+on or cannot be reused), and `AllocAt` (owned mask, a `u8` that says whether a
+slot follows, the slot, then tag 16's `Alloc` layout), an enum allocation into
+that slot when there is one and it is not `0`, which takes the frame's owner
+of the payload words in the owned mask. An 8.10 archive loads unchanged:
+it holds neither op.
+
+Minor 12 (auto-par scheduling) adds host native **216**, `thread_par_room`:
+whether the worker pool has a worker free for another job. Auto-par's loop
+fork-joins ask it before they spawn and run their range on the calling thread
+when it says no. An 8.11 archive loads unchanged: it never calls it.
+
+Minor 13 (wide direct returns) lets a direct call return up to four words:
+a body writes the types of its result words 3.. (`MirFunc::ret_more_tys`, a
+counted list of types) after its second result type, a `Call` (tag 8) its
+further dests (`dest_more`, a counted list) after `dest_hi`, and a `Return`
+terminator its further words (`more`, a counted list) after `hi`. Each list
+is empty in a body that returns at most two words. The layout changes, so
+the MIR section is a new `FORMAT`, 24
+(`common::MIR_SECTION_WIDE_RETURN_FORMAT`), and the reader refuses 23: an
+8.12 archive's code is compiled again.
+
+Minor 14 (wide lane arrays) lets a lane array hold three or four number
+words per element: a `LaneIndex` (tag 45) writes its further dests
+(`dest_more`, a counted list) after `dest_hi`, a `LaneStore` / `LanePush`
+(46 / 47) its further words (`more`, a counted list) after `hi`, and a lane
+`Alloc` (kind 9) a byte of words per element past two after its tag mask. Each list is empty, and the byte 0, for a two-word
+element. The runtime gains `ALLOC_WIDE_LANES` (9) and the helpers
+`coil_native_lane_index_wide` / `_store_wide` / `_push_wide`. The layout
+changes, so the MIR section is a new `FORMAT`, 25
+(`common::MIR_SECTION_WIDE_LANES_FORMAT`), and the reader refuses 24: an
+8.13 archive's code is compiled again.
+
+Minor 15 (maybe-object words) gives MIR the type `maybe_obj`
+(`MirTy::MaybeObj`, type 8): an `i64` word that may hold an object, the low
+word of a pair whose payload may be one (a call's result, a parameter, a
+host call's) and the element a `Vec` expansion holds across its loop. A body
+no longer writes the value set that listed these words
+(`MirFunc::heap_pair_words`, the first of its value sets after the tail
+targets). The layout changes, so the MIR section is a new `FORMAT`, 26
+(`common::MIR_SECTION_MAYBE_OBJ_FORMAT`), and the reader refuses 25: an
+8.14 archive's code is compiled again.
+
+Minor 16 (map tables) adds host natives **217**-**226**, `key_index::map_*`:
+`map_table`, `map_find`, `map_upsert`, `map_probe`, `map_add`, `map_live`,
+`map_len`, `map_remove`, `map_compact` and `map_clear`, one word array per
+index of `{hash, slot}` cells and each slot's cell
+([key-index.md](key-index.md), "Map tables"). Native code runs `map_find`,
+`map_upsert`, `map_live` and `map_len` in place, and `hash_string` reads a
+string's cached hash in place. An 8.15 archive loads unchanged: it never
+calls them.
+
+Minor 17 (element unique in place) adds the MIR op `CowIndex { dest,
+array, index }`, tag 58 (`cow.unique_index`): `array[index] =
+unique(array[index])` in one op, which writes the element back only when it
+copied, as `Cow` with a field does for a field. The runtime gains the helper
+`coil_native_cow_index`. The MIR section is a new `FORMAT`, 27
+(`common::MIR_SECTION_COW_INDEX_FORMAT`), and the reader refuses 26: an
+8.16 archive's code is compiled again.
+
+Minor 18 (the element back from its unique) makes `CowIndex`'s dest the
+element once unique, the copy when it copied, where 8.17's was the array's
+word; `coil_native_cow_index` returns it. A write path reads the element
+from the check instead of loading it again. The MIR section is a new
+`FORMAT`, 28 (`common::MIR_SECTION_COW_ELEM_FORMAT`), and the reader refuses
+27, whose dest means the array: an 8.17 archive's code is compiled again.
+
+Minor 19 (map objects) adds host natives **227** `map_put` and **228**
+`map_word_mode` (`key_index::map_put`, `key_index::word_mode`): one call
+that finds or adds a key in a map object (an instance whose fields 0-2 are
+its table, keys and values) and stores its value, and the value-shape fold
+that gates it ([key-index.md](key-index.md), "Map objects"). Native code
+runs `map_put` in place. An 8.18 archive loads unchanged: it never calls
+them.
+
+Minor 20 (heap and nested lanes) lets a wide lane element (three to sixteen
+words, `MirAllocKind::Lanes` with `more` > 0) be the leaves of a tuple
+nested at any depth, each a number or a heap word. Its `MirLaneShape` says
+which: `tag_mask` bit `j` is set when word `j` is a heap word (also a wide
+lane array's `ObjArray::tag_mask`, which the collector and the counts read
+per lane), and `payload_mask` / `unit_mask` hold its nesting
+(`common::lane_nest_pack`; both `0` for a flat tuple, 8.19's only shape).
+`LaneIndex` carries a shape too, written after its index. `ALLOC_WIDE_LANES`
+takes the heap lanes above the word count in `extra`, and the wide lane
+helpers take a shape other than a flat tuple of numbers' as three words in
+their buffer, flagged in `k` (`machine::native::WIDE_SHAPED`), so a flat
+element of numbers calls them as before. The MIR section is a new
+`FORMAT`, 29 (`common::MIR_SECTION_NESTED_LANES_FORMAT`), and the reader
+refuses 28, whose `LaneIndex` has no shape: an 8.19 archive's code is
+compiled again. A snapshot's lane array keeps its mask as before.
+
+## Major 7
+
+Major 7 minor 0 came with the deletion of the bytecode VM (step 8 of
+[mir-interp.md](mir-interp.md)). An archive holds MIR and data only:
+
+- `version`, `static_slot_count`, `constants` (the snapshots startup restores) and
+  `strings`.
+- The debug tables: `source_files`, `debug_locs`, `debug_lines`, `fn_symbols`.
+- `struct_layouts`, `class_word_kinds`, `static_word_kinds`.
+- `startup` (a list of `common::StartupOp`) and `main`.
+- `native_mir`, every body's typed MIR.
+
+Bodies are named by `label.0 + 1`, not by bytecode entry PC. The bytecode, line and
+span run tables, frame maps, stack maps, `cleanup_ranges` and
+`operand_stack_slots` went, and with them every reader of an older archive.
+
+MIR section `FORMAT` 11 (feature/native) adds `CallIndirect`'s two-word
+form (opcode 44: second word and `unpair` body) and each body's
+`pair_twin`; the code image `FORMAT` 2 adds `NativeEntry::twin`.
+
+Minor 1 adds class slot kind `WORD_TAGGED` (4): the first word of a flat
+two-word field whose payload is a pointer only under some tags. A row with
+one has a trailer after its slot kinds, an entry per tagged slot (tag slot
+`u16` LE, pointer-tag mask `u64` LE), and the collector resolves the word
+by its tag (`common::class_slot_kinds`).
+
+Minor 2 adds snapshot object kind 7, a lane array (`SnapObject::Lanes`): an
+array of two-word elements kept in place (`k`, the pointer-tag mask of the
+first word, then the words), as a `Vec` of a closed two-word type is
+([layout.md](layout.md), "Lane arrays"). MIR section `FORMAT` 13 adds
+`LaneIndex` / `LaneStore` / `LanePush` / `LanesToWords` (opcodes 45 to 48,
+each store, push and conversion with its three shape masks) and the
+`Lanes` allocation kind (9, with its mask).
+
+Minor 3 appends host natives `vec_drain` (**212**: drop elements
+`from..to`) and `vec_rotate_in` (**213**: move the last element to `i`),
+compiler lowering only, in any array form. Lane code's `pop`, `remove`
+and `insert` move a lane array's elements with them.
+
+Minor 4 adds host native `startup_restore` (**214**, `HostOp::Restore`), which an AOT
+executable's native `__start` calls where its startup restores a snapshot. Its
+payload is data only: `startup` holds no `Init` or `Call`, and `main` names `__start`
+(`docs/internals/native.md`, "Native start").
+
+Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
+major 4 added; opcodes and frame maps in them no longer exist.
 
 ## Major 4, minors 5 to 37
 
@@ -19,7 +336,7 @@ live in AGENTS.md and [pipeline.md](pipeline.md) (#1874).
 - Minor 30 persists `debug_lines` (line/column per debug loc, resolved at compile time, so packaged binaries never read their sources; older archives fall back to the source files).
 - Minor 29 persists `static_word_kinds` (per static slot word kind: scalar statics are no roots, pointer statics are precise roots evacuation rewrites).
 - Minor 28 appends `MakeArrayK` (array literal with the pointer element kind).
-- Minor 27 appends `TagArrayKind` (array element word kind stamped on an existing array; no longer emitted — `Vec::{new,with_capacity}$ptr` / `$bytes` thunks make the array with `MakeArrayK`, `Vec::from` keeps its source's kind — but the VM still runs it).
+- Minor 27 appends `TagArrayKind` (array element word kind stamped on an existing array).
 - Minor 26 flags precise frame-map slots that definitely hold a pointer (`PRECISE_SLOT_MUST`, bit 15; strip with `precise_slot_index`).
 - Minor 25 appends `MakeEnumK` / `MakeEnumReturnK` / `MakeTupleK` / `DenseMakeK` (construction-site payload / element word kinds, 2 bits × first four words).
 - Minor 24 persists `ClassWordKinds` (per-class field word kinds: scalar / pointer / unknown; marking skips scalar fields, pointer fields are precise references).

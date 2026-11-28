@@ -3,8 +3,24 @@
 // outside a scope they just wait.
 use tests::assert;
 use task::{scope, Scope, TaskError};
-use thread::ThreadError;
-use clock::sleep_ms;
+use thread::{ThreadError, Receiver, recv, send, channel as thread_channel};
+
+// What the tasks write, shared by every closure that names it: the spawns
+// keep their closures, so a `use (mut log)` of a copy-on-write `Vec` would
+// be E0149 (#2787).
+shared class Log<T> {
+    pub items: Vec<T>,
+}
+
+impl Log<T> {
+    pub fn push(T x) {
+        self.items.push(x);
+    }
+
+    pub fn len() -> int {
+        return self.items.len();
+    }
+}
 
 fn crunch() -> int {
     let total = 0;
@@ -16,8 +32,10 @@ fn crunch() -> int {
     return total;
 }
 
-fn slow_crunch() -> int {
-    sleep_ms(30);
+// Waits on the worker thread until the other task says go, so it cannot
+// finish before that task ran, however the threads are scheduled.
+fn crunch_after(Receiver go) -> int {
+    let _ = recv(go);
     return crunch();
 }
 
@@ -54,15 +72,17 @@ test("blocking returns a string result") {
 }
 
 test("other tasks run while one waits on blocking") {
-    let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let worker = s.spawn(fn () use (mut log) {
-            let v = got(task::blocking(slow_crunch));
+    let log: Log<string> = new Log(Vec::new());
+    let (go_tx, go_rx) = thread_channel()?;
+    let r = scope(fn (Scope s) use (go_tx, go_rx, log) {
+        let worker = s.spawn(fn () use (go_rx, log) {
+            let v = got(task::blocking_with(crunch_after, go_rx));
             log.push("blocking done");
             v
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (go_tx, log) {
             log.push("other ran");
+            let _ = send(go_tx, 1);
             0
         });
         match worker.join() {
@@ -72,7 +92,7 @@ test("other tasks run while one waits on blocking") {
     });
     assert!(r == Result::Ok(499500));
     assert!(log.len() == 2);
-    assert!(log[0] == "other ran" && log[1] == "blocking done");
+    assert!(log.items[0] == "other ran" && log.items[1] == "blocking done");
 }
 
 test("several tasks wait on blocking work at once") {

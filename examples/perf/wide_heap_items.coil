@@ -1,0 +1,29 @@
+// CPU: a (string, int, int) through direct calls, made by one and read by
+// another: the string is one counted word beside the numbers in
+// registers, no tuple built per call.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn label(string s, int a) -> (string, int, int) {
+    return (s, a & 255, a & 7);
+}
+
+#[inline(never)]
+fn weigh((string, int, int) t) -> int {
+    return t[0].len() + t[1] * t[2];
+}
+
+fn main() {
+    let names = ["alpha", "beta", "gamma", "delta"];
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        let n = names[i & 3];
+        s += weigh(label(n, i));
+        s += weigh((n, i & 15, 3));
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}

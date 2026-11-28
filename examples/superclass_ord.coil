@@ -28,11 +28,11 @@ impl Ordered for int {
 }
 
 fn cmp_eq<T: Ordered>(T a, T b) -> bool {
-    return eq_val(a, b);
+    return a.eq_val(b);
 }
 
 fn cmp_lt<T: Ordered>(T a, T b) -> bool {
-    return lt_val(a, b);
+    return a.lt_val(b);
 }
 
 fn main() {

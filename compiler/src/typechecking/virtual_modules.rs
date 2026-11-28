@@ -71,6 +71,10 @@ pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
 /// Child-process natives behind the embedded `process` module.
 pub const PRELUDE_PROCESS_MODULE: &str = "prelude::process";
 
+/// Lock primitives the embedded `thread_locks` module (`thread::with_lock`
+/// and kin, in Coil) builds on: raw holds and value loads / stores.
+pub const PRELUDE_THREAD_MODULE: &str = "prelude::thread";
+
 /// Which userland FFI builtin a virtual export names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FfiBuiltin {
@@ -110,10 +114,6 @@ pub enum PreludeFn {
     Intersect,
     /// Cells present in the left matrix and absent from the right → `byte` mask.
     Diff,
-    /// Construct a single UTF-8 code unit as `Result<string, string>`.
-    Char,
-    /// First code unit of a `string` as `Result<byte, string>`.
-    Ord,
     /// The identity, through the `black_box` host native the optimizer
     /// cannot see through.
     BlackBox,
@@ -131,8 +131,6 @@ impl PreludeFn {
             Self::Matrix => "matrix",
             Self::Intersect => "intersect",
             Self::Diff => "diff",
-            Self::Char => "char",
-            Self::Ord => "ord",
             Self::BlackBox => "black_box",
             Self::FnKey => "fn_key",
         }
@@ -146,8 +144,6 @@ impl PreludeFn {
             "matrix" => Some(Self::Matrix),
             "intersect" => Some(Self::Intersect),
             "diff" => Some(Self::Diff),
-            "char" => Some(Self::Char),
-            "ord" => Some(Self::Ord),
             "black_box" => Some(Self::BlackBox),
             "fn_key" => Some(Self::FnKey),
             _ => None,
@@ -165,7 +161,15 @@ pub const REMOVED_MATH_FNS: &[&str] = &[
 const REMOVED_MATH_HELP: &str =
     "the float functions moved from `prelude::math` to coil-stdlib's `math` module: write `use math::{sin, sqrt};` (any of `sin` … `tanh`)";
 
+/// `ord` / `char` left the prelude for coil-stdlib's `text` module (host
+/// natives 65 / 66 stay for older archives).
+pub const REMOVED_PRELUDE_TEXT_FNS: &[&str] = &["ord", "char"];
+
 /// `prelude::math::pow` was removed in favour of the `**` operator.
+/// The help for `use ffi::{dload, declare, invoke, read_ints}`.
+pub(crate) const REMOVED_FFI_HELP: &str = "declare the library's functions in an `extern \"lib\" { ... }` block, or load one while the program runs with the coil-ffi package (`use coil_ffi::{Library}`)";
+
+const REMOVED_ATTACH_HELP: &str = "`io::attach` / `io::park` were removed: a stream type implements the `io::Read`, `io::Write` and `io::Close` traits instead";
 const REMOVED_POW_HELP: &str =
     "`prelude::math::pow` was removed: write `base ** exponent` (checked, wrapping and saturating forms are in `arith`)";
 /// `prelude::math::rem` was removed in favour of the `%` operator.
@@ -220,10 +224,6 @@ pub enum IoBuiltin {
     UdpRecvFrom,
     /// Local bound port of a UDP socket (useful after `bind(..., 0)`).
     UdpLocalPort,
-    /// In-place attach of package IO hooks (`Stream.attach`).
-    StreamAttach,
-    /// Park this coro on the stream fd (`Stream.park`).
-    StreamPark,
     /// Host-edge `Result<(), IoError>` probe (`Ok` = 0 / `Err` = pointer).
     ResultUnitProbe,
 }
@@ -261,8 +261,6 @@ impl IoBuiltin {
             Self::UdpSendTo => "send_to",
             Self::UdpRecvFrom => "recv_from",
             Self::UdpLocalPort => "local_port",
-            Self::StreamAttach => "attach",
-            Self::StreamPark => "park",
             Self::ResultUnitProbe => "result_unit_probe",
         }
     }
@@ -300,8 +298,6 @@ impl IoBuiltin {
             Self::UdpSendTo => "udp_send_to",
             Self::UdpRecvFrom => "udp_recv_from",
             Self::UdpLocalPort => "udp_local_port",
-            Self::StreamAttach => "stream_attach",
-            Self::StreamPark => "stream_park",
             Self::ResultUnitProbe => "result_unit_probe",
         }
     }
@@ -323,8 +319,6 @@ impl IoBuiltin {
             Self::AwaitWritable,
             Self::Drive,
             Self::WaitReady,
-            Self::StreamAttach,
-            Self::StreamPark,
             Self::ResultUnitProbe,
         ]
     }
@@ -388,8 +382,6 @@ impl IoBuiltin {
             // (append-only). Leftover TLS HostInvoke was dropped.
             Self::WaitReady,
             Self::WriteFrom,
-            Self::StreamAttach,
-            Self::StreamPark,
             Self::ResultUnitProbe,
         ]
     }
@@ -397,7 +389,7 @@ impl IoBuiltin {
 
 /// String helpers exported from virtual `string`.
 ///
-/// `format` is a compiler intrinsic that lowers to [`common::Instruction::FORMAT`];
+/// `format` is a compiler intrinsic that lowers to the `FORMAT` host call;
 /// byte conversion helpers use the `from_bytes` / `to_bytes` host-native rows.
 /// Byte reads and search are `s[i]` and plain loops (`text::` in coil-stdlib),
 /// which the compiler vectorises (`docs/internals/byte-simd.md`); the
@@ -682,12 +674,6 @@ impl VirtualModules {
                     name: "IntoIterator",
                 },
                 BuiltinExport::Fn {
-                    kind: PreludeFn::Ord,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Char,
-                },
-                BuiltinExport::Fn {
                     kind: PreludeFn::BlackBox,
                 },
             ],
@@ -732,19 +718,9 @@ impl VirtualModules {
                 BuiltinExport::Enum {
                     name: common::BUILTIN_FFI_ERROR_KIND_ENUM,
                 },
-                BuiltinExport::FfiFn {
-                    kind: FfiBuiltin::Dload,
-                },
-                BuiltinExport::FfiFn {
-                    kind: FfiBuiltin::Declare,
-                },
-                BuiltinExport::FfiFn {
-                    kind: FfiBuiltin::Invoke,
-                },
-                BuiltinExport::HostFn {
-                    surface: "read_ints",
-                    registry: common::FFI_READ_INTS_NATIVE,
-                },
+                // `dload`, `declare`, `invoke` and `read_ints` are gone: an
+                // `extern` block binds a library when the program compiles,
+                // and the coil-ffi package loads one at run time.
             ],
         );
 
@@ -786,8 +762,6 @@ impl VirtualModules {
             BuiltinExport::Enum {
                 name: common::BUILTIN_IO_ERROR_ENUM,
             },
-            BuiltinExport::TypeClass { name: "Read" },
-            BuiltinExport::TypeClass { name: "Write" },
         ];
         for kind in IoBuiltin::core() {
             io_exports.push(BuiltinExport::IoFn { kind: *kind });
@@ -950,6 +924,18 @@ impl VirtualModules {
                 ("clear", common::KEY_INDEX_CLEAR_NATIVE),
                 ("find", common::KEY_INDEX_FIND_NATIVE),
                 ("eq_mode", common::KEY_INDEX_EQ_MODE_NATIVE),
+                ("map_table", common::MAP_TABLE_NATIVE),
+                ("map_find", common::MAP_FIND_NATIVE),
+                ("map_upsert", common::MAP_UPSERT_NATIVE),
+                ("map_probe", common::MAP_PROBE_NATIVE),
+                ("map_add", common::MAP_ADD_NATIVE),
+                ("map_live", common::MAP_LIVE_NATIVE),
+                ("map_len", common::MAP_LEN_NATIVE),
+                ("map_remove", common::MAP_REMOVE_NATIVE),
+                ("map_compact", common::MAP_COMPACT_NATIVE),
+                ("map_clear", common::MAP_CLEAR_NATIVE),
+                ("map_put", common::MAP_PUT_NATIVE),
+                ("word_mode", common::MAP_WORD_MODE_NATIVE),
             ]),
         );
 
@@ -970,6 +956,24 @@ impl VirtualModules {
                 ("task_cond_new", "task_cond_new"),
                 ("task_cond_wait", "task_cond_wait"),
                 ("task_cond_notify", "task_cond_notify"),
+            ]),
+        );
+
+        modules.insert(
+            PRELUDE_THREAD_MODULE,
+            host_exports(&[
+                ("lock_acquire", "lock_acquire"),
+                ("lock_release", "lock_release"),
+                ("lock_load", "lock_load"),
+                ("lock_store", "lock_store"),
+                ("rw_acquire_read", "rw_acquire_read"),
+                ("rw_acquire_write", "rw_acquire_write"),
+                ("rw_try_read", "rw_try_read"),
+                ("rw_try_write", "rw_try_write"),
+                ("rw_release_read", "rw_release_read"),
+                ("rw_release_write", "rw_release_write"),
+                ("rw_load", "rw_load"),
+                ("rw_store", "rw_store"),
             ]),
         );
 
@@ -997,21 +1001,6 @@ impl VirtualModules {
         self.modules
             .iter()
             .flat_map(|(path, exports)| exports.iter().map(move |e| (*path, e)))
-    }
-
-    pub fn is_virtual_module(&self, module_path: &str) -> bool {
-        self.modules.contains_key(module_path)
-    }
-
-    /// Join `use` path segments (+ optional final item that is not `*`) into a module path.
-    pub fn module_path_of(path: &[String], name: &str) -> String {
-        if name == "*" {
-            path.join("::")
-        } else if path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{}::{}", path.join("::"), name)
-        }
     }
 
     /// Resolve a concrete `use path::name` (not glob) against virtual modules.
@@ -1044,9 +1033,11 @@ impl VirtualModules {
         match (path.join("::").as_str(), name) {
             ("io", "from_bytes") => Some("`from_bytes` is in the `string` module: `use string::{from_bytes};`"),
             ("io", "to_bytes") => Some("`to_bytes` is in the `string` module: `use string::{to_bytes};`"),
+            ("io", "attach" | "park") => Some(REMOVED_ATTACH_HELP),
             ("prelude::math", "pow") => Some(REMOVED_POW_HELP),
             ("prelude::math", "rem") => Some(REMOVED_REM_HELP),
             ("prelude::math", name) if REMOVED_MATH_FNS.contains(&name) => Some(REMOVED_MATH_HELP),
+            ("ffi", "dload" | "declare" | "invoke" | "read_ints") => Some(REMOVED_FFI_HELP),
             _ => None,
         }
     }
@@ -1072,41 +1063,6 @@ impl VirtualModules {
         out
     }
 
-    /// Look up a typeclass by qualified path (`prelude::ops::Eq` → `"Eq"`).
-    pub fn resolve_typeclass_path(&self, segments: &[&str]) -> Option<&'static str> {
-        if segments.len() < 2 {
-            return None;
-        }
-        let (module_segs, name) = segments.split_at(segments.len() - 1);
-        let module = module_segs.join("::");
-        match self
-            .modules
-            .get(module.as_str())?
-            .iter()
-            .find(|e| matches!(e, BuiltinExport::TypeClass { name: n } if n == &name[0]))?
-        {
-            BuiltinExport::TypeClass { name } => Some(*name),
-            _ => None,
-        }
-    }
-
-    /// Look up an enum by qualified path (`prelude::Option` → `"Option"`).
-    pub fn resolve_enum_path(&self, segments: &[&str]) -> Option<&'static str> {
-        if segments.len() < 2 {
-            return None;
-        }
-        let (module_segs, name) = segments.split_at(segments.len() - 1);
-        let module = module_segs.join("::");
-        match self
-            .modules
-            .get(module.as_str())?
-            .iter()
-            .find(|e| matches!(e, BuiltinExport::Enum { name: n } if n == &name[0]))?
-        {
-            BuiltinExport::Enum { name } => Some(*name),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1168,17 +1124,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_concrete_ffi_dload() {
+    fn ffi_runtime_calls_are_gone() {
+        // `extern` blocks replaced `ffi::dload` / `declare` / `invoke` (#2904).
         let vm = VirtualModules::new();
-        let e = vm
-            .resolve_item(&["ffi".into()], "dload")
-            .expect("ffi::dload");
-        assert_eq!(
-            e,
-            BuiltinExport::FfiFn {
-                kind: FfiBuiltin::Dload
-            }
-        );
+        for name in ["dload", "declare", "invoke", "read_ints"] {
+            assert!(vm.resolve_item(&["ffi".into()], name).is_none(), "ffi::{name}");
+        }
     }
 
     #[test]
@@ -1274,8 +1225,9 @@ mod tests {
         );
         assert!(exports.iter().any(|e| e.short_name() == "wait_ready"));
         assert!(exports.iter().any(|e| e.short_name() == "write_from"));
-        assert!(exports.iter().any(|e| e.short_name() == "attach"));
-        assert!(exports.iter().any(|e| e.short_name() == "park"));
+        assert!(!exports.iter().any(|e| e.short_name() == "attach"));
+        assert!(!exports.iter().any(|e| e.short_name() == "park"));
+        assert!(VirtualModules::removed_item(&["io".into()], "attach").is_some_and(|h| h.contains("io::Read")));
         assert!(!exports.iter().any(|e| e.short_name() == "write_all"));
         assert!(!exports.iter().any(|e| e.short_name() == "set_read_timeout"));
         assert!(

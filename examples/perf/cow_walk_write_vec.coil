@@ -1,0 +1,40 @@
+// CPU: a `for` over a `Vec` whose body writes the vector (#2827). The loop
+// walks the value the vector had when it began: it takes a share of it at
+// its start, so the first write copies it once per walk, not once per
+// iteration. `smooth` writes its parameter, which is the caller's place:
+// its loop walks one eager copy. `--cow-report` counts two copies per round.
+use io::sync::print;
+use string::format;
+
+fn smooth(Vec<int> v) -> int {
+    let i = 0;
+    for x in v {
+        if i > 0 {
+            v[i] = (v[i - 1] + x) / 2;
+        }
+        i += 1;
+    }
+    return v[v.len() - 1];
+}
+
+fn main() {
+    let n = 2000;
+    let v: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        v.push(i);
+        i += 1;
+    }
+    let s = 0;
+    let round = 0;
+    while round < 2000 {
+        let j = round % n;
+        for x in v {
+            v[j] = (v[j] + x) % 1000003;
+            j = (j + 1) % n;
+        }
+        s += smooth(v);
+        round += 1;
+    }
+    let _ = print(format("%i %i %i\n", v.len(), v[0], s));
+}

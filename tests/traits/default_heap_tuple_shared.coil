@@ -1,0 +1,61 @@
+// A trait's default method returning a heap tuple from a call of another
+// method of the trait: past the clone budget its shared body takes the
+// tuple back from the dictionary's slot as its object (coil-lang#2720),
+// as a call through an existential does.
+use tests::assert;
+
+class Pt {
+    pub x: int,
+}
+
+trait Named<S> {
+    fn get(S s) -> (string, int) {}
+    fn three(S s) -> (string, int, Pt) {}
+
+    fn twice(S s) -> (string, int) {
+        let (n, k) = s.get();
+        return (n + n, k * 2);
+    }
+
+    fn same(S s) -> (string, int) {
+        return s.get();
+    }
+
+    fn last(S s) -> Pt {
+        let (_, _, p) = s.three();
+        return p;
+    }
+}
+
+class A {
+    pub n: int,
+}
+
+impl Named for A {
+    pub fn get(A a) -> (string, int) {
+        return ("a", a.n);
+    }
+
+    pub fn three(A a) -> (string, int, Pt) {
+        return ("t", a.n, new Pt(a.n + 1));
+    }
+}
+
+fn via<T: Named>(T t) -> (string, int) {
+    return t.get();
+}
+
+test("default bodies over a heap tuple") {
+    let a = new A(3);
+    assert!(a.same() == ("a", 3));
+    assert!(a.twice() == ("aa", 6));
+    assert!(a.last().x == 4);
+    assert!(via(a) == ("a", 3));
+}
+
+test("through an existential") {
+    let e: Named = new A(5);
+    assert!(e.same() == ("a", 5));
+    assert!(e.twice() == ("aa", 10));
+    assert!(e.last().x == 6);
+}

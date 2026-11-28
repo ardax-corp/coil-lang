@@ -1,0 +1,45 @@
+// A two-word enum (`Num(int)` beside a unit variant) packed as a bare-trait
+// existential: the local holds the pack's one word, and its methods run on
+// the boxed enum (#2322).
+use string::format;
+use tests::assert;
+
+trait Named<T> {
+    fn label(readonly T self) -> string {}
+}
+
+enum Pick {
+    Num(int),
+    Off,
+}
+
+impl Named for Pick {
+    pub fn label(readonly Pick self) -> string {
+        return match self {
+            Pick::Num(n) => format("num %i", n),
+            Pick::Off => "off",
+        };
+    }
+}
+
+fn show(Named n) -> string {
+    return n.label();
+}
+
+test("a packed local calls its method") {
+    let s: Named = Pick::Num(3);
+    let t: Named = Pick::Off;
+    assert!(s.label() == "num 3", s.label());
+    assert!(t.label() == "off", t.label());
+}
+
+test("a pack is passed and copied") {
+    let s: Named = Pick::Num(3);
+    let u = s;
+    assert!(u.label() == "num 3", u.label());
+    assert!(show(Pick::Num(7)) == "num 7", show(Pick::Num(7)));
+}
+
+test("a pack never called") {
+    let s: Named = Pick::Num(3);
+}

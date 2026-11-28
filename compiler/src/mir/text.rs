@@ -1,10 +1,15 @@
 //! Print / parse a small CLIF-like text form for round-trip tests.
 
 use super::func::{MirBlock, MirFunc};
-use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator};
+use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirLaneShape, MirUnaryOp, Terminator};
 #[cfg(test)]
-use super::inst::{BlockId, MirBinOp, MirCmpOp, MirDeoptKind, MirGcKind, ValueId};
+use super::inst::{BlockId, MirBinOp, MirCmpOp, MirGcKind, ValueId};
 use super::ty::MirTy;
+
+/// A [`MirLaneShape`] as the text form writes it.
+fn lane_shape(s: &MirLaneShape) -> String {
+    format!("{}/{}/{}", s.tag_mask, s.payload_mask, s.unit_mask)
+}
 
 impl std::fmt::Display for MirFunc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -21,6 +26,9 @@ impl std::fmt::Display for MirFunc {
             write!(f, " -> {rt}")?;
             if let Some(hi) = self.ret_hi_ty {
                 write!(f, ", {hi}")?;
+                for ty in &self.ret_more_tys {
+                    write!(f, ", {ty}")?;
+                }
             }
         }
         writeln!(f, " {{")?;
@@ -66,10 +74,18 @@ fn write_block(
         Some(Terminator::Return {
             lo: Some(v),
             hi: Some(h),
-        }) => writeln!(f, "return {v}, {h}")?,
+            more,
+        }) => {
+            write!(f, "return {v}, {h}")?;
+            for w in more {
+                write!(f, ", {w}")?;
+            }
+            writeln!(f)?
+        }
         Some(Terminator::Return {
             lo: Some(v),
             hi: None,
+            ..
         }) => writeln!(f, "return {v}")?,
         Some(Terminator::Return { lo: None, .. }) => writeln!(f, "return")?,
         Some(Terminator::Unreachable) => writeln!(f, "unreachable")?,
@@ -150,6 +166,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         }
         MirInst::HostInvoke {
             dest,
+            dest_hi,
             native_id,
             layout,
             args,
@@ -157,10 +174,15 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             let name = super::host_allow::host_edge_spec(*native_id)
                 .map(|s| s.name)
                 .unwrap_or("unknown");
-            if *layout == 0 {
-                write!(f, "{dest} = host.{name}")?;
+            if let Some(hi) = dest_hi {
+                write!(f, "{dest}, {hi} = ")?;
             } else {
-                write!(f, "{dest} = host.{name}.L{layout}")?;
+                write!(f, "{dest} = ")?;
+            }
+            if *layout == 0 {
+                write!(f, "host.{name}")?;
+            } else {
+                write!(f, "host.{name}.L{layout}")?;
             }
             for (i, a) in args.iter().enumerate() {
                 if i == 0 {
@@ -178,14 +200,26 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::ExternCall { dest, sig, args } => {
+            write!(f, "{dest} = extern {}", sig.symbol)?;
+            for a in args {
+                write!(f, ", {a}")?;
+            }
+            Ok(())
+        }
         MirInst::Call {
             dest,
             dest_hi,
+            dest_more,
             target,
             args,
         } => {
             if let Some(hi) = dest_hi {
-                write!(f, "{dest}, {hi} = call.{} {}", func.ty(*dest), target.0)?;
+                write!(f, "{dest}, {hi}")?;
+                for w in dest_more {
+                    write!(f, ", {w}")?;
+                }
+                write!(f, " = call.{} {}", func.ty(*dest), target.0)?;
             } else {
                 write!(f, "{dest} = call.{} {}", func.ty(*dest), target.0)?;
             }
@@ -198,13 +232,19 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::CallIndirect { dest, callee, args, dicts } => {
-            write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?;
+        MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
+            match pair {
+                Some((hi, _)) => write!(f, "{dest}, {hi} = callind.{} {callee}", func.ty(*dest))?,
+                None => write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?,
+            }
             for a in args {
                 write!(f, ", {a}")?;
             }
             if *dicts != 0 {
                 write!(f, " dicts {dicts}")?;
+            }
+            if let Some((_, unpair)) = pair {
+                write!(f, " unpair {}", unpair.0)?;
             }
             Ok(())
         }
@@ -213,13 +253,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             scrutinee,
             index,
         } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
-        MirInst::HeapFieldLoad { dest, object, index } => write!(f, "{dest} = heaploadfield {object}, {index}"),
+        MirInst::ProductLoad { dest, object, slot } => write!(f, "{dest} = productload {object}, {slot}"),
         MirInst::HeapFieldStore {
             dest,
             object,
             value,
             index,
-        } => write!(f, "{dest} = heapsetfield.slot {object}, {value}, {index}"),
+            scalar,
+        } => write!(f, "{dest} = heapsetfield.{} {object}, {value}, {index}", if *scalar { "num" } else { "slot" }),
         MirInst::Index {
             dest,
             array,
@@ -235,15 +276,48 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             index,
             value,
             unchecked,
+            scalar,
         } => {
-            let name = if *unchecked {
-                "storeindex.u"
-            } else {
-                "storeindex"
+            let name = match (*unchecked, *scalar) {
+                (true, true) => "storeindex.num.u",
+                (true, false) => "storeindex.u",
+                (false, true) => "storeindex.num",
+                (false, false) => "storeindex",
             };
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
+        MirInst::LaneIndex { dest, dest_hi, dest_more, array, index, shape } => {
+            write!(f, "{dest}, {dest_hi}")?;
+            for w in dest_more {
+                write!(f, ", {w}")?;
+            }
+            write!(f, " = laneindex.{}.{}", func.ty(*dest), func.ty(*dest_hi))?;
+            for w in dest_more {
+                write!(f, ".{}", func.ty(*w))?;
+            }
+            write!(f, " {array}, {index}")?;
+            // A wide element's heap lanes and nesting.
+            if *shape != MirLaneShape::default() {
+                write!(f, ", {}", lane_shape(shape))?;
+            }
+            Ok(())
+        }
+        MirInst::LaneStore { dest, array, index, lo, hi, more, shape } => {
+            write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}, ")?;
+            for w in more {
+                write!(f, "{w}, ")?;
+            }
+            write!(f, "{}", lane_shape(shape))
+        }
+        MirInst::LanePush { dest, array, lo, hi, more, shape } => {
+            write!(f, "{dest} = lanepush {array}, {lo}, {hi}, ")?;
+            for w in more {
+                write!(f, "{w}, ")?;
+            }
+            write!(f, "{}", lane_shape(shape))
+        }
+        MirInst::LanesToWords { dest, array, shape } => write!(f, "{dest} = lanestowords {array}, {}", lane_shape(shape)),
         MirInst::ResumeCoro {
             dest,
             handle,
@@ -267,21 +341,32 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::HomeStore { dest, home, value } => write!(f, "{dest} = homestore {home}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
-        MirInst::PanicStore { dest, object, value, index } => write!(f, "{dest} = panicstore {object}, {value}, {index}"),
+        MirInst::Probe { dest, id } => write!(f, "{dest} = probe {id}"),
         MirInst::ArrayPush {
             dest,
             array,
             value,
         } => write!(f, "{dest} = arraypush {array}, {value}"),
-        MirInst::Alloc { dest, kind, elems, kinds } => {
-            write!(f, "{dest} = alloc.{}", kind.as_str())?;
+        MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+            let at = if let MirInst::AllocAt { slot, owned, .. } = inst { Some((*slot, *owned)) } else { None };
+            write!(f, "{dest} = {}.{}", if at.is_some() { "allocat" } else { "alloc" }, kind.as_str())?;
             if *kinds != 0 {
                 write!(f, "[{kinds}]")?;
+            }
+            if let Some((slot, owned)) = at {
+                match slot {
+                    Some(slot) => write!(f, " {slot},")?,
+                    None => write!(f, " -,")?,
+                }
+                if owned != 0 {
+                    write!(f, " owned {owned},")?;
+                }
             }
             match *kind {
                 MirAllocKind::Object { type_id, nfields } => {
                     write!(f, " {type_id}, {nfields}")?;
                 }
+                MirAllocKind::TUPLE => {}
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
@@ -301,11 +386,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", params {params}")?;
                     }
                 }
-                MirAllocKind::Array | MirAllocKind::Tuple => {}
+                MirAllocKind::Lanes { tag_mask, more: 0 } => write!(f, " {tag_mask}")?,
+                // A wide element's words per element after the mask.
+                MirAllocKind::Lanes { tag_mask, more } => write!(f, " {tag_mask}/{}", 2 + more)?,
+                MirAllocKind::Array => {}
             }
             for (i, e) in elems.iter().enumerate() {
                 if i == 0
-                    && matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple)
+                    && matches!(*kind, MirAllocKind::Array | MirAllocKind::TUPLE)
                 {
                     write!(f, " {e}")?;
                 } else {
@@ -314,18 +402,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::GcBarrier { dest, kind, roots } => {
-            write!(f, "{dest} = gcbarrier.{}", kind.as_str())?;
-            for (i, r) in roots.iter().enumerate() {
-                if i == 0 {
-                    write!(f, " {r}")?;
-                } else {
-                    write!(f, ", {r}")?;
-                }
-            }
-            Ok(())
-        }
-        MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
+        MirInst::GcBarrier { dest, kind, object } => write!(f, "{dest} = gcbarrier.{} {object}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
@@ -342,6 +419,19 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Stringify { dest, src, tag: Some(tag) } => write!(f, "{dest} = stringify.typed {tag}, {src}"),
         MirInst::Cow { dest, src, unique, field: None } => write!(f, "{dest} = cow.{} {src}", if *unique { "unique" } else { "share" }),
         MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
+        MirInst::CowIndex { dest, array, index } => write!(f, "{dest} = cow.unique_index {array}, {index}"),
+        MirInst::CowPin { dest, src } => write!(f, "{dest} = cow.pin {src}"),
+        MirInst::CowUnpin { dest, src, saved } => write!(f, "{dest} = cow.unpin {src}, {saved}"),
+        MirInst::RcReuse { dest, src, moved: 0 } => write!(f, "{dest} = rc.reuse {src}"),
+        MirInst::RcReuse { dest, src, moved } => write!(f, "{dest} = rc.reuse {src}, moved {moved}"),
+        MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+            let op = if matches!(inst, MirInst::RcInc { .. }) { "rc.inc" } else { "rc.dec" };
+            write!(f, "{dest} = {op} {src}")?;
+            match guard {
+                Some(g) => write!(f, " if {g}"),
+                None => Ok(()),
+            }
+        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
         }
@@ -416,6 +506,9 @@ impl<'a> Parser<'a> {
             if self.eat(',') {
                 func.ret_hi_ty = Some(self.ty()?);
                 func.ret_layout = crate::layout::MirLayout::TwoSlot;
+                while self.eat(',') {
+                    func.ret_more_tys.push(self.ty()?);
+                }
             }
         }
         self.expect('{')?;
@@ -427,9 +520,6 @@ impl<'a> Parser<'a> {
             return Err(ParseError("no blocks".into()));
         }
         func.entry = func.blocks[0].id;
-        if func.has_gc_edge() {
-            super::gc::fill_live_roots(&mut func);
-        }
         Ok(func)
     }
 
@@ -458,9 +548,31 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let mut dest_more = Vec::new();
+        while dest_hi.is_some() && self.eat(',') {
+            dest_more.push(self.value()?);
+        }
         self.expect('=')?;
         let op = self.ident_dots()?;
-        if dest_hi.is_some() && !op.starts_with("call.") {
+        if !dest_more.is_empty() && !op.starts_with("call.") && !op.starts_with("laneindex.") {
+            return Err(ParseError("more than two dests is call-only".into()));
+        }
+        if let Some(rest) = op.strip_prefix("laneindex.") {
+            let tys = rest.split('.').map(|t| MirTy::parse(t).ok_or_else(|| ParseError(op.clone()))).collect::<Result<Vec<_>, _>>()?;
+            let hi = dest_hi.ok_or_else(|| ParseError("laneindex takes two dests".into()))?;
+            if tys.len() != 2 + dest_more.len() {
+                return Err(ParseError(op.clone()));
+            }
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = self.value()?;
+            let shape = if self.eat(',') { self.lane_shape()? } else { MirLaneShape::default() };
+            for (&v, &ty) in [dest, hi].iter().chain(&dest_more).zip(&tys) {
+                ensure_ty(types, v, ty);
+            }
+            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, dest_more, array, index, shape });
+        }
+        if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") && !op.starts_with("host.") {
             return Err(ParseError("pair dest is call-only".into()));
         }
         if let Some(rest) = op.strip_prefix("iconst.") {
@@ -540,8 +652,7 @@ impl<'a> Parser<'a> {
         }
         if op == "lnot"
             || op == "matchpayload"
-            || op == "heapgetfield"
-            || op == "heaploadfield"
+            || op == "productload"
             || op == "heapsetfield"
             || op == "heapsetfield.slot"
         {
@@ -565,14 +676,14 @@ impl<'a> Parser<'a> {
                     index,
                 });
             }
-            if op == "heaploadfield" {
+            if op == "productload" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let index = self.uint()? as u32;
                 ensure_ty(types, dest, MirTy::I64);
-                return Ok(MirInst::HeapFieldLoad { dest, object, index });
+                return Ok(MirInst::ProductLoad { dest, object, slot: index });
             }
-            if op == "heapsetfield.slot" {
+            if op == "heapsetfield.slot" || op == "heapsetfield.num" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let value = self.value()?;
@@ -584,6 +695,7 @@ impl<'a> Parser<'a> {
                     object,
                     value,
                     index,
+                    scalar: op == "heapsetfield.num",
                 });
             }
         }
@@ -599,7 +711,7 @@ impl<'a> Parser<'a> {
                 unchecked: op.ends_with(".u"),
             });
         }
-        if op == "storeindex" || op == "storeindex.u" {
+        if matches!(op.as_str(), "storeindex" | "storeindex.u" | "storeindex.num" | "storeindex.num.u") {
             let array = self.value()?;
             self.expect(',')?;
             let index = self.value()?;
@@ -612,6 +724,7 @@ impl<'a> Parser<'a> {
                 index,
                 value,
                 unchecked: op.ends_with(".u"),
+                scalar: op.starts_with("storeindex.num"),
             });
         }
         if op == "arraylen" {
@@ -649,6 +762,11 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::DoneCoro { dest, handle });
         }
+        if op == "probe" {
+            let id = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Probe { dest, id });
+        }
         if op == "loadstatic" {
             let slot = self.uint()? as u32;
             ensure_ty(types, dest, MirTy::I64);
@@ -666,19 +784,49 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::ClearWord { dest, value });
         }
-        if op == "panicstore" {
-            let object = self.value()?;
-            self.expect(',')?;
-            let value = self.value()?;
-            self.expect(',')?;
-            let index = self.uint()? as u32;
-            ensure_ty(types, dest, MirTy::Bool);
-            return Ok(MirInst::PanicStore { dest, object, value, index });
-        }
         if op == "keepalive" {
             let value = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::KeepAlive { dest, value });
+        }
+        if op == "lanestore" || op == "lanepush" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = if op == "lanestore" {
+                let i = self.value()?;
+                self.expect(',')?;
+                Some(i)
+            } else {
+                None
+            };
+            let lo = self.value()?;
+            self.expect(',')?;
+            let hi = self.value()?;
+            self.expect(',')?;
+            // A wide element's further words, then the shape.
+            let mut more = Vec::new();
+            while self.peek('v') {
+                more.push(self.value()?);
+                self.expect(',')?;
+            }
+            let shape = self.lane_shape()?;
+            return Ok(match index {
+                Some(index) => {
+                    ensure_ty(types, dest, MirTy::Bool);
+                    MirInst::LaneStore { dest, array, index, lo, hi, more, shape }
+                }
+                None => {
+                    ensure_ty(types, dest, MirTy::HeapRef);
+                    MirInst::LanePush { dest, array, lo, hi, more, shape }
+                }
+            });
+        }
+        if op == "lanestowords" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let shape = self.lane_shape()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::LanesToWords { dest, array, shape });
         }
         if op == "arraypush" {
             let array = self.value()?;
@@ -798,8 +946,12 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, spec.ret);
+            if let Some(hi) = dest_hi {
+                ensure_ty(types, hi, MirTy::I64);
+            }
             return Ok(MirInst::HostInvoke {
                 dest,
+                dest_hi,
                 native_id: spec.id,
                 layout,
                 args,
@@ -813,12 +965,21 @@ impl<'a> Parser<'a> {
                 args.push(self.value()?);
             }
             let dicts = if self.eat_str("dicts") { self.uint()? as u32 } else { 0 };
+            let unpair = if self.eat_str("unpair") { Some(crate::bodies::Label(self.uint()? as u32)) } else { None };
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::CallIndirect { dest, callee, args, dicts });
+            let pair = match (dest_hi, unpair) {
+                (Some(hi), Some(unpair)) => {
+                    ensure_ty(types, hi, MirTy::I64);
+                    Some((hi, unpair))
+                }
+                (None, None) => None,
+                _ => return Err(ParseError("callind pair".into())),
+            };
+            return Ok(MirInst::CallIndirect { dest, callee, args, dicts, pair });
         }
         if let Some(ty_s) = op.strip_prefix("call.") {
             let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
-            let target = crate::il::Label(self.uint()? as u32);
+            let target = crate::bodies::Label(self.uint()? as u32);
             let mut args = Vec::new();
             if self.peek('v') {
                 args.push(self.value()?);
@@ -830,24 +991,49 @@ impl<'a> Parser<'a> {
             if let Some(hi) = dest_hi {
                 ensure_ty(types, hi, MirTy::I64);
             }
+            for &w in &dest_more {
+                ensure_ty(types, w, MirTy::I64);
+            }
             return Ok(MirInst::Call {
                 dest,
                 dest_hi,
+                dest_more,
                 target,
                 args,
             });
         }
-        if let Some(kind_s) = op.strip_prefix("alloc.") {
+        let at = op.strip_prefix("allocat.");
+        if let Some(kind_s) = at.or_else(|| op.strip_prefix("alloc.")) {
             let kinds = if self.eat('[') {
-                let k = u8::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
+                let k = common::PackedKinds::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
                 self.expect(']')?;
                 k
             } else {
                 0
             };
+            let slot = match at {
+                Some(_) => {
+                    let s = if self.eat('-') { None } else { Some(self.value()?) };
+                    self.expect(',')?;
+                    let owned = if self.eat_str("owned ") {
+                        let m = self.uint()? as u32;
+                        self.expect(',')?;
+                        m
+                    } else {
+                        0
+                    };
+                    Some((s, owned))
+                }
+                None => None,
+            };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
-                "tuple" => MirAllocKind::Tuple,
+                "lanes" => {
+                    let tag_mask = self.uint()?;
+                    let more = if self.eat('/') { (self.uint()? as u8).checked_sub(2).ok_or_else(|| ParseError("lane words".into()))? } else { 0 };
+                    MirAllocKind::Lanes { tag_mask, more }
+                }
+                "tuple" => MirAllocKind::TUPLE,
                 "object" => {
                     let type_id = self.uint()? as u32;
                     self.expect(',')?;
@@ -864,20 +1050,20 @@ impl<'a> Parser<'a> {
                     MirAllocKind::DropEnum { tag, type_id }
                 }
                 "coro" => MirAllocKind::Coro {
-                    target: crate::il::Label(self.uint()? as u32),
+                    target: crate::bodies::Label(self.uint()? as u32),
                 },
                 "fn" => {
-                    let target = crate::il::Label(self.uint()? as u32);
+                    let target = crate::bodies::Label(self.uint()? as u32);
                     self.expect(',')?;
                     let operand = self.uint()? as u32;
                     let mask = if self.eat_str(", mask ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::Fn { target, operand, mask }
                 }
                 "polyfn" => MirAllocKind::PolyFn {
-                    target: crate::il::Label(self.uint()? as u32),
+                    target: crate::bodies::Label(self.uint()? as u32),
                 },
                 "polyfncap" => {
-                    let target = crate::il::Label(self.uint()? as u32);
+                    let target = crate::bodies::Label(self.uint()? as u32);
                     let params = if self.eat_str(", params ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::PolyFnCapture { target, params }
                 }
@@ -893,33 +1079,21 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, MirTy::HeapRef);
+            if let Some(slot) = slot {
+                let (slot, owned) = slot;
+                return Ok(MirInst::AllocAt { dest, slot, owned, kind, elems, kinds });
+            }
             return Ok(MirInst::Alloc { dest, kind, elems, kinds });
         }
         if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
             let kind = MirGcKind::parse(kind_s)
                 .ok_or_else(|| ParseError(format!("unknown gc {kind_s}")))?;
-            let mut roots = Vec::new();
-            if self.peek('v') {
-                roots.push(self.value()?);
-                while self.eat(',') {
-                    roots.push(self.value()?);
-                }
-            }
+            let object = self.value()?;
             ensure_ty(types, dest, MirTy::HeapRef);
-            return Ok(MirInst::GcBarrier { dest, kind, roots });
-        }
-        if let Some(kind_s) = op.strip_prefix("deopt.") {
-            let kind = MirDeoptKind::parse(kind_s)
-                .ok_or_else(|| ParseError(format!("unknown deopt {kind_s}")))?;
-            ensure_ty(types, dest, MirTy::Bool);
-            return Ok(MirInst::Deopt {
-                dest,
-                kind,
-                loc: common::DebugLoc::unknown(),
-            });
+            return Ok(MirInst::GcBarrier { dest, kind, object });
         }
         if op == "codeptr" {
-            let target = crate::il::Label(self.uint()? as u32);
+            let target = crate::bodies::Label(self.uint()? as u32);
             ensure_ty(types, dest, MirTy::I64);
             return Ok(MirInst::CodePtr { dest, target });
         }
@@ -956,6 +1130,43 @@ impl<'a> Parser<'a> {
             let src = self.value()?;
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::Cow { dest, src, unique: op == "cow.unique", field: None });
+        }
+        if op == "cow.unique_index" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = self.value()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::CowIndex { dest, array, index });
+        }
+        if op == "cow.pin" {
+            let src = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::CowPin { dest, src });
+        }
+        if op == "cow.unpin" {
+            let src = self.value()?;
+            self.expect(',')?;
+            let saved = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::CowUnpin { dest, src, saved });
+        }
+        if op == "rc.reuse" {
+            let src = self.value()?;
+            let moved = if self.eat_str(", moved ") { self.uint()? as u32 } else { 0 };
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::RcReuse { dest, src, moved });
+        }
+        if op == "rc.inc" || op == "rc.dec" {
+            let src = self.value()?;
+            // The guard is on the op's own line.
+            let guard = if self.starts(" if ") {
+                self.i += 4;
+                Some(self.value()?)
+            } else {
+                None
+            };
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(if op == "rc.inc" { MirInst::RcInc { dest, src, guard } } else { MirInst::RcDec { dest, src, guard } });
         }
         if op == "cow.unique_field" {
             let src = self.value()?;
@@ -1046,9 +1257,13 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    Ok(Terminator::Return { lo: Some(lo), hi })
+                    let mut more = Vec::new();
+                    while hi.is_some() && self.eat(',') {
+                        more.push(self.value()?);
+                    }
+                    Ok(Terminator::Return { lo: Some(lo), hi, more })
                 } else {
-                    Ok(Terminator::Return { lo: None, hi: None })
+                    Ok(Terminator::Return { lo: None, hi: None, more: Vec::new() })
                 }
             }
             "unreachable" => Ok(Terminator::Unreachable),
@@ -1168,6 +1383,16 @@ impl<'a> Parser<'a> {
         let neg = self.eat('-');
         let n = self.uint()? as i64;
         Ok(if neg { -n } else { n })
+    }
+
+    /// A [`MirLaneShape`]: `tag_mask/payload_mask/unit_mask`.
+    fn lane_shape(&mut self) -> Result<MirLaneShape, ParseError> {
+        let tag_mask = self.uint()?;
+        self.expect('/')?;
+        let payload_mask = self.uint()?;
+        self.expect('/')?;
+        let unit_mask = self.uint()?;
+        Ok(MirLaneShape { tag_mask, payload_mask, unit_mask })
     }
 
     fn uint(&mut self) -> Result<u64, ParseError> {
@@ -1323,30 +1548,30 @@ bb3:
         let k = b.add_param(MirTy::I64).unwrap();
         let x = b.add_param(MirTy::I64).unwrap();
         let kind = MirAllocKind::Fn {
-            target: crate::il::Label(7),
+            target: crate::bodies::Label(7),
             operand: 3,
             mask: 0,
         };
         let f = b.ins_alloc(kind, vec![k]).unwrap();
-        let f = b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).unwrap();
-        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::il::Label(9) }, Vec::new()).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![g]).unwrap();
+        let f = b.ins_gc_barrier(MirGcKind::Safepoint, f).unwrap();
+        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::bodies::Label(9) }, Vec::new()).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, g).unwrap();
         // A partial application: its first parameter filled.
         let partial = MirAllocKind::Fn {
-            target: crate::il::Label(8),
+            target: crate::bodies::Label(8),
             operand: 0x0002_0100,
             mask: 1,
         };
         let p = b.ins_alloc(partial, vec![x]).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, p).unwrap();
         // An instance dictionary: a method's code pointer in a tuple.
-        let code = b.ins_code_ptr(crate::il::Label(11)).unwrap();
-        let dict = b.ins_alloc(MirAllocKind::Tuple, vec![code]).unwrap();
-        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
+        let code = b.ins_code_ptr(crate::bodies::Label(11)).unwrap();
+        let dict = b.ins_alloc(MirAllocKind::TUPLE, vec![code]).unwrap();
+        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, dict).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.
-        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::il::Label(12), params: 0 }, vec![dict]).unwrap();
-        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
+        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::bodies::Label(12), params: 0 }, vec![dict]).unwrap();
+        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, poly).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
         // A dictionary method: the code pointer itself is the callee.
@@ -1369,5 +1594,129 @@ bb3:
         assert_eq!(again.to_string(), text);
         let call = again.blocks[0].insts.iter().find(|i| matches!(i, MirInst::CallIndirect { .. })).unwrap();
         assert!(call.is_effect_barrier());
+    }
+
+    /// A body that returns four words and a caller that reads three of
+    /// another's: words 3.. print after the second and parse back.
+    #[test]
+    fn round_trip_wide_returns() {
+        let callee = r#"
+func @wide(v0: i64) -> i64, i64, i64, i64 {
+bb0:
+    v1 = iconst.i64 10
+    v2 = iadd v0, v1
+    v3 = imul v0, v1
+    v4 = isub v0, v1
+    return v0, v2, v3, v4
+}
+"#;
+        let caller = r#"
+func @sum(v0: i64) -> i64 {
+bb0:
+    v1, v2, v3 = call.i64 1 v0
+    v4 = iadd v1, v2
+    v5 = iadd v4, v3
+    return v5
+}
+"#;
+        let f = parse_func(callee).expect(callee);
+        f.verify().unwrap();
+        assert_eq!(f.ret_more_tys, [MirTy::I64, MirTy::I64]);
+        match &f.blocks[0].term {
+            Some(Terminator::Return { more, .. }) => assert_eq!(more, &[ValueId(3), ValueId(4)]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(parse_func(&f.to_string()).unwrap(), f);
+        let g = parse_func(caller).expect(caller);
+        g.verify().unwrap();
+        match &g.blocks[0].insts[0] {
+            MirInst::Call { dest_hi: Some(h), dest_more, .. } => {
+                assert_eq!((*h, dest_more.as_slice()), (ValueId(2), &[ValueId(3)][..]));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(g.blocks[0].insts[0].dests().collect::<Vec<_>>(), [ValueId(1), ValueId(2), ValueId(3)]);
+        assert_eq!(parse_func(&g.to_string()).unwrap(), g);
+        // Words past the second are a call's only.
+        assert!(parse_func("func @x() -> i64 {\nbb0:\n    v0, v1, v2 = iconst.i64 1\n    return v0\n}\n").is_err());
+    }
+
+    /// A lane array of wide elements: its alloc's words per element, an
+    /// element read's further dests and a store's and push's further
+    /// words print, parse back and verify.
+    #[test]
+    fn wide_lane_ops_round_trip() {
+        let src = r#"
+func @lanes(v0: i64) -> f64 {
+bb0:
+    v1 = alloc.lanes 0/3, v0, v0, v0
+    v2 = iconst.i64 1
+    v3 = fcvt.f64.i64 v0
+    v4 = lanepush v1, v0, v2, v3, 0/0/0
+    v5 = lanestore v4, v2, v2, v0, v3, 0/0/0
+    v6, v7, v8 = laneindex.i64.i64.f64 v4, v2
+    return v8
+}
+"#;
+        let f = parse_func(src).expect(src);
+        f.verify().unwrap();
+        match &f.blocks[0].insts[0] {
+            MirInst::Alloc { kind: MirAllocKind::Lanes { tag_mask: 0, more: 1 }, .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(f.blocks[0].insts[5].dests().count(), 3);
+        assert_eq!(parse_func(&f.to_string()).unwrap(), f);
+        // A wide word must be a number, and a wide shape untagged.
+        assert!(parse_func(&src.replace("0/0/0\n    v5", "1/1/0\n    v5")).unwrap().verify().is_err());
+    }
+
+    /// The builder's wide forms: `ret_words` types words 3.. on the
+    /// function, `ins_call_more` gives a call's; both verify and print.
+    #[test]
+    fn builder_makes_wide_calls_and_returns() {
+        let mut b = MirBuilder::new("wide");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let y = b.ins_cast(MirCastKind::IntToFloat, MirTy::F64, x).unwrap();
+        b.ret_words(x, x, &[y, x]).unwrap();
+        let f = b.finish().unwrap();
+        assert_eq!(f.ret_more_tys, [MirTy::F64, MirTy::I64]);
+        assert!(f.to_string().contains("-> i64, i64, f64, i64"), "{f}");
+        let mut b = MirBuilder::new("caller");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let abi = crate::layout::CallAbi { params: vec![MirTy::I64], ret: MirTy::I64, ret_hi: Some(MirTy::I64) };
+        let (lo, hi, more) = b.ins_call_more(crate::bodies::Label(1), vec![x], &abi, &[MirTy::F64, MirTy::I64]).unwrap();
+        let hi = hi.expect("a second word");
+        assert_eq!(more.len(), 2);
+        let s = b.ins_binop(MirBinOp::Add, lo, hi).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, s, more[1]).unwrap();
+        b.ret(Some(s)).unwrap();
+        let g = b.finish().unwrap();
+        assert!(g.blocks[0].insts[0].dests().eq([lo, hi, more[0], more[1]]));
+        let mut b = MirBuilder::new("bad");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let one = crate::layout::CallAbi { params: vec![MirTy::I64], ret: MirTy::I64, ret_hi: None };
+        assert!(b.ins_call_more(crate::bodies::Label(1), vec![x], &one, &[MirTy::I64]).is_err(), "words 3.. need a second");
+    }
+
+    /// The verifier holds a return to the function's word count.
+    #[test]
+    fn verify_rejects_a_return_of_the_wrong_width() {
+        let src = "func @w(v0: i64) -> i64, i64, i64 {\nbb0:\n    return v0, v0\n}\n";
+        assert!(parse_func(src).unwrap().verify().is_err());
+        let src = "func @w(v0: i64) -> i64, i64 {\nbb0:\n    return v0, v0, v0\n}\n";
+        assert!(parse_func(src).unwrap().verify().is_err());
+        let src = "func @w(v0: i64) -> i64, i64, i64 {\nbb0:\n    return v0, v0, v0\n}\n";
+        parse_func(src).unwrap().verify().unwrap();
+        // A direct call returns at most `2 + MAX_CALL_RET_MORE` words.
+        let words = |n: usize| {
+            let tys = vec!["i64"; n].join(", ");
+            let vals = vec!["v0"; n].join(", ");
+            format!("func @w(v0: i64) -> {tys} {{\nbb0:\n    return {vals}\n}}\n")
+        };
+        let most = 2 + crate::mir::MAX_CALL_RET_MORE;
+        parse_func(&words(most)).unwrap().verify().unwrap();
+        assert!(parse_func(&words(most + 1)).unwrap().verify().is_err(), "{} words", most + 1);
+        let short = words(most).replacen(", v0\n", "\n", 1);
+        assert!(parse_func(&short).unwrap().verify().is_err(), "{most} words declared, {} returned", most - 1);
     }
 }

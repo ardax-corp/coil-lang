@@ -53,8 +53,8 @@ optimization:
   path, item name and arity only, never of compile order or ids handed out
   during a compile, so a cached module's literals stay valid. The build
   cache (`build-cache.md`) keys whole programs anyway.
-- **Register VM / bytecode tiers**: the key is an ordinary constant by the
-  time MIR sees it; nothing in the dense or LIR tiers knows about it.
+- **Engines**: the key is an ordinary constant by the time MIR sees it; no
+  engine knows about it.
 
 Stability: a function's key stays the same across builds while its module,
 name and arity do. A lambda's key also changes when code above it in the
@@ -97,7 +97,7 @@ being reached:
 
 `symbol_next_id` (archive 6.8, `machine/src/symbol.rs`) is a
 `fetch_add(1, Relaxed)` on one `static AtomicI64` starting at `1`. It is
-process-wide: every thread, task and VM in the process (the test runner runs
+process-wide: every thread, task and runtime in the process (the test runner runs
 files and cases side by side in one process) shares it, so no two calls
 return the same id, and calls on one thread see increasing ids that are
 consecutive unless another thread took ids in between. The host row's

@@ -1,0 +1,11 @@
+// @expected E0102 — unary `-` on a `string`-backed enum is unary `-` on a
+// `string` (#2463).
+#[repr(string)]
+enum Tone {
+    Hi = "hi",
+    Lo = "lo",
+}
+
+fn main() {
+    let z = -Tone::Hi;
+}

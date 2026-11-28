@@ -1,0 +1,39 @@
+// Another module's generic class at this module's types: at a closed
+// two-word argument its module knows (`Option<int>`) the instance holds
+// both words, and that module's methods and generic function take clones
+// there; at a tuple, which that module does not know, its methods stay its
+// shared bodies and the field one word, the tuple boxed.
+use tests::assert;
+use xm_flat_cell::{Cell, cell};
+
+fn un(Option<int> o) -> int {
+    return match o {
+        Some(x) => x,
+        None => -1,
+    };
+}
+
+test("a known two-word argument") {
+    let a: Cell<Option<int>> = new Cell(Some(3));
+    assert!(un(a.get()) == 3);
+    a.set(None);
+    assert!(un(a.v) == -1);
+    a.v = Some(4);
+    assert!(un(a.get()) == 4);
+    let d = cell(Some(10));
+    assert!(un(d.v) == 10);
+    d.set(Some(11));
+    assert!(un(d.get()) == 11);
+}
+
+test("a tuple the class's module does not know") {
+    let b = new Cell((1, 2));
+    let (x, y) = b.get();
+    assert!(x == 1 && y == 2);
+    b.set((5, 6));
+    assert!(b.v == (5, 6));
+    let t = cell((7, 8, 9));
+    assert!(t.get() == (7, 8, 9));
+    t.v = (1, 1, 1);
+    assert!(t.get() == (1, 1, 1));
+}

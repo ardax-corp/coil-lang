@@ -1,0 +1,25 @@
+// Helper module for tests/modules/readonly_trait_call_across_modules.coil
+// (#2468): a trait and its impl for another module's class, with a caller.
+
+use ro_trait_cell::Cell;
+
+trait Probe<T> {
+    fn scan(T x, int v) -> int {}
+    fn fill(T x, int v) -> int {}
+}
+
+impl Probe for Cell {
+    pub fn scan(Cell x, int v) -> int {
+        return x.n - v;
+    }
+
+    pub fn fill(Cell x, int v) -> int {
+        x.n = v;
+        return x.n;
+    }
+}
+
+fn probe_scans() -> int {
+    let c = readonly new Cell(10);
+    return Probe::scan(c, 2) + c.scan(3);
+}

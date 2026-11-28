@@ -1,0 +1,100 @@
+// `%v` accepts what `.show()` accepts (coil-lang#2614): a shape holding a
+// bounded type parameter (`(T, int)`, `[T; 2]`, `Vec<Option<T>>`) has the
+// shape's `Show` instance with open items, whose context the bound meets.
+// `%v` discharges that goal as the method call does, and shows the value
+// through the same instance, in a shared body with the frame's
+// dictionaries and in a per-type clone through the shape's ground
+// instance.
+//
+// The same cases as format_open_shape.coil with no mono clones.
+// @flags --clone-budget 0
+use string::format;
+use tests::assert;
+
+trait Pretty<T: Show> {
+    fn pretty(T x) -> string {}
+}
+
+impl Pretty for int {
+    fn pretty(int x) -> string {
+        return "p";
+    }
+}
+
+class Box<T> {
+    pub x: T,
+}
+
+impl Show for Box<T: Show> {
+    fn show(Box<T> b) -> string {
+        return format("Box%v", (b.x, 0));
+    }
+}
+
+fn item<T: Show>(T x) -> string {
+    return format("%v", (x, 1));
+}
+
+fn kept<T: Show>(T x) -> string {
+    let p = (x, x);
+    return format("%v", p);
+}
+
+fn both<T: Show, U: Show>(T x, U y) -> string {
+    return format("%v %v", (x, y), [(y, x)]);
+}
+
+fn fixed<T: Show>(T x) -> string {
+    let a: [T; 2] = [x, x];
+    return format("%v", a);
+}
+
+fn opts<T: Show>(T x) -> string {
+    let v: Vec<Option<T>> = [Some(x), None];
+    return format("%v", v);
+}
+
+fn same<T: Show>(T x) -> bool {
+    let p = (x, [x]);
+    return format("%v", p) == p.show();
+}
+
+fn through_super<T: Pretty>(T x) -> string {
+    return format("%v", (x, 1));
+}
+
+fn in_lambda<T: Show>(T x) -> string {
+    let f = fn () use (x) => format("%v", (x, 3));
+    return f();
+}
+
+test("a tuple holding a bounded type parameter") {
+    assert!(item(2) == "(2, 1)");
+    assert!(item(()) == "((), 1)");
+    assert!(item("s") == "(s, 1)");
+    assert!(kept(2.5) == "(2.5, 2.5)");
+    assert!(both(1, "b") == "(1, b) [(b, 1)]");
+}
+
+test("a fixed array and a Vec of Option") {
+    assert!(fixed(()) == "[(), ()]");
+    assert!(fixed(7) == "[7, 7]");
+    assert!(opts(3) == "[Some(3), None]");
+    assert!(opts(()) == "[Some(()), None]");
+}
+
+test("%v and .show() agree") {
+    assert!(same(4));
+    assert!(same(()));
+    assert!(same("t"));
+}
+
+test("a bound whose trait has Show as its superclass") {
+    assert!(through_super(4) == "(4, 1)");
+}
+
+test("in a lambda and in a bounded instance's method") {
+    assert!(in_lambda(5.5) == "(5.5, 3)");
+    assert!(new Box(()).show() == "Box((), 0)");
+    assert!(new Box(2).show() == "Box(2, 0)");
+}

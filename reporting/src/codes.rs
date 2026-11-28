@@ -90,7 +90,8 @@ pub enum ErrorCode {
     /// A function states an escape fact (`#[noescape(x)]`, `#[fresh]`)
     /// that the inferred escape facts do not support.
     EscapeMismatch,
-    /// An object made inside a `region { … }` block can leave it.
+    /// Retired: `region { … }` blocks were removed (reference counts free
+    /// garbage at its last use).
     RegionEscape,
     /// A write copies an object another name shares (copy-on-write).
     CowCopy,
@@ -119,6 +120,18 @@ pub enum ErrorCode {
     /// A view value stored, captured, nested in another type or returned
     /// where it would outlive the borrows it holds.
     ViewEscape,
+    /// A `defer` body assigns a capture that is gone when it runs: a copy
+    /// (`use (x)`), or a local of the block the defer ends.
+    DeferAssignsCapture,
+    /// A bare `m(args)` that names only a trait method: write `x.m(rest)`
+    /// or `Trait::m(args)`.
+    BareTraitCall,
+    /// Modules that import each other, directly or through others
+    /// (`a -> b -> a`): each module is checked after those it imports.
+    ImportCycle,
+    /// A `break` or `continue` outside every loop of its own function (a
+    /// lambda body is a function of its own).
+    JumpOutsideLoop,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -155,7 +168,7 @@ pub enum ErrorCode {
     HostExecDenied,
     /// `env::exit` without `--allow-exit`.
     HostExitDenied,
-    /// `Stream.attach` without `--allow-attach`.
+    /// Retired: `Stream.attach` without `--allow-attach` (both removed).
     HostAttachDenied,
     /// FFI process-exec symbol without `--allow-ffi-exec`.
     HostFfiExecDenied,
@@ -186,6 +199,10 @@ pub enum ErrorCode {
     ConflictingOptHints,
     /// An `#[inline]` function whose direct call cannot be spliced.
     InlineRefused,
+    /// A two-word value boxed where no layout can keep its two words: a
+    /// shared body's parameter, an existential pack, a `forall` function
+    /// value's argument, or a class field typed by a class parameter.
+    BoxedResidue,
 
     IoError,
     ArchiveVersionMismatch,
@@ -249,6 +266,10 @@ impl ErrorCode {
             Self::BorrowConflict => "E0149",
             Self::MisplacedMut => "E0150",
             Self::ViewEscape => "E0151",
+            Self::DeferAssignsCapture => "E0152",
+            Self::BareTraitCall => "E0153",
+            Self::ImportCycle => "E0154",
+            Self::JumpOutsideLoop => "E0155",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -291,6 +312,7 @@ impl ErrorCode {
             Self::ParLockHint => "E0805",
             Self::ConflictingOptHints => "E0806",
             Self::InlineRefused => "E0807",
+            Self::BoxedResidue => "E0808",
             Self::IoError => "E0900",
             Self::ArchiveVersionMismatch => "E0901",
             Self::InvalidCliFlags => "E0902",
@@ -359,6 +381,10 @@ impl ErrorCode {
             Self::BorrowConflict => "borrowed object shared or replaced while the borrow lives",
             Self::MisplacedMut => "`mut` borrows nothing here",
             Self::ViewEscape => "view value outlives its borrows",
+            Self::DeferAssignsCapture => "`defer` assigns a variable that is gone when it runs",
+            Self::BareTraitCall => "a trait method called as a free function",
+            Self::ImportCycle => "modules import each other",
+            Self::JumpOutsideLoop => "`break` or `continue` outside a loop",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -401,6 +427,7 @@ impl ErrorCode {
             Self::ParLockHint => "parallelization hint: lock a shared escape",
             Self::ConflictingOptHints => "`#[cold]` cannot be combined with `#[inline]` or `#[hot]`",
             Self::InlineRefused => "an `#[inline]` function is not inlined",
+            Self::BoxedResidue => "a two-word value is boxed where its layout cannot keep two words",
             Self::IoError => "I/O error",
             Self::ArchiveVersionMismatch => "bytecode archive version mismatch",
             Self::InvalidCliFlags => "invalid CLI flags",
@@ -477,6 +504,10 @@ mod tests {
             | BorrowConflict
             | MisplacedMut
             | ViewEscape
+            | DeferAssignsCapture
+            | BareTraitCall
+            | ImportCycle
+            | JumpOutsideLoop
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -519,6 +550,7 @@ mod tests {
             | ParLockHint
             | ConflictingOptHints
             | InlineRefused
+            | BoxedResidue
             | IoError
             | ArchiveVersionMismatch
             | InvalidCliFlags
@@ -577,6 +609,10 @@ mod tests {
             BorrowConflict,
             MisplacedMut,
             ViewEscape,
+            DeferAssignsCapture,
+            BareTraitCall,
+            ImportCycle,
+            JumpOutsideLoop,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
@@ -619,6 +655,7 @@ mod tests {
             ParLockHint,
             ConflictingOptHints,
             InlineRefused,
+            BoxedResidue,
             IoError,
             ArchiveVersionMismatch,
             InvalidCliFlags,

@@ -604,7 +604,7 @@ Binds C functions from a native library at compile time: `extern "lib" { fn …;
 Each declaration is a signature ending in `;`, called like an ordinary
 function. The compiler loads the library and declares the functions for you,
 panicking with a clear message if that fails. A trailing bare `...` marks C
-varargs. The library stem is gated like `ffi::dload`: the build needs
+varargs. The library stem is gated: the build needs
 `--allow-dload STEM`, and the run a `--dload-pin` or `--dload-trusted` for
 it; `extern "c"` (libc) is always denied. `extern struct Name { … };`
 declares a C struct passed by value.
@@ -703,7 +703,8 @@ Adds methods to a type (`impl Type { … }`) or implements a trait for it (`impl
 
 Methods have an implicit `self`; `pub` makes them callable from outside the
 type, and `static fn` declares one that is called on the type. An inherent
-`fn drop()` is a finalizer the garbage collector runs once.
+`fn drop()` is a finalizer that runs once, when the object's last owner
+lets go of it or at the end of the scope that owns it.
 
 A generic type's inherent impl declares its parameters, `impl Cell<T> { … }`
 (bounds as `impl Cell<T: Eq>`). `impl Show<Foo> { … }` is an error: a trait
@@ -810,41 +811,6 @@ fn work(Vec<string> log) -> int {
 fn main() {
     let log: Vec<string> = Vec::new();
     let n = work(log); // log is now ["start", "cleanup"]
-}
-```
-
-## region
-
-Runs a block whose garbage is freed in one go when the block ends.
-
-`region { … }` suits a clear unit of work: one request, one frame, one
-pass over a file. Objects made inside are reclaimed together at the end
-instead of one by one by the collector. The compiler checks that none of
-them can leave the region (E0140): an object made inside may not be
-assigned to a local declared outside, stored into an object or static
-from outside, passed to a function that keeps it, or be the block's value.
-The value may be a plain value or an object made before the region.
-`return`, `?`, `break` and `continue` leave the region on the way out, and
-`region` is only a keyword before `{`: elsewhere it is an ordinary name.
-
-```coil
-use string::format;
-
-fn total_len(int rounds) -> int {
-    let total = 0;
-    let i = 0;
-    while i < rounds {
-        total += region {
-            let line = format("row %i", i);
-            line.len()
-        };
-        i += 1;
-    }
-    return total;
-}
-
-fn main() {
-    let n = total_len(3); // 15
 }
 ```
 
@@ -983,7 +949,7 @@ for methods that need a bound on the impl's parameter. A unary
 
 ```coil
 fn convert<A, B>(A x) -> B where Into<A, B> {
-    return into(x);
+    return x.into();
 }
 
 class Cell<T> {
@@ -1123,11 +1089,12 @@ bodies, and a trait can declare associated types (`type Elem;`) and
 `static fn` constructors. Use it as a bound (`T: Area`) or as an
 existential parameter type.
 
-A trait method is called as a method (`x.area()`), as a function
-(`area(x)`), or qualified by its trait (`Area::area(x)`). The qualified
-form resolves like the function form but only considers that trait's
-method, so it picks between two traits (or a trait and a free function)
-that share a method name; it compiles to the same call.
+A trait method is called as a method (`x.area()`) or qualified by its
+trait (`Area::area(x)`); both compile to the same call. The qualified form
+only considers that trait's method, so it picks between two traits (or a
+trait and a free function) that share a method name, and it is the
+spelling for a method without a receiver. A bare `area(x)` is not a trait
+call (E0153).
 
 ```coil
 trait Area<T> {
@@ -1145,7 +1112,7 @@ impl Area for Square {
 }
 
 fn total<T: Area>(T a, T b) -> int {
-    return area(a) + Area::area(b);
+    return a.area() + Area::area(b);
 }
 ```
 
@@ -1154,7 +1121,7 @@ fn total<T: Area>(T a, T b) -> int {
 Declares a test case run by `coil test`: `test("name") { … }`.
 
 The body runs in result mode, so `assert!(…)`, `raise` and `?` fail the case.
-Each case runs in its own VM. Cases are left out of ordinary builds; a file
+Each case runs in its own runtime. Cases are left out of ordinary builds; a file
 with test cases has no `fn main`.
 
 ```coil
@@ -1209,9 +1176,11 @@ gen fn outer() {
 
 Declares a C struct layout for FFI: `extern struct Name { field: type, … };`.
 
-The struct can be passed to and returned from C functions by value; a
-returned struct is read with `.field`. Field types are C scalar names such as
-`int32`, `int` or `float`. There are no Coil structs: use `class`.
+The struct can be passed to and returned from C functions by value. In Coil
+its value is a record with the same fields: build one with a record literal,
+`{ x: 3, y: 4 }`, and read a field with `.field`. Field types are C scalar names
+such as `int32`, `int` or `float`, or another `extern struct` (a nested record).
+There are no Coil structs: use `class`.
 
 ```coil
 extern struct Point {
@@ -1424,6 +1393,6 @@ which trait bounds another parameter.
 
 ```coil
 fn show_it<c: * -> Constraint, T: c>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 ```

@@ -1,0 +1,139 @@
+// A per-type clone at `T = ()` builds a variant with several payloads,
+// one of them typed by the type parameter (coil-lang#2612). In the clone
+// the `()` value has no word (a `()` local is not bound); stored in the
+// variant it is the empty tuple object, as a `()` stored anywhere is,
+// after the value's effect.
+//
+// unit_variant_payload_shared.coil runs the same with no mono clones.
+use tests::assert;
+
+enum E<T> {
+    P(int, T),
+    N,
+}
+
+enum Two<T> {
+    Q(T, T),
+}
+
+enum Th<T> {
+    Runs(Vec<fn() -> T>, T),
+}
+
+enum R<T> {
+    V { a: int, b: T },
+}
+
+fn record<T>(T x) -> int {
+    let r = R::V { a: 4, b: x };
+    return match r {
+        R::V { a, b } => a,
+    };
+}
+
+fn rebuild<T>(E<T> e) -> E<T> {
+    return match e {
+        E::P(n, y) => E::P(n + 1, y),
+        E::N => E::N,
+    };
+}
+
+fn mk<T>(T x) -> E<T> {
+    return E::P(1, x);
+}
+
+fn two<T>(T x) -> Two<T> {
+    return Two::Q(x, x);
+}
+
+fn first<T>(T x) -> int {
+    return match mk(x) {
+        E::P(n, _) => n,
+        E::N => 0,
+    };
+}
+
+fn back<T>(T x) -> T {
+    return match mk(x) {
+        E::P(_, y) => y,
+        E::N => x,
+    };
+}
+
+fn seconds<T>(T x) -> T {
+    return match two(x) {
+        Two::Q(_, b) => b,
+    };
+}
+
+fn from_call<T>(fn() -> T f) -> E<T> {
+    return E::P(3, f());
+}
+
+fn runs<T>(fn() -> T f) -> Th<T> {
+    let fs: Vec<fn() -> T> = [f];
+    return Th::Runs(fs, f());
+}
+
+fn count<T>(Th<T> t) -> int {
+    return match t {
+        Th::Runs(fs, _) => fs.len(),
+    };
+}
+
+static let CALLS: int = 0;
+
+fn tick() {
+    CALLS = CALLS + 1;
+}
+
+test("a two-payload variant built from a () parameter") {
+    let b = mk(());
+    let n = match b {
+        E::P(n, _) => n,
+        E::N => 0,
+    };
+    assert!(n == 1);
+    assert!(first(()) == 1);
+    assert!(back(()) == ());
+    assert!(seconds(()) == ());
+}
+
+test("a record variant and a payload bound from a pattern") {
+    assert!(record(()) == 4);
+    let h: E<()> = E::P(1, ());
+    let n = match rebuild(h) {
+        E::P(n, _) => n,
+        E::N => 0,
+    };
+    assert!(n == 2);
+}
+
+test("a () local in ground code") {
+    let u = ();
+    let g = E::P(9, u);
+    let n = match g {
+        E::P(n, _) => n,
+        E::N => 0,
+    };
+    assert!(n == 9);
+}
+
+test("the same at int") {
+    assert!(first(5) == 1);
+    assert!(back(5) == 5);
+    assert!(seconds(6) == 6);
+    assert!(record(5) == 4);
+}
+
+test("a () payload from a call runs the call once") {
+    CALLS = 0;
+    let e = from_call(tick);
+    let n = match e {
+        E::P(n, _) => n,
+        E::N => 0,
+    };
+    assert!(n == 3 && CALLS == 1);
+    let t = runs(tick);
+    assert!(count(t) == 1 && CALLS == 2);
+}

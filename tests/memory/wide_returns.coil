@@ -1,0 +1,100 @@
+// Small objects of scalars a direct call returns (an arity-3 or arity-4
+// tuple, an `Option` of a tuple) come back in registers when the caller
+// only reads their items; a caller that keeps the object still gets it.
+use tests::assert;
+
+#[inline(never)]
+fn split3(int a) -> (int, int, int) {
+    return (a % 10, a / 10 % 10, a / 100);
+}
+
+#[inline(never)]
+fn mixed(int a) -> (int, float, bool, int) {
+    return (a, 0.5 * (a as float), a % 2 == 0, -a);
+}
+
+#[inline(never)]
+fn divmod(int a, int b) -> Option<(int, int)> {
+    if b == 0 {
+        return None;
+    }
+    return Some((a / b, a % b));
+}
+
+#[inline(never)]
+fn scaled(float x, int k) -> Option<(float, float, int)> {
+    if k < 0 {
+        return None;
+    }
+    return Some((x * (k as float), x + (k as float), k));
+}
+
+test("arity-3 tuple items") {
+    let (a, b, c) = split3(427);
+    assert!(a == 7);
+    assert!(b == 2);
+    assert!(c == 4);
+    let s = 0;
+    let i = 0;
+    while i < 1000 {
+        let (x, y, z) = split3(i);
+        s += x + y + z;
+        i += 1;
+    }
+    assert!(s == 13500);
+}
+
+test("arity-4 tuple of mixed scalars") {
+    let (a, f, even, n) = mixed(7);
+    assert!(a == 7);
+    assert!(f == 3.5);
+    assert!(!even);
+    assert!(n == -7);
+    let (_, g, e2, _) = mixed(4);
+    assert!(g == 2.0);
+    assert!(e2);
+}
+
+test("Option of a tuple: Some and None") {
+    let hits = 0;
+    let s = 0;
+    let i = 0;
+    while i < 100 {
+        match divmod(i, i % 4) {
+            Some(t) => {
+                let (q, r) = t;
+                s += q + r;
+                hits += 1;
+            },
+            None => {},
+        }
+        i += 1;
+    }
+    assert!(hits == 75);
+    assert!(s == 2291);
+    assert!(divmod(5, 0) == None);
+}
+
+test("Option of a three-item tuple with floats") {
+    match scaled(1.5, 2) {
+        Some(t) => {
+            let (a, b, k) = t;
+            assert!(a == 3.0);
+            assert!(b == 3.5);
+            assert!(k == 2);
+        },
+        None => {
+            assert!(false);
+        },
+    }
+    assert!(scaled(1.0, -1) == None);
+}
+
+test("a caller that keeps the object") {
+    let t = split3(123);
+    let kept = [t, split3(456)];
+    let (a, b, c) = kept[0];
+    assert!(a + b + c == 6);
+    let (d, e, f) = kept[1];
+    assert!(d + e + f == 15);
+}

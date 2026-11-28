@@ -1,11 +1,11 @@
 //! End-to-end tests for `use` / `mod` module resolution.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use compiler::{HostGrants, Pipeline};
-use machine::Machine;
+use compiler::native_mir::{MirAllocKind, MirFunc, MirInst, NativeBody};
+use compiler::{CompileFail, HostGrants, Pipeline};
+use machine::native::NativeCode;
 
 // Tests change cwd; serialize with CWD_LOCK when running in parallel.
 
@@ -37,28 +37,37 @@ fn manifest_src_and_stdlib() -> String {
     )
 }
 
-#[derive(Clone, Default)]
-struct SharedBuf {
-    inner: Arc<Mutex<Vec<u8>>>,
+/// What a compile leaves: the constant pool and the bodies an engine runs.
+struct Compiled {
+    constants: Vec<u64>,
+    bodies: Vec<NativeBody>,
 }
 
-impl SharedBuf {
-    pub fn new() -> Self {
-        Self::default()
+impl Compiled {
+    fn body(&self, name: &str) -> &MirFunc {
+        let body = self.bodies.iter().find(|b| b.name == name);
+        let names = || self.bodies.iter().map(|b| b.name.as_str()).collect::<Vec<_>>();
+        &body.unwrap_or_else(|| panic!("no body `{name}`; have {:?}", names())).mir
+    }
+
+    /// The instructions of `name`.
+    fn insts(&self, name: &str) -> impl Iterator<Item = &MirInst> {
+        self.body(name).blocks.iter().flat_map(|b| &b.insts)
+    }
+
+    /// The instructions of every body.
+    fn all_insts(&self) -> impl Iterator<Item = &MirInst> {
+        self.bodies.iter().flat_map(|b| &b.mir.blocks).flat_map(|b| &b.insts)
     }
 }
 
-impl Write for SharedBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner
-            .lock()
-            .map_err(|_| std::io::ErrorKind::Other)?
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+/// Compile `file` with a capture open, as a run does: without one a compile
+/// leaves no bodies.
+fn compile_file(pipeline: &mut Pipeline, file: &str) -> Result<Compiled, CompileFail> {
+    compiler::native_mir::start_native_capture();
+    let constants = pipeline.compile_src_from_file(file);
+    let bodies = compiler::native_mir::take_native_capture();
+    Ok(Compiled { constants: constants?, bodies })
 }
 
 /// Create a temp project and return `(project_root, entry_path)`.
@@ -98,16 +107,16 @@ fn bind_ns_pipeline(pipeline: &mut Pipeline, extra: &[PathBuf]) {
     pipeline.grant_all();
 }
 
-fn run_project(project_root: &PathBuf, entry: &PathBuf) -> String {
+fn run_project(project_root: &Path, entry: &Path) -> String {
     run_project_with_extra(project_root, entry, &[])
 }
 
-fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[PathBuf]) -> String {
+fn run_project_with_extra(project_root: &Path, entry: &Path, extra: &[PathBuf]) -> String {
     with_project_cwd(project_root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, extra);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -115,38 +124,39 @@ fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[Path
                 panic!("compile failed");
             }
         };
-        run_bytecode(bytecode, constants, &pipeline)
+        run_compiled(compiled, &pipeline)
     })
 }
 
-fn run_bytecode(bytecode: Vec<common::Byte>, constants: Vec<u64>, pipeline: &Pipeline) -> String {
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    // Worker threads print via this buffer (not the parent's Write).
-    machine.set_shared_print(shared.inner.clone());
-    pipeline.wire_vm_ffi(&mut machine, None);
-    pipeline.wire_host_natives(&mut machine);
-    pipeline.wire_thread_program(&mut machine, &bytecode, &constants, pipeline.strings());
-    machine.set_program_debug(pipeline.program_debug());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
+/// Run `compiled` on the MIR interpreter and return what it printed.
+fn run_compiled(compiled: Compiled, pipeline: &Pipeline) -> String {
+    let debug = pipeline.program_debug_full();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    let interp = coil_mir_interp::prepare(compiled.bodies, &pcs);
+    assert!(interp.refused.is_empty(), "the interpreter refused {:?}", interp.refused);
+    let code = NativeCode::new(interp.entries, interp.sites).with_complete(true).with_keep(interp.keep);
+    machine::native::install_shared_for_next_run(Arc::new(code));
+    let program = coil_host::thread_program(
+        pipeline,
+        coil_host::CompiledProgram {
+            constants: &compiled.constants,
+            strings: pipeline.strings(),
+            static_slots: pipeline.static_slot_count(),
+            debug: pipeline.program_debug(),
+        },
     );
-    let _ = machine.restore_output();
-    let bytes = shared
-        .inner
-        .lock()
-        .expect("print buffer mutex poisoned")
-        .clone();
+    let print = Arc::new(Mutex::new(Vec::new()));
+    let mut start = coil_host::native_start(pipeline, &pipeline.archived_struct_layouts(), None);
+    start.shared_print = Some(Arc::clone(&print));
+    machine::run_natively(Arc::new(program), start).expect("the interpreter covers every body");
+    machine::io::set_shared_print_redirect(None);
+    let bytes = print.lock().expect("print buffer mutex poisoned").clone();
     String::from_utf8(bytes).expect("captured output should be valid UTF-8")
 }
 
 /// Serialize cwd changes, `chdir` into `root`, run `f`, then restore cwd.
-fn with_project_cwd<R>(root: &PathBuf, f: impl FnOnce() -> R) -> R {
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+fn with_project_cwd<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(root).expect("chdir");
     struct CwdGuard(PathBuf);
@@ -159,14 +169,12 @@ fn with_project_cwd<R>(root: &PathBuf, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Compile `entry` and assert every `JumpIfMatch` pool index is in range.
-fn compile_entry_and_assert_jump_if_match_pool_valid(
-    entry: &PathBuf,
-) -> (Vec<common::Byte>, Vec<u64>, Pipeline) {
+/// Compile `entry` as a project.
+fn compile_entry(entry: &Path) -> (Compiled, Pipeline) {
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
-    let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-        Ok(pair) => pair,
+    let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+        Ok(compiled) => compiled,
         Err(_) => {
             for msg in pipeline.messages() {
                 eprintln!("MSG: {}", msg.message());
@@ -174,23 +182,7 @@ fn compile_entry_and_assert_jump_if_match_pool_valid(
             panic!("compile failed");
         }
     };
-
-    let mut oob = Vec::new();
-    for (i, b) in bytecode.iter().enumerate() {
-        if matches!(*b.bytecode(), common::Instruction::JumpIfMatch) {
-            let idx = (b.operand_u32() & 0xFFFF) as usize;
-            if idx >= constants.len() {
-                oob.push((i, idx));
-            }
-        }
-    }
-    assert!(
-        oob.is_empty(),
-        "JumpIfMatch pool index out of range after multi-file link: \
-         {oob:?} (constants.len() = {})",
-        constants.len()
-    );
-    (bytecode, constants, pipeline)
+    (compiled, pipeline)
 }
 
 #[test]
@@ -240,12 +232,10 @@ fn no_manifest_uses_default_src_root() {
     assert_eq!(output, "42");
 }
 
-/// Phase 1: multi-module link finalizes peephole fusion once, relocating
-/// `MakePolyFn` while keeping fused fib-style ops in the entry module.
+/// A generic function's value and a recursive function, linked across two
+/// modules.
 #[test]
-fn two_module_polyfn_and_fib_fuse_and_run() {
-    use common::Instruction;
-
+fn two_module_polyfn_and_fib_run() {
     let manifest = manifest_src_and_stdlib();
     // Keep recursive `fib` in the entry namespace (empty prefix) — namespaced
     // modules do not rewrite bare recursive calls to the FQN today.
@@ -270,7 +260,7 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     ];
     let (root, entry) = build_project("two_module_polyfn_fib", &manifest, files, "src/main.coil");
 
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(&root).expect("chdir");
     struct CwdGuard(std::path::PathBuf);
@@ -283,8 +273,8 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
 
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
-    let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-        Ok(pair) => pair,
+    let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+        Ok(compiled) => compiled,
         Err(_) => {
             for msg in pipeline.messages() {
                 eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -294,33 +284,13 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     };
 
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakePolyFn)),
-        "expected MakePolyFn in linked bytecode"
-    );
-    let has_fused = bytecode.iter().any(|b| {
-        matches!(
-            b.bytecode(),
-            Instruction::BinSlotImm
-                | Instruction::BinSlotImmJmpf
-                | Instruction::BinSlotSlot
-                | Instruction::CmpJmpf
-                |             Instruction::BinReturn
-                | Instruction::ConstReturnImm
-                | Instruction::LoadReturnSlot
-                | Instruction::DenseBin
-                | Instruction::DenseBin2
-                | Instruction::DenseBinJmpf
-        )
-    });
-    assert!(
-        has_fused,
-        "final-link fusion should leave fused ops; opcodes: {:?}",
-        bytecode.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. }, .. })),
+        "expected a PolyFn value in the linked program"
     );
 
-    let output = run_bytecode(bytecode, constants, &pipeline);
+    let output = run_compiled(compiled, &pipeline);
     // fib(5)=5, inc(5)=6, id(6)=6
     assert_eq!(output, "6");
 }
@@ -354,7 +324,7 @@ fn parse_fail_dependency_emits_single_diagnostic() {
     ];
     let (root, entry) = build_project("parse_fail_dep", &manifest, files, "src/main.coil");
 
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(&root).expect("chdir");
     struct CwdGuard(PathBuf);
@@ -399,7 +369,7 @@ fn bind_project_root_sets_explicit_roots_without_toml() {
     )];
     let (root, entry) = build_project("bind_roots", "", files, "src/main.coil");
 
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(&root).expect("chdir");
     struct CwdGuard(PathBuf);
@@ -412,12 +382,74 @@ fn bind_project_root_sets_explicit_roots_without_toml() {
 
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
-    assert_eq!(pipeline.project_root(), root.as_path());
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(entry.to_str().unwrap())
-        .expect("bound roots should compile");
-    let output = run_bytecode(bytecode, constants, &pipeline);
+    // The temp dir can be a symlink (macOS), and the root came from the cwd.
+    let same = |p: &std::path::Path| p.canonicalize().expect("canonical path");
+    assert_eq!(same(pipeline.project_root()), same(&root));
+    let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("bound roots should compile");
+    let output = run_compiled(compiled, &pipeline);
     assert_eq!(output, "42");
+}
+
+/// A compile does not depend on hash order: clones of another module's
+/// methods take their labels, and near the budget their existence, in the
+/// order they are requested.
+#[test]
+fn clones_of_another_modules_methods_compile_the_same_every_time() {
+    const METHODS: usize = 12;
+    let getters: String = (0..METHODS).map(|i| format!("    pub fn get{i}() -> T {{\n        return self.v;\n    }}\n")).collect();
+    let calls: String = (0..METHODS).map(|i| format!("    t = t + b.get{i}().n;\n")).collect();
+    let lib = format!("class Box<T> {{\n    pub v: T,\n}}\n\nimpl Box<T> {{\n{getters}}}\n");
+    let main = format!("use boxes::Box;\nuse io::{{stdout, write}};\nuse string::{{format, to_bytes}};\n\nclass P {{\n    pub n: int,\n}}\n\nfn main() {{\n    let b = new Box(new P(1));\n    let t = 0;\n{calls}    let _ = write(stdout(), to_bytes(format(\"%i\", t)));\n}}\n");
+    let (root, entry) = build_project("clone_order", "", &[("src/boxes.coil", lib.as_str()), ("main.coil", main.as_str())], "main.coil");
+
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let original_cwd = std::env::current_dir().expect("get cwd");
+    std::env::set_current_dir(&root).expect("chdir");
+    struct CwdGuard(PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+    let _guard = CwdGuard(original_cwd);
+
+    let archive = || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("compiles");
+        let debug = pipeline.program_debug_full();
+        let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+        compiler::native_mir::archive::encode(&compiled.bodies, &pcs, &[])
+    };
+    let first = archive();
+    for _ in 0..4 {
+        assert!(archive() == first, "MIR differs between identical compiles");
+    }
+}
+
+/// A method of another module, cloned at `int` and at a class of this
+/// module: the `int` clone compiles under its own module's context, and the
+/// clone of a class that module does not know stays with this one (#2289).
+#[test]
+fn clones_at_a_class_the_methods_module_does_not_know_stay_here() {
+    let lib = "class Box<T> {\n    pub v: T,\n}\n\nimpl Box<T> {\n    pub fn get() -> T {\n        return self.v;\n    }\n}\n";
+    let main = r#"use boxes::Box;
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+class P {
+    pub n: int,
+}
+
+fn main() {
+    let b = new Box(new P(1));
+    let s = new Box(7);
+    let t = b.get().n + s.get();
+    let _ = write(stdout(), to_bytes(format("%i", t)));
+}
+"#;
+    let (root, entry) = build_project("clone_unknown_class", "", &[("src/boxes.coil", lib), ("main.coil", main)], "main.coil");
+    assert_eq!(run_project(&root, &entry), "8");
 }
 
 /// Multi-file programs that use `?` (JumpIfMatch → constant pool) in a
@@ -489,9 +521,8 @@ fn run_jobs(Receiver rx) -> Result<int, ChannelError> {
     let (root, entry) = build_project("try_pool", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
-        let (bytecode, constants, pipeline) =
-            compile_entry_and_assert_jump_if_match_pool_valid(&entry);
-        run_bytecode(bytecode, constants, &pipeline)
+        let (compiled, pipeline) = compile_entry(&entry);
+        run_compiled(compiled, &pipeline)
     });
     assert_eq!(output, "a,b,");
 }
@@ -540,9 +571,8 @@ fn write_greeting() -> Result<(), IoError> {
     let (root, entry) = build_project("io_host_try", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
-        let (bytecode, constants, pipeline) =
-            compile_entry_and_assert_jump_if_match_pool_valid(&entry);
-        run_bytecode(bytecode, constants, &pipeline)
+        let (compiled, pipeline) = compile_entry(&entry);
+        run_compiled(compiled, &pipeline)
     });
     assert_eq!(output, "ok");
 
@@ -609,9 +639,8 @@ fn write_then_read(string path) -> Result<(), IoError> {
     let (root, entry) = build_project("io_host_nested", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
-        let (bytecode, constants, pipeline) =
-            compile_entry_and_assert_jump_if_match_pool_valid(&entry);
-        run_bytecode(bytecode, constants, &pipeline)
+        let (compiled, pipeline) = compile_entry(&entry);
+        run_compiled(compiled, &pipeline)
     });
     assert_eq!(output, "ok");
 
@@ -670,44 +699,36 @@ fn build_libsum_into(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// COI-233 worker fixture: FFI search dir `./allowed` with libsum
-/// there, and a non-loadable marker at cwd `native/libtls.so` (not a hijack).
+/// COI-233 worker fixture: FFI search dir `./allowed` with libsum there,
+/// and a non-loadable marker at cwd `native/libsum.so` (not a hijack). A
+/// spawned worker calls the `extern` function its parent's program declared.
 fn run_coi233_worker_ffi_project() -> Option<String> {
     let files = [
         (
             "src/main.coil",
             r#"
-use ffi::{dload};
 use thread::{join, spawn};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
+
 fn worker() -> int {
-    let tls = match dload("tls") {
-        Result::Ok(_) => "tls-loaded",
-        Result::Err(e) => e.message,
-    };
-    write(stdout(), to_bytes(tls));
-    let sum_ok = match dload("sum") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-    return sum_ok;
+    return sum(40, 2);
 }
 
 fn main() {
-    let parent = match dload("sum") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
+    let parent = sum(1, 2);
     let t = spawn(worker)?;
     let w = join(t)?;
-    write(stdout(), to_bytes(format("|%i%i", parent, w)));
+    write(stdout(), to_bytes(format("%i|%i", parent, w)));
 }
 "#,
         ),
         (
-            "native/libtls.so",
+            "native/libsum.so",
             "coil-security-pin: not a shared library\n",
         ),
     ];
@@ -722,11 +743,10 @@ fn main() {
         let mut grants = HostGrants::deny_all();
         grants.add_ffi_search_path(root.join("allowed"));
         grants.grant_dload_allow("sum");
-        grants.grant_dload_allow("tls");
         pipeline.set_host_grants(grants);
         pipeline.grant_dload_file("sum", libsum);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -734,51 +754,29 @@ fn main() {
                 panic!("compile failed");
             }
         };
-        run_bytecode(bytecode, constants, &pipeline)
+        run_compiled(compiled, &pipeline)
     });
     let _ = std::fs::remove_dir_all(&root);
     Some(output)
 }
 
-/// COI-233: a worker `dload("tls")` must not take cwd `./native/libtls`.
+/// COI-233: a `thread::spawn` worker resolves the parent's `extern` library
+/// from the same FFI search paths, never from cwd `./native/` (#2902).
 #[test]
-fn worker_dload_does_not_search_cwd_native_tls() {
+fn worker_extern_call_sees_parent_ffi_search_paths() {
     let Some(output) = run_coi233_worker_ffi_project() else {
         return;
     };
-    let lower = output.to_ascii_lowercase();
-    assert!(
-        !lower.contains("tls-loaded"),
-        "worker must not load cwd ./native/ as a tls fallback, got {output:?}"
-    );
-    assert!(
-        !lower.contains("native/libtls") && !lower.contains("native\\libtls"),
-        "worker dload must not search cwd ./native/libtls, got {output:?}"
-    );
-    assert!(
-        output.ends_with("|10") || output.ends_with("|11"),
-        "parent must dload sum via FFI search paths, got {output:?}"
-    );
+    assert_eq!(output, "3|42", "parent and worker must both call sum from the FFI search path");
 }
 
-/// COI-233: a `thread::spawn` worker must resolve `dload("sum")` from the same
-/// FFI search paths as the root graph.
+/// Cross-file: a two-slot `Result<int,int>` helper defined in one module
+/// and used as a value in another returns its two words to direct calls;
+/// the value enters its one-word adapter (`arith::div$value`), so
+/// `CallIndirect` + `match` read the boxed word or, through the adapter's
+/// twin, the two words, and never mis-decode the tag.
 #[test]
-fn worker_dload_sees_parent_ffi_search_paths() {
-    let Some(output) = run_coi233_worker_ffi_project() else {
-        return;
-    };
-    assert!(
-        output.ends_with("|11"),
-        "parent and worker must both dload sum via FFI search paths, got {output:?}"
-    );
-}
-
-/// Cross-file hole: defining a two-slot `Result<int,int>` helper in one
-/// module and taking its address in another must keep the boxed ABI so
-/// `CallIndirect` + `match` cannot stack-smash / mis-decode the tag.
-#[test]
-fn two_slot_result_address_taken_in_other_module_stays_boxed() {
+fn two_slot_result_address_taken_in_other_module_enters_its_adapter() {
     let files = [
         (
             "src/arith.coil",
@@ -808,7 +806,11 @@ fn main() {
         Result::Ok(_) => 0,
         Result::Err(e) => e,
     };
-    write(stdout(), to_bytes(format("%i,%i", ok, err)));
+    let direct = match div(9, 3) {
+        Result::Ok(q) => q,
+        Result::Err(_) => 0,
+    };
+    write(stdout(), to_bytes(format("%i,%i,%i", ok, err, direct)));
 }
 "#,
         ),
@@ -822,8 +824,10 @@ fn main() {
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        // Keeps the direct CALL; the tiny `div` leaf would otherwise inline.
+        pipeline.set_inline_max_cost(0);
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -831,22 +835,21 @@ fn main() {
                 panic!("compile failed");
             }
         };
-        let has_two_word_return = bytecode.iter().any(|b| {
-            *b.bytecode() == common::Instruction::RETURN && b.return_words() == 2
-        });
+        let body = |name: &str| compiled.bodies.iter().find(|b| b.mir.name == name);
         assert!(
-            !has_two_word_return,
-            "escaped arith::div must keep boxed RETURN, found RETURN operand 2"
+            body("arith::div").is_some_and(|b| b.mir.ret_hi_ty.is_some()),
+            "arith::div used as a value should still return two words to direct calls"
         );
-        let has_call_indirect = bytecode
-            .iter()
-            .any(|b| *b.bytecode() == common::Instruction::CallIndirect);
         assert!(
-            has_call_indirect,
-            "address-of div must lower to CallIndirect"
+            body("arith::div$value").is_some_and(|b| b.mir.ret_hi_ty.is_none()),
+            "the value of arith::div should enter its one-word adapter"
         );
-        let output = run_bytecode(bytecode, constants, &pipeline);
-        assert_eq!(output, "5,-1");
+        assert!(
+            compiled.all_insts().any(|i| matches!(i, MirInst::CallIndirect { .. })),
+            "address-of div must lower to an indirect call"
+        );
+        let output = run_compiled(compiled, &pipeline);
+        assert_eq!(output, "5,-1,3");
     });
 }
 
@@ -893,8 +896,8 @@ fn main() {
         bind_ns_pipeline(&mut pipeline, &[]);
         // Pins the CALL ABI; the tiny `div` leaf would otherwise inline.
         pipeline.set_inline_max_cost(0);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -902,24 +905,16 @@ fn main() {
                 panic!("compile failed");
             }
         };
-        let has_two_word_return = bytecode.iter().any(|b| {
-            *b.bytecode() == common::Instruction::RETURN && b.return_words() == 2
-        });
         assert!(
-            has_two_word_return,
-            "direct-only arith::div should keep two-slot RETURN"
+            compiled.bodies.iter().any(|b| b.mir.ret_hi_ty.is_some()),
+            "direct-only arith::div should keep a two-word return"
         );
-        let output = run_bytecode(bytecode, constants, &pipeline);
+        let output = run_compiled(compiled, &pipeline);
         assert_eq!(output, "5");
     });
 }
 
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-struct CwdLockGuard(std::sync::MutexGuard<'static, ()>);
-impl Drop for CwdLockGuard {
-    fn drop(&mut self) {}
-}
 
 /// #605: modules with no `use` edge between them were ordered by a
 /// `HashMap`'s iteration, so the same project linked its functions in a
@@ -1211,8 +1206,8 @@ fn assert_entry_chain_dissolves(name: &str, files: &[(&str, &str)]) {
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -1220,14 +1215,14 @@ fn assert_entry_chain_dissolves(name: &str, files: &[(&str, &str)]) {
                 panic!("compile failed");
             }
         };
-        let start = pipeline.function_offset("main").expect("main");
-        let end = pipeline.compiler().function_end(start);
-        let main: Vec<_> = bytecode[start..end].iter().map(|b| *b.bytecode()).collect();
-        let makes = main.iter().filter(|o| matches!(o, common::Instruction::DenseMakeObject | common::Instruction::InitTyped)).count();
-        let calls = main.iter().filter(|o| matches!(o, common::Instruction::CALL)).count();
-        assert_eq!(makes, 1, "`main` builds the view: {main:?}");
-        assert!(calls <= 3, "`main` keeps view method calls: {main:?}");
-        let _ = run_bytecode(bytecode, constants, &pipeline);
+        let makes = compiled
+            .insts("main")
+            .filter(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Object { .. }, .. }))
+            .count();
+        let calls = compiled.insts("main").filter(|i| matches!(i, MirInst::Call { .. })).count();
+        assert_eq!(makes, 1, "`main` builds the view");
+        assert!(calls <= 3, "`main` keeps view method calls: {calls}");
+        let _ = run_compiled(compiled, &pipeline);
     });
 }
 
@@ -1268,8 +1263,8 @@ fn main() {
             let mut pipeline = Pipeline::new();
             bind_ns_pipeline(&mut pipeline, &[]);
             pipeline.set_opt_level(level);
-            let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-                Ok(pair) => pair,
+            let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+                Ok(compiled) => compiled,
                 Err(_) => {
                     for msg in pipeline.messages() {
                         eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -1277,19 +1272,455 @@ fn main() {
                     panic!("compile failed at {level:?}");
                 }
             };
-            let start = pipeline.function_offset("main").expect("main");
-            let end = pipeline.compiler().function_end(start);
-            let targets: Vec<usize> = bytecode[start..end]
-                .iter()
-                .filter(|b| matches!(*b.bytecode(), common::Instruction::CALL))
-                .map(|b| b.call_parts().1)
+            let called: Vec<&str> = compiled
+                .insts("main")
+                .filter_map(|i| match i {
+                    MirInst::Call { target, .. } => compiled.bodies.iter().find(|b| b.entry == Some(*target)),
+                    _ => None,
+                })
+                .map(|b| b.name.as_str())
                 .collect();
             for name in kept {
-                if let Some(at) = pipeline.function_offset(name) {
-                    assert!(!targets.contains(&at), "{level:?}: `main` keeps a call to `{name}`");
-                }
+                assert!(!called.contains(&name), "{level:?}: `main` keeps a call to `{name}`");
             }
-            let _ = run_bytecode(bytecode, constants, &pipeline);
+            let _ = run_compiled(compiled, &pipeline);
         });
     }
+}
+
+/// The callees of `caller` among `compiled`'s bodies, by name.
+fn callees<'a>(compiled: &'a Compiled, caller: &str) -> Vec<&'a str> {
+    compiled
+        .insts(caller)
+        .filter_map(|i| match i {
+            MirInst::Call { target, .. } => compiled.bodies.iter().find(|b| b.entry == Some(*target)),
+            _ => None,
+        })
+        .map(|b| b.name.as_str())
+        .collect()
+}
+
+/// A foreign clone compiles after the foreign clones it calls, so it
+/// splices them: `Drive<string>::run`, cloned from one module, keeps no
+/// call to `Cell<string>::bump`, cloned from another, in its loop (#2219).
+#[test]
+fn foreign_clone_splices_the_foreign_clone_it_calls() {
+    let files = [
+        (
+            "src/cell.coil",
+            r#"
+class Cell<T> {
+    pub v: T,
+    total: int,
+}
+
+impl Cell<T> {
+    pub fn bump(int k) -> int {
+        self.total = self.total + k;
+        return self.total;
+    }
+}
+
+fn cell<T>(T v) -> Cell<T> {
+    return new Cell(v, 0);
+}
+"#,
+        ),
+        (
+            "src/drive.coil",
+            r#"
+use cell::Cell;
+
+class Drive<T> {
+    pub cell: Cell<T>,
+}
+
+impl Drive<T> {
+    pub fn run(int n) -> int {
+        let s = 0;
+        let i = 0;
+        while i < n {
+            s = s + self.cell.bump(i % 7);
+            i = i + 1;
+        }
+        return s;
+    }
+}
+"#,
+        ),
+        (
+            "src/main.coil",
+            r#"
+use cell::cell;
+use drive::Drive;
+
+fn main() {
+    let d = new Drive(cell("x"));
+    if d.run(100) != 14750 {
+        panic "sum";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_clone_callee", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        let called = callees(&compiled, "drive::Drive::run$inst$string");
+        assert!(!called.iter().any(|c| c.starts_with("cell::Cell::bump")), "`run`'s clone keeps a call to `bump`'s: {called:?}");
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// The stdlib `HashMap::insert` clone splices the lookup it calls, whose
+/// kept body has a folded guard return before dead code (#2219).
+#[test]
+fn stdlib_map_insert_clone_splices_its_lookup() {
+    let files = [(
+        "src/main.coil",
+        r#"
+use collections::map::{HashMap};
+
+fn main() {
+    let counts: HashMap<string, int> = HashMap::new();
+    let words = ["a", "b", "a", "c", "b", "a", "d", "e"];
+    let i = 0;
+    while i < 80 {
+        let w = words[i % 8];
+        counts.insert(w, counts.get_or(w, 0) + 1);
+        i = i + 1;
+    }
+    if counts.get_or("a", 0) != 30 {
+        panic "count";
+    }
+}
+"#,
+    )];
+    let (root, entry) = build_project("stdlib_map_insert_lookup", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        let called = callees(&compiled, "collections::map::HashMap::insert$inst$string_int");
+        assert!(
+            !called.contains(&"collections::index::KeyIndex::find_hashed$inst$string"),
+            "`insert`'s clone keeps a call to `find_hashed`'s: {called:?}"
+        );
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// Another module's generic class: `get` returns an open `Option<V>`,
+/// `next` an open `Option<Pair<K, V>>`, and `slots` keeps a nested
+/// `Vec<Option<V>>` local.
+const BAG_MODULE: &str = r#"
+class Pair<K, V> {
+    pub key: K,
+    pub value: V,
+}
+
+class Bag<K, V> {
+    pub keys: Vec<K>,
+    pub vals: Vec<V>,
+}
+
+class BagIter<K, V> {
+    bag: Bag<K, V>,
+    slot: int,
+}
+
+impl Bag<K, V> {
+    pub static fn of(K k, V v) -> Bag<K, V> {
+        return new Bag([k], [v]);
+    }
+
+    pub fn at(int i) -> V {
+        return self.vals[i];
+    }
+
+    pub fn get(int i) -> Option<V> {
+        if i >= 0 && i < self.vals.len() {
+            return Some(self.vals[i]);
+        }
+        return None;
+    }
+
+    pub fn iter() -> BagIter<K, V> {
+        return new BagIter(self, 0);
+    }
+}
+
+impl BagIter<K, V> {
+    pub fn next() -> Option<Pair<K, V>> {
+        if self.slot < self.bag.vals.len() {
+            let s = self.slot;
+            self.slot = s + 1;
+            return Some(new Pair(self.bag.keys[s], self.bag.vals[s]));
+        }
+        return None;
+    }
+}
+
+impl IntoIterator for Bag<K, V> {
+    type Item = Pair<K, V>;
+    type IntoIter = BagIter<K, V>;
+    pub fn into_iter(Bag<K, V> b) -> BagIter<K, V> {
+        return b.iter();
+    }
+}
+
+impl Iterator for BagIter<K, V> {
+    type Item = Pair<K, V>;
+    pub fn next(BagIter<K, V> it) -> Option<Pair<K, V>> {
+        return it.next();
+    }
+}
+
+trait Last<B> {
+    type Item;
+
+    fn last(B b) -> Option<Item> {}
+}
+
+impl Last for Bag<K, V> {
+    type Item = V;
+    pub fn last(Bag<K, V> b) -> Option<V> {
+        let n = b.vals.len();
+        if n == 0 {
+            return None;
+        }
+        return Some(b.vals[n - 1]);
+    }
+}
+
+fn settle<T>(T x, bool fail) -> Result<T, int> {
+    let r: Result<Result<T, int>, int> = if fail { Err(4) } else { Ok(Ok(x)) };
+    return match r {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
+    };
+}
+
+fn count_some<T>(Vec<T> xs) -> int {
+    let os: Vec<Option<T>> = [];
+    for x in xs {
+        os.push(Some(x));
+    }
+    os.push(None);
+    let n = 0;
+    for o in os {
+        if o.is_some() {
+            n += 1;
+        }
+    }
+    return n;
+}
+"#;
+
+/// Whether `compiled`'s body `name` exists and calls no body whose name
+/// is `shared` (the generic's shared entry) or ends in `$dict`.
+fn runs_own_body(compiled: &Compiled, name: &str, shared: &str) -> Result<(), String> {
+    if !compiled.bodies.iter().any(|b| b.name == name) {
+        let names: Vec<&str> = compiled.bodies.iter().map(|b| b.name.as_str()).filter(|n| n.contains("bag::")).collect();
+        return Err(format!("no body `{name}`; bag bodies: {names:?}"));
+    }
+    let called = callees(compiled, name);
+    if called.iter().any(|c| *c == shared || c.ends_with("$dict")) {
+        return Err(format!("`{name}` calls the shared body: {called:?}"));
+    }
+    Ok(())
+}
+
+/// A ground call to another module's generic method whose result is an
+/// open `Option<V>` (`Bag<int, Vec<int>>::get`) runs a per-type clone
+/// compiled from its body, not a thunk that calls the shared body with
+/// dictionaries and unboxes the `Some` it boxed (#2958).
+#[test]
+fn foreign_option_result_method_clone_compiles_from_its_body() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::Bag;
+
+fn main() {
+    let xs: Vec<int> = [1, 2, 3];
+    let b: Bag<int, Vec<int>> = Bag::of(1, xs);
+    let total = b.at(0).len();
+    let i = 0;
+    while i < 10 {
+        match b.get(i % 2) {
+            Some(v) => { total += v.len(); },
+            None => { total += 100; },
+        }
+        i += 1;
+    }
+    if total != 518 {
+        panic "total";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_option_result_clone", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        runs_own_body(&compiled, "bag::Bag::get$inst$int_Vec<int>", "bag::Bag::get").unwrap();
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// `for p in b` over another module's ground generic iterable calls a
+/// per-type clone of its `Iterator` instance's `next`, which calls the
+/// inherent `next`'s clone, not the shared body through the `Iterator`
+/// dictionary (#2909).
+#[test]
+fn foreign_for_in_next_takes_its_clone() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::Bag;
+
+fn total(Bag<int, int> b) -> int {
+    let n = 0;
+    for p in b {
+        n += p.key + p.value;
+    }
+    return n;
+}
+
+fn main() {
+    let b: Bag<int, int> = Bag::of(3, 4);
+    b.keys.push(5);
+    b.vals.push(6);
+    if total(b) != 18 {
+        panic "total";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_for_in_next_clone", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        let called = callees(&compiled, "total");
+        assert!(
+            called.iter().any(|c| c.starts_with("Iterator__bag::BagIter<K, V>__next$inst$")),
+            "`total` does not call `next`'s clone: {called:?}"
+        );
+        assert!(!called.iter().any(|c| c.ends_with("$dict")), "`total` calls a dictionary adapter: {called:?}");
+        runs_own_body(&compiled, "bag::BagIter::next$inst$int_int", "bag::BagIter::next").unwrap();
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// A plain ground call of another module's trait instance method whose
+/// trait spells its result through an associated type (`last ->
+/// Option<Item>`) calls the method's clone and reads the result in the
+/// clone's layout, a niche word (`string`) and a two-word value (`int`),
+/// not the shared entry through the instance's dictionary.
+#[test]
+fn foreign_boundary_trait_method_call_takes_its_clone() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::{Bag, Last};
+
+fn words() -> int {
+    let b: Bag<int, string> = Bag::of(1, "one");
+    return match b.last() {
+        Some(w) => w.len(),
+        None => 100,
+    };
+}
+
+fn nums() -> int {
+    let b: Bag<int, int> = Bag::of(1, 7);
+    b.vals.push(9);
+    return b.last() ?? 100;
+}
+
+fn main() {
+    if words() != 3 || nums() != 9 {
+        panic "last";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_boundary_trait_call", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        for caller in ["words", "nums"] {
+            let called = callees(&compiled, caller);
+            assert!(
+                called.iter().any(|c| c.starts_with("Last__bag::Bag<K, V>__last$inst$")),
+                "`{caller}` does not call `last`'s clone: {called:?}"
+            );
+        }
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// A ground call to another module's generic function whose body holds an
+/// open enum below the top (a `Result<Result<T, int>, int>` local, a
+/// `Vec<Option<T>>`) runs a clone compiled from its body: such a value
+/// reaches another body only through a clone-only signature, so the clone
+/// may hold it in the ground layout.
+#[test]
+fn foreign_clone_holding_a_nested_open_enum_compiles_from_its_body() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::{count_some, settle};
+
+fn main() {
+    let a = settle(7, false).unwrap_or(0);
+    let b = match settle("s", true) {
+        Ok(_) => 0,
+        Err(e) => e,
+    };
+    let w: Vec<string> = ["x", "y"];
+    let v: Vec<int> = [1, 2, 3];
+    if a != 7 || b != 4 || count_some(w) != 2 || count_some(v) != 3 {
+        panic "nested";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_nested_open_clone", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        for (name, shared) in [
+            ("bag::settle$inst$int", "bag::settle"),
+            ("bag::settle$inst$string", "bag::settle"),
+            ("bag::count_some$inst$int", "bag::count_some"),
+            ("bag::count_some$inst$string", "bag::count_some"),
+        ] {
+            runs_own_body(&compiled, name, shared).unwrap();
+        }
+        let _ = run_compiled(compiled, &pipeline);
+    });
 }

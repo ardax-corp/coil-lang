@@ -1,6 +1,6 @@
 # Opt generalization (COI-333 A0)
 
-> **Status: historical.** Written while stack IL with an IL→MIR lift was the production path. Since M4/M5 (2026-10) every body lowers from HIR to MIR. Today's pipeline: [pipeline.md](pipeline.md). The dense cost gate it refers to is gone: dense keeps every body it can emit, and LIR runs only where dense refuses.
+> **Status: historical.** Written while stack IL with an IL→MIR lift was the production path. The tiers it discusses (fuse-IL, dense, LIR) and the bytecode VM that ran them have been deleted: every body now lowers from HIR to MIR and runs as native code or on the MIR interpreter. There is no stack IL and no cost gate. Today's pipeline: [pipeline.md](pipeline.md).
 
 Doctrine for generalizing MIR / IL opts so they fit **majority** programs,
 not prove-board shapes. No compiler changes in this note.
@@ -11,10 +11,8 @@ Constrained by locked [language quirks](language-quirks.md) Q1–Q9
 (COI-331;
 relative path — that file may land on a separate PR).
 
-Island history and refuse tables stay in [mir-islands.md](mir-islands.md),
-[specialize-refuse.md](specialize-refuse.md), and
-[mir-stack-maps.md](mir-stack-maps.md). This note is the **default** those
-tables shrink toward.
+Island history and refuse tables stay in [mir-islands.md](mir-islands.md).
+This note is the **default** those tables shrink toward.
 
 ## Principles
 
@@ -39,7 +37,7 @@ tables shrink toward.
 
 4. **Ship only if checksum + cost gate.** Reconstruct must match fuse-IL
    semantics (checksum) and must not be **denser-but-slower** by default.
-   That is the S2l spirit ([s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)):
+   That is the S2l spirit:
    try the MIR path so SROA / LICM can delete work; keep it only when the
    reconstruct is cheaper or equal. Residual in-loop `Make*` that still
    boxes via LOAD/STORE stays fuse-IL. A2 emits `DenseIndex` /
@@ -126,7 +124,6 @@ natural-suite rows, no env knobs.
 ## B0 — Post-quirks refuse audit
 
 Tip `eaf17283` (Q9 R1 #389). Cross-check:
-[specialize-refuse.md](specialize-refuse.md),
 [mir-islands.md](mir-islands.md),
 [language-quirks.md](language-quirks.md),
 [q6-iterator-protocol.md](q6-iterator-protocol.md),
@@ -148,7 +145,7 @@ list. Q6–Q9 first rungs turned most of those named commits into
 | `for` / iterator (`for_in_sum`) | **Q6:** counted desugar — array / Vec / `[T; N]` / literal range helpers dense (`sum`, `for_in_range`). **B5:** first-class `let r = 0..n` locals unbox `[start,end]` (`for_in_range_value`). **C2:** free-fn param / returned numeric Range two-slot (`for_in_range_param` / `for_in_range_ret`). **C2b rung 1:** heap-field / array-held Range counted (`for_in_range_field` / `for_in_range_array`). **C2b rung 2:** user `Iterator::next` (`for_in_iter`) and counted `into_iter` Range (`for_in_iter_range`). **C2b rung 4:** coro for-in (`for_in_coro`; `ResumeCoro` / `DoneCoro`; dense or LIR). `main` + format / `Vec.push` stays fuse-IL | Ladder (counted + local + param/ret + heap-field range + user `next` + coro) |
 | Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` may LIR (I2) or dense (**D3** multi-payload). **B3:** two-slot `CALL` / `RETURN` may dense or LIR (cost gate) | Cost gate |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | **D3:** per-index `MatchPayload` + existing `Unpack(n)` / `JumpIfMatch`. Keep when reconstruct ≤ fuse. `item_check` is the flagship | Cost gate (COI-357) |
-| Debugger-attached / `-Og` | **B8:** may dense / LIR (cost gate). **C3:** compiler-internal deopt maps, named-let remap, sparse MIR `DebugLoc`. Emit still skips `Deopt`. Native resume / P5 stay leftover ([mir-deopt.md](mir-deopt.md)) | Ladder (**I7** / **B8** / **C3**) |
+| Debugger-attached / `-Og` | **B8:** may dense / LIR (cost gate). **C3:** compiler-internal deopt maps, named-let remap, sparse MIR `DebugLoc`. Emit still skips `Deopt`. Native resume / P5 stay leftover ([debugger.md](debugger.md)) | Ladder (**I7** / **B8** / **C3**) |
 | Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match is **D3** | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | Unchanged | Hard wall (later island) |
 | Compare-only (no arith) | Unchanged — fuse-IL or I8 LIR | Cost gate |
@@ -180,7 +177,7 @@ regular reconstruct over bench-shaped peeps.
 Parked (not B*): residual `Byte`/`Pow`/bitwise, Cranelift P5, PGO.
 
 Post A0–C3 denser-MIR leftovers (D0 keep-rate, class `new`, dense field, Q9
-`main`, `item_check`): [mir-dense-leftovers.md](mir-dense-leftovers.md).
+`main`, `item_check`).
 **D0** (COI-354): `nsieve` keeps
 dense-native after lift (`slot_env` follows trivial-phi subst). Cost gate
 unchanged. **D1** (COI-355): class

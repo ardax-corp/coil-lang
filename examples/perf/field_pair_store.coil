@@ -1,0 +1,33 @@
+// An `Option<int>` class field rewritten in a hot loop: the field sits
+// flat in two slots, so a store writes two words and boxes nothing.
+use io::sync::print;
+use string::format;
+
+class Best {
+    pub best: Option<int>,
+}
+
+#[inline(never)]
+fn offer(Best b, int x) {
+    let keep = match b.best {
+        Some(k) => k >= x,
+        None => false,
+    };
+    if !keep {
+        b.best = Some(x);
+    }
+}
+
+fn main() {
+    let b = new Best(None);
+    let i = 0;
+    while i < 20000000 {
+        offer(b, (i * 7919) % 1000003);
+        i += 1;
+    }
+    let r = match b.best {
+        Some(k) => k,
+        None => 0,
+    };
+    let _ = print(format("%i\n", r));
+}

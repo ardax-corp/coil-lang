@@ -1,0 +1,364 @@
+// A generic whose parameter or result holds an open `Option` / `Result`
+// below its top (`Vec<Option<T>>`, `[Option<T>; N]`, `(Option<T>, int)`,
+// `Option<Option<T>>`) and names no bare `T`, past the clone budget
+// (coil-lang#2441). The shared body holds that value as its enum object,
+// ground code as the niche word where `T` is a heap type: the call takes
+// a clone, so both sides read the values the other made.
+// @flags --clone-budget 0
+use tests::assert;
+use collections::map::HashMap;
+
+class C {
+    pub n: int,
+}
+
+impl Eq for C {
+    pub fn eq(C a, C b) -> bool {
+        return a.n == b.n;
+    }
+}
+
+class H<T> {
+    pub o: Option<T>,
+    pub k: int,
+}
+
+fn vec_opt<T>([T; 1] a) -> Vec<Option<T>> {
+    let v: Vec<Option<T>> = Vec::new();
+    v.push(Option::Some(a[0]));
+    v.push(Option::None);
+    return v;
+}
+
+fn vec_res<T>([T; 1] a) -> Vec<Result<T, string>> {
+    let v: Vec<Result<T, string>> = Vec::new();
+    v.push(Result::Ok(a[0]));
+    v.push(Result::Err("no"));
+    return v;
+}
+
+fn arr_opt<T>([T; 1] a) -> [Option<T>; 2] {
+    return [Option::Some(a[0]), Option::None];
+}
+
+fn arr_res<T>([T; 1] a) -> [Result<T, string>; 2] {
+    return [Result::Ok(a[0]), Result::Err("no")];
+}
+
+fn tup_opt<T>([T; 1] a) -> (Option<T>, int) {
+    return (Option::Some(a[0]), 7);
+}
+
+fn tup_res<T>([T; 1] a) -> (int, Result<T, string>) {
+    return (7, Result::Ok(a[0]));
+}
+
+fn opt_opt<T>([T; 1] a) -> Option<Option<T>> {
+    return Option::Some(Option::Some(a[0]));
+}
+
+fn opt_res<T>([T; 1] a) -> Option<Result<T, string>> {
+    return Option::Some(Result::Ok(a[0]));
+}
+
+fn held<T>([T; 1] a) -> H<T> {
+    return new H(Option::Some(a[0]), 7);
+}
+
+fn somes<T>(Vec<Option<T>> xs) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    for x in xs {
+        match x {
+            Option::Some(v) => out.push(v),
+            Option::None => {},
+        }
+    }
+    return out;
+}
+
+fn oks<T>(Vec<Result<T, string>> xs) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    for x in xs {
+        match x {
+            Result::Ok(v) => out.push(v),
+            Result::Err(_) => {},
+        }
+    }
+    return out;
+}
+
+fn arr_somes<T>([Option<T>; 3] xs) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    for x in xs {
+        match x {
+            Option::Some(v) => out.push(v),
+            Option::None => {},
+        }
+    }
+    return out;
+}
+
+fn tup_some<T>((Result<T, string>, int) xs) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    let (o, n) = xs;
+    match o {
+        Result::Ok(v) => out.push(v),
+        Result::Err(_) => {},
+    }
+    return out;
+}
+
+fn inner_some<T>(Option<Option<T>> xs) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    match xs {
+        Option::Some(Option::Some(v)) => out.push(v),
+        default => {},
+    }
+    return out;
+}
+
+fn held_some<T>(H<T> h) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    match h.o {
+        Option::Some(v) => out.push(v),
+        Option::None => {},
+    }
+    return out;
+}
+
+// The body's pushes into the caller's `Vec`.
+fn grow<T>(Vec<Option<T>> xs, [T; 1] a) -> int {
+    xs.push(Option::Some(a[0]));
+    xs.push(Option::None);
+    return xs.len();
+}
+
+// A generic body calling another at its own parameter.
+fn through<U>([U; 1] u) -> Vec<Option<U>> {
+    return vec_opt(u);
+}
+
+fn counted<U>(U u) -> int {
+    return somes(vec_opt([u])).len();
+}
+
+fn looked<K: Hash + Eq, T>(HashMap<K, Option<T>> m, [K; 1] k) -> int {
+    return match m.get(k[0]) {
+        Option::Some(Option::Some(_)) => 2,
+        Option::Some(Option::None) => 1,
+        Option::None => 0,
+    };
+}
+
+class W<T> {
+    pub k: int,
+}
+
+impl W<T> {
+    pub static fn made([T; 1] a) -> Vec<Option<T>> {
+        let v: Vec<Option<T>> = Vec::new();
+        v.push(Option::Some(a[0]));
+        v.push(Option::None);
+        return v;
+    }
+
+    pub fn count(Vec<Option<T>> xs) -> int {
+        let n = self.k;
+        for x in xs {
+            match x {
+                Option::Some(_) => {
+                    n = n + 1;
+                },
+                Option::None => {},
+            }
+        }
+        return n;
+    }
+
+    pub fn mk([T; 1] a) -> [Result<T, string>; 2] {
+        return [Result::Ok(a[0]), Result::Err("no")];
+    }
+}
+
+class B<T> {
+    pub v: T,
+}
+
+trait Mk<A> {
+    fn mk(A x) -> Vec<Option<A>> {}
+}
+
+impl Mk for B<T> {
+    fn mk(B<T> b) -> Vec<Option<B<T>>> {
+        let v: Vec<Option<B<T>>> = Vec::new();
+        v.push(Option::Some(b));
+        v.push(Option::None);
+        return v;
+    }
+}
+
+fn via<U: Mk>(U u) -> Vec<Option<U>> {
+    return u.mk();
+}
+
+test("a Vec of an open enum in the result") {
+    let s = vec_opt(["a"]);
+    assert!(s.len() == 2 && s[0] == Option::Some("a") && s[1] == Option::None);
+    let c = vec_opt([new C(1)]);
+    assert!(c[0] == Option::Some(new C(1)) && c[1] == Option::None);
+    let i = vec_opt([1]);
+    assert!(i[0] == Option::Some(1) && i[1] == Option::None);
+    let f = vec_opt([1.5]);
+    assert!(f[0] == Option::Some(1.5) && f[1] == Option::None);
+    let rs = vec_res(["a"]);
+    assert!(rs[0] == Result::Ok("a") && rs[1] == Result::Err("no"));
+    let rc = vec_res([new C(1)]);
+    assert!(rc[0] == Result::Ok(new C(1)) && rc[1] == Result::Err("no"));
+    let ri = vec_res([1]);
+    assert!(ri[0] == Result::Ok(1) && ri[1] == Result::Err("no"));
+    let rf = vec_res([1.5]);
+    assert!(rf[0] == Result::Ok(1.5) && rf[1] == Result::Err("no"));
+}
+
+test("an array of an open enum in the result") {
+    let s = arr_opt(["a"]);
+    assert!(s[0] == Option::Some("a") && s[1] == Option::None);
+    let c = arr_opt([new C(1)]);
+    assert!(c[0] == Option::Some(new C(1)) && c[1] == Option::None);
+    let i = arr_opt([1]);
+    assert!(i[0] == Option::Some(1) && i[1] == Option::None);
+    let f = arr_opt([1.5]);
+    assert!(f[0] == Option::Some(1.5) && f[1] == Option::None);
+    let rs = arr_res(["a"]);
+    assert!(rs[0] == Result::Ok("a") && rs[1] == Result::Err("no"));
+    let rc = arr_res([new C(1)]);
+    assert!(rc[0] == Result::Ok(new C(1)) && rc[1] == Result::Err("no"));
+    let ri = arr_res([1]);
+    assert!(ri[0] == Result::Ok(1) && ri[1] == Result::Err("no"));
+    let rf = arr_res([1.5]);
+    assert!(rf[0] == Result::Ok(1.5) && rf[1] == Result::Err("no"));
+}
+
+test("a tuple, an enum and a class holding an open enum in the result") {
+    let (s, n) = tup_opt(["a"]);
+    assert!(s == Option::Some("a") && n == 7);
+    let (c, cn) = tup_opt([new C(1)]);
+    assert!(c == Option::Some(new C(1)) && cn == 7);
+    let (i, k) = tup_opt([1]);
+    assert!(i == Option::Some(1) && k == 7);
+    let (f, fk) = tup_opt([1.5]);
+    assert!(f == Option::Some(1.5) && fk == 7);
+    let (m, r) = tup_res(["a"]);
+    assert!(m == 7 && r == Result::Ok("a"));
+    let (mc, rc) = tup_res([new C(1)]);
+    assert!(mc == 7 && rc == Result::Ok(new C(1)));
+    let (mi, ri) = tup_res([1]);
+    assert!(mi == 7 && ri == Result::Ok(1));
+    assert!(opt_opt(["a"]) == Option::Some(Option::Some("a")));
+    assert!(opt_opt([new C(1)]) == Option::Some(Option::Some(new C(1))));
+    assert!(opt_opt([1]) == Option::Some(Option::Some(1)));
+    assert!(opt_opt([1.5]) == Option::Some(Option::Some(1.5)));
+    assert!(opt_res(["a"]) == Option::Some(Result::Ok("a")));
+    assert!(opt_res([new C(1)]) == Option::Some(Result::Ok(new C(1))));
+    assert!(opt_res([1]) == Option::Some(Result::Ok(1)));
+    let h = held(["a"]);
+    assert!(h.o == Option::Some("a") && h.k == 7);
+    let hc = held([new C(1)]);
+    assert!(hc.o == Option::Some(new C(1)) && hc.k == 7);
+}
+
+test("an open enum nested in a parameter") {
+    let s = somes(Vec::from([Option::None, Option::Some("a"), Option::Some("b")]));
+    assert!(s.len() == 2 && s[0] == "a" && s[1] == "b");
+    let c = somes(Vec::from([Option::None, Option::Some(new C(1))]));
+    assert!(c.len() == 1 && c[0].n == 1);
+    let i = somes(Vec::from([Option::None, Option::Some(1), Option::Some(2)]));
+    assert!(i.len() == 2 && i[0] == 1 && i[1] == 2);
+    let f = somes(Vec::from([Option::Some(1.5), Option::None]));
+    assert!(f.len() == 1 && f[0] == 1.5);
+    let rs: Vec<Result<string, string>> = Vec::from([Result::Err("no"), Result::Ok("a")]);
+    let o = oks(rs);
+    assert!(o.len() == 1 && o[0] == "a");
+    let rc: Vec<Result<C, string>> = Vec::from([Result::Ok(new C(3)), Result::Err("no")]);
+    let oc = oks(rc);
+    assert!(oc.len() == 1 && oc[0].n == 3);
+    let ri: Vec<Result<int, string>> = Vec::from([Result::Ok(3), Result::Err("no")]);
+    let oi = oks(ri);
+    assert!(oi.len() == 1 && oi[0] == 3);
+    let a = arr_somes([Option::None, Option::Some("a"), Option::Some("b")]);
+    assert!(a.len() == 2 && a[0] == "a" && a[1] == "b");
+    let ai = arr_somes([Option::None, Option::Some(1), Option::Some(2)]);
+    assert!(ai.len() == 2 && ai[1] == 2);
+    let ts: (Result<string, string>, int) = (Result::Ok("a"), 3);
+    let t = tup_some(ts);
+    assert!(t.len() == 1 && t[0] == "a");
+    let tf: (Result<float, string>, int) = (Result::Ok(1.5), 3);
+    let u = tup_some(tf);
+    assert!(u.len() == 1 && u[0] == 1.5);
+    let n = inner_some(Option::Some(Option::Some("a")));
+    assert!(n.len() == 1 && n[0] == "a");
+    let nc = inner_some(Option::Some(Option::Some(new C(4))));
+    assert!(nc.len() == 1 && nc[0].n == 4);
+    let ni = inner_some(Option::Some(Option::Some(4)));
+    assert!(ni.len() == 1 && ni[0] == 4);
+    let h: H<string> = new H(Option::Some("a"), 3);
+    let hs = held_some(h);
+    assert!(hs.len() == 1 && hs[0] == "a");
+}
+
+test("the caller reads what the body pushed") {
+    let xs: Vec<Option<string>> = Vec::from([Option::Some("b")]);
+    assert!(grow(xs, ["a"]) == 3);
+    assert!(
+        xs.len() == 3 &&
+        xs[0] == Option::Some("b") &&
+        xs[1] == Option::Some("a") &&
+        xs[2] == Option::None,
+    );
+    let cs: Vec<Option<C>> = Vec::from([Option::Some(new C(2))]);
+    assert!(grow(cs, [new C(1)]) == 3);
+    assert!(
+        cs[0] == Option::Some(new C(2)) && cs[1] == Option::Some(new C(1)) && cs[2] == Option::None,
+    );
+    let is: Vec<Option<int>> = Vec::from([Option::Some(2)]);
+    assert!(grow(is, [1]) == 3);
+    assert!(is[0] == Option::Some(2) && is[1] == Option::Some(1) && is[2] == Option::None);
+}
+
+test("from another generic body and through a class parameter") {
+    let t = through(["a"]);
+    assert!(t[0] == Option::Some("a") && t[1] == Option::None);
+    assert!(counted("a") == 1 && counted(1) == 1 && counted(new C(1)) == 1);
+    let m: HashMap<string, Option<string>> = HashMap::new();
+    m.insert("a", Option::Some("x"));
+    m.insert("b", Option::None);
+    assert!(looked(m, ["a"]) == 2 && looked(m, ["b"]) == 1 && looked(m, ["c"]) == 0);
+}
+
+test("methods of a generic class and a generic instance") {
+    let s: Vec<Option<string>> = W::made(["a"]);
+    assert!(s[0] == Option::Some("a") && s[1] == Option::None);
+    let w: W<string> = new W(10);
+    assert!(w.count(s) == 11);
+    let r = w.mk(["b"]);
+    assert!(r[0] == Result::Ok("b") && r[1] == Result::Err("no"));
+    let wi: W<int> = new W(10);
+    assert!(wi.count(Vec::from([Option::Some(1), Option::None, Option::Some(2)])) == 12);
+    let b: B<string> = new B("a");
+    let made = b.mk();
+    let first = match made[0] {
+        Option::Some(x) => x.v,
+        Option::None => "none",
+    };
+    assert!(first == "a" && made.len() == 2);
+    let passed = via(b);
+    let again = match passed[0] {
+        Option::Some(x) => x.v,
+        Option::None => "none",
+    };
+    let last = match passed[1] {
+        Option::Some(_) => false,
+        Option::None => true,
+    };
+    assert!(again == "a" && last);
+}

@@ -1,0 +1,6 @@
+// Imports a class without re-exporting it (#2864).
+use reexport_defs::Item;
+
+fn make() -> Item {
+    return new Item(1);
+}

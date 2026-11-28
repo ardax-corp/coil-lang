@@ -1,0 +1,19 @@
+// A numeric range's `to_vec` on a range built per iteration: the range
+// goes to the thunk in its two words, not boxed per call.
+use io::sync::print;
+use string::format;
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 3000000 {
+        let lo = i & 7;
+        let v = (lo..lo + 3).to_vec();
+        s += v[2];
+        let w = (lo..=lo + 1).to_vec();
+        s += w.len();
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}

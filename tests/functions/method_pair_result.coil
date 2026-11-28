@@ -1,0 +1,299 @@
+// An inherent method's two-word result (`Option<int>`, an immediate-`Ok`
+// `Result`, a two-item tuple, a two-slot enum or readonly class) reaches
+// every caller with its value: a direct call, a static method, a generic
+// class's method (its clone and its shared body), a partial application, a
+// trait method called directly, through a bound and an existential, a
+// shared generic body, recursion and `?` (#2333).
+use tests::assert;
+use string::format;
+
+enum Shape {
+    Dot(int),
+    Empty,
+}
+
+readonly class P2 {
+    pub x: int,
+    pub y: int,
+}
+
+class Bag {
+    pub base: int,
+}
+
+impl Bag {
+    #[inline(never)]
+    pub fn at(int k) -> Option<int> {
+        if k < 0 {
+            return None;
+        }
+        return Some(self.base + k);
+    }
+
+    #[inline(never)]
+    pub fn pair(int k) -> (int, int) {
+        return (self.base, self.base * k);
+    }
+
+    #[inline(never)]
+    pub fn mixed(int k) -> (int, float) {
+        return (k, 0.5 * (self.base as float));
+    }
+
+    #[inline(never)]
+    pub fn half(int k) -> Option<float> {
+        if k % 2 == 1 {
+            return None;
+        }
+        return Some((k as float) / 2.0);
+    }
+
+    #[inline(never)]
+    pub fn check(int k) -> Result<int, string> {
+        if k > self.base {
+            return Err(format("%i too big", k));
+        }
+        return Ok(k * 2);
+    }
+
+    #[inline(never)]
+    pub fn shape(int k) -> Shape {
+        if k == 0 {
+            return Shape::Empty;
+        }
+        return Shape::Dot(k + self.base);
+    }
+
+    #[inline(never)]
+    pub fn point(int k) -> P2 {
+        return new P2(self.base, k);
+    }
+
+    #[inline(never)]
+    pub fn span(int n) -> Range<int> {
+        return self.base..n;
+    }
+
+    #[inline(never)]
+    pub fn countdown(int k) -> Option<int> {
+        if k == 0 {
+            return Some(self.base);
+        }
+        return self.countdown(k - 1);
+    }
+
+    #[inline(never)]
+    pub fn both(int a, int b) -> Result<int, string> {
+        let x = self.check(a)?;
+        let y = self.check(b)?;
+        return Ok(x + y);
+    }
+
+    #[inline(never)]
+    pub fn sum_at(int a, int b) -> int {
+        let (p, q) = self.pair(a);
+        return match self.at(b) {
+            Some(v) => v + p + q,
+            None => p + q,
+        };
+    }
+
+    #[inline(never)]
+    pub static fn make(int k) -> Option<int> {
+        return Some(k * 10);
+    }
+}
+
+readonly class Frozen {
+    pub base: int,
+}
+
+impl Frozen {
+    #[inline(never)]
+    pub fn at(int k) -> Option<int> {
+        return Some(self.base - k);
+    }
+
+    #[inline(never)]
+    pub fn pair(int k) -> (int, int) {
+        return (k, self.base);
+    }
+}
+
+class Box<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Box<T> {
+    #[inline(never)]
+    pub fn count(int k) -> Option<int> {
+        if k > self.n {
+            return None;
+        }
+        return Some(self.n - k);
+    }
+
+    #[inline(never)]
+    pub fn tagged(int k) -> (int, int) {
+        return (self.n, k);
+    }
+
+    #[inline(never)]
+    pub fn get_or(int k) -> Option<T> {
+        if k > self.n {
+            return None;
+        }
+        return Some(self.item);
+    }
+}
+
+trait Peek<S> {
+    fn peek(S s, int k) -> Option<int> {}
+}
+
+impl Peek for Bag {
+    #[inline(never)]
+    pub fn peek(Bag b, int k) -> Option<int> {
+        return b.at(k + 1);
+    }
+}
+
+fn peek_twice<T: Peek>(T x) -> int {
+    let a = match x.peek(1) {
+        Some(v) => v,
+        None => 0,
+    };
+    let b = match x.peek(-5) {
+        Some(v) => v,
+        None => 100,
+    };
+    return a + b;
+}
+
+fn shared_at<T>(Bag b, T x, int k) -> Option<int> {
+    let _ = x;
+    return b.at(k);
+}
+
+fn through(int -> Option<int> f, int k) -> Option<int> {
+    return f(k);
+}
+
+fn opt_or(Option<int> o, int d) -> int {
+    return match o {
+        Some(v) => v,
+        None => d,
+    };
+}
+
+test("direct calls of each two-word shape") {
+    let b = new Bag(3);
+    assert!(b.at(2) == Option::Some(5));
+    assert!(b.at(-1) == Option::None);
+    let (p, q) = b.pair(4);
+    assert!(p == 3 && q == 12);
+    assert!(b.pair(2) == (3, 6));
+    let (i, f) = b.mixed(7);
+    assert!(i == 7 && f == 1.5);
+    assert!(b.half(4) == Option::Some(2.0));
+    assert!(b.half(3) == Option::None);
+    assert!(b.check(2) == Result::Ok(4));
+    assert!(b.check(9) == Result::Err("9 too big"));
+    let s = match b.shape(2) {
+        Shape::Dot(v) => v,
+        Shape::Empty => -1,
+    };
+    assert!(s == 5);
+    let e = match b.shape(0) {
+        Shape::Dot(v) => v,
+        Shape::Empty => -1,
+    };
+    assert!(e == -1);
+    let pt = b.point(8);
+    assert!(pt.x == 3 && pt.y == 8);
+    let total = 0;
+    for j in b.span(6) {
+        total = total + j;
+    }
+    assert!(total == 12);
+}
+
+test("results stored, compared, matched and passed on") {
+    let b = new Bag(1);
+    let xs = Vec::new();
+    let k = 0;
+    while k < 4 {
+        xs.push(b.at(k - 1));
+        k = k + 1;
+    }
+    assert!(xs == Vec::from([Option::None, Option::Some(1), Option::Some(2), Option::Some(3)]));
+    let ps = Vec::from([b.pair(1), b.pair(2)]);
+    assert!(ps[1] == (1, 2));
+    assert!(opt_or(b.at(4), 0) == 5);
+    assert!(opt_or(b.at(-4), 9) == 9);
+    let o = b.at(1);
+    o = b.at(2);
+    assert!(o == Option::Some(3));
+    assert!(format("%v %v", b.at(0), b.pair(3)) == "Some(1) (1, 3)");
+}
+
+test("recursion, ? and a method calling its siblings") {
+    let b = new Bag(6);
+    assert!(b.countdown(5) == Option::Some(6));
+    assert!(b.both(1, 2) == Result::Ok(6));
+    assert!(b.both(1, 7) == Result::Err("7 too big"));
+    assert!(b.sum_at(2, 1) == 6 + 7 + 12);
+    assert!(b.sum_at(2, -1) == 6 + 12);
+}
+
+test("a static method and a readonly class's methods") {
+    assert!(Bag::make(4) == Option::Some(40));
+    let r = new Frozen(10);
+    assert!(r.at(3) == Option::Some(7));
+    assert!(r.pair(2) == (2, 10));
+    let ro = readonly new Bag(2);
+    assert!(ro.at(1) == Option::Some(3));
+}
+
+test("a generic class's methods") {
+    let a = new Box("s", 5);
+    assert!(a.count(2) == Option::Some(3));
+    assert!(a.count(9) == Option::None);
+    assert!(a.tagged(4) == (5, 4));
+    assert!(a.get_or(1) == Option::Some("s"));
+    let c = new Box(7, 2);
+    assert!(c.count(1) == Option::Some(1));
+    assert!(c.get_or(1) == Option::Some(7));
+    assert!(c.get_or(3) == Option::None);
+    let d = new Box((1, 2), 3);
+    assert!(d.tagged(0) == (3, 0));
+    assert!(d.get_or(0) == Option::Some((1, 2)));
+    let e = new Box(Option::Some(4), 1);
+    assert!(e.get_or(0) == Option::Some(Option::Some(4)));
+}
+
+test("a partial application of a method") {
+    let b = new Bag(10);
+    let f = b.at();
+    assert!(f(1) == Option::Some(11));
+    assert!(f(-1) == Option::None);
+    assert!(through(f, 5) == Option::Some(15));
+    assert!(b.at(2) == Option::Some(12));
+}
+
+test("a trait method directly, through a bound and an existential") {
+    let b = new Bag(2);
+    assert!(b.peek(1) == Option::Some(4));
+    assert!(Peek::peek(b, -9) == Option::None);
+    assert!(peek_twice(b) == 4 + 100);
+    let p: Peek = b;
+    assert!(p.peek(0) == Option::Some(3));
+}
+
+test("from a shared generic body") {
+    let b = new Bag(4);
+    assert!(shared_at(b, "x", 1) == Option::Some(5));
+    assert!(shared_at(b, 1.5, -1) == Option::None);
+    assert!(shared_at(b, (1, 2), 0) == Option::Some(4));
+}

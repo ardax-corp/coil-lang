@@ -1,0 +1,346 @@
+// A body with more live values than a frame has registers still compiles and
+// runs (#2272).
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+#[inline(never)]
+fn make(int n) -> Box {
+    return new Box(n);
+}
+
+test("300 live locals") {
+    let a0 = make(0);
+    let a1 = make(1);
+    let a2 = make(2);
+    let a3 = make(3);
+    let a4 = make(4);
+    let a5 = make(5);
+    let a6 = make(6);
+    let a7 = make(7);
+    let a8 = make(8);
+    let a9 = make(9);
+    let a10 = make(10);
+    let a11 = make(11);
+    let a12 = make(12);
+    let a13 = make(13);
+    let a14 = make(14);
+    let a15 = make(15);
+    let a16 = make(16);
+    let a17 = make(17);
+    let a18 = make(18);
+    let a19 = make(19);
+    let a20 = make(20);
+    let a21 = make(21);
+    let a22 = make(22);
+    let a23 = make(23);
+    let a24 = make(24);
+    let a25 = make(25);
+    let a26 = make(26);
+    let a27 = make(27);
+    let a28 = make(28);
+    let a29 = make(29);
+    let a30 = make(30);
+    let a31 = make(31);
+    let a32 = make(32);
+    let a33 = make(33);
+    let a34 = make(34);
+    let a35 = make(35);
+    let a36 = make(36);
+    let a37 = make(37);
+    let a38 = make(38);
+    let a39 = make(39);
+    let a40 = make(40);
+    let a41 = make(41);
+    let a42 = make(42);
+    let a43 = make(43);
+    let a44 = make(44);
+    let a45 = make(45);
+    let a46 = make(46);
+    let a47 = make(47);
+    let a48 = make(48);
+    let a49 = make(49);
+    let a50 = make(50);
+    let a51 = make(51);
+    let a52 = make(52);
+    let a53 = make(53);
+    let a54 = make(54);
+    let a55 = make(55);
+    let a56 = make(56);
+    let a57 = make(57);
+    let a58 = make(58);
+    let a59 = make(59);
+    let a60 = make(60);
+    let a61 = make(61);
+    let a62 = make(62);
+    let a63 = make(63);
+    let a64 = make(64);
+    let a65 = make(65);
+    let a66 = make(66);
+    let a67 = make(67);
+    let a68 = make(68);
+    let a69 = make(69);
+    let a70 = make(70);
+    let a71 = make(71);
+    let a72 = make(72);
+    let a73 = make(73);
+    let a74 = make(74);
+    let a75 = make(75);
+    let a76 = make(76);
+    let a77 = make(77);
+    let a78 = make(78);
+    let a79 = make(79);
+    let a80 = make(80);
+    let a81 = make(81);
+    let a82 = make(82);
+    let a83 = make(83);
+    let a84 = make(84);
+    let a85 = make(85);
+    let a86 = make(86);
+    let a87 = make(87);
+    let a88 = make(88);
+    let a89 = make(89);
+    let a90 = make(90);
+    let a91 = make(91);
+    let a92 = make(92);
+    let a93 = make(93);
+    let a94 = make(94);
+    let a95 = make(95);
+    let a96 = make(96);
+    let a97 = make(97);
+    let a98 = make(98);
+    let a99 = make(99);
+    let a100 = make(100);
+    let a101 = make(101);
+    let a102 = make(102);
+    let a103 = make(103);
+    let a104 = make(104);
+    let a105 = make(105);
+    let a106 = make(106);
+    let a107 = make(107);
+    let a108 = make(108);
+    let a109 = make(109);
+    let a110 = make(110);
+    let a111 = make(111);
+    let a112 = make(112);
+    let a113 = make(113);
+    let a114 = make(114);
+    let a115 = make(115);
+    let a116 = make(116);
+    let a117 = make(117);
+    let a118 = make(118);
+    let a119 = make(119);
+    let a120 = make(120);
+    let a121 = make(121);
+    let a122 = make(122);
+    let a123 = make(123);
+    let a124 = make(124);
+    let a125 = make(125);
+    let a126 = make(126);
+    let a127 = make(127);
+    let a128 = make(128);
+    let a129 = make(129);
+    let a130 = make(130);
+    let a131 = make(131);
+    let a132 = make(132);
+    let a133 = make(133);
+    let a134 = make(134);
+    let a135 = make(135);
+    let a136 = make(136);
+    let a137 = make(137);
+    let a138 = make(138);
+    let a139 = make(139);
+    let a140 = make(140);
+    let a141 = make(141);
+    let a142 = make(142);
+    let a143 = make(143);
+    let a144 = make(144);
+    let a145 = make(145);
+    let a146 = make(146);
+    let a147 = make(147);
+    let a148 = make(148);
+    let a149 = make(149);
+    let a150 = make(150);
+    let a151 = make(151);
+    let a152 = make(152);
+    let a153 = make(153);
+    let a154 = make(154);
+    let a155 = make(155);
+    let a156 = make(156);
+    let a157 = make(157);
+    let a158 = make(158);
+    let a159 = make(159);
+    let a160 = make(160);
+    let a161 = make(161);
+    let a162 = make(162);
+    let a163 = make(163);
+    let a164 = make(164);
+    let a165 = make(165);
+    let a166 = make(166);
+    let a167 = make(167);
+    let a168 = make(168);
+    let a169 = make(169);
+    let a170 = make(170);
+    let a171 = make(171);
+    let a172 = make(172);
+    let a173 = make(173);
+    let a174 = make(174);
+    let a175 = make(175);
+    let a176 = make(176);
+    let a177 = make(177);
+    let a178 = make(178);
+    let a179 = make(179);
+    let a180 = make(180);
+    let a181 = make(181);
+    let a182 = make(182);
+    let a183 = make(183);
+    let a184 = make(184);
+    let a185 = make(185);
+    let a186 = make(186);
+    let a187 = make(187);
+    let a188 = make(188);
+    let a189 = make(189);
+    let a190 = make(190);
+    let a191 = make(191);
+    let a192 = make(192);
+    let a193 = make(193);
+    let a194 = make(194);
+    let a195 = make(195);
+    let a196 = make(196);
+    let a197 = make(197);
+    let a198 = make(198);
+    let a199 = make(199);
+    let a200 = make(200);
+    let a201 = make(201);
+    let a202 = make(202);
+    let a203 = make(203);
+    let a204 = make(204);
+    let a205 = make(205);
+    let a206 = make(206);
+    let a207 = make(207);
+    let a208 = make(208);
+    let a209 = make(209);
+    let a210 = make(210);
+    let a211 = make(211);
+    let a212 = make(212);
+    let a213 = make(213);
+    let a214 = make(214);
+    let a215 = make(215);
+    let a216 = make(216);
+    let a217 = make(217);
+    let a218 = make(218);
+    let a219 = make(219);
+    let a220 = make(220);
+    let a221 = make(221);
+    let a222 = make(222);
+    let a223 = make(223);
+    let a224 = make(224);
+    let a225 = make(225);
+    let a226 = make(226);
+    let a227 = make(227);
+    let a228 = make(228);
+    let a229 = make(229);
+    let a230 = make(230);
+    let a231 = make(231);
+    let a232 = make(232);
+    let a233 = make(233);
+    let a234 = make(234);
+    let a235 = make(235);
+    let a236 = make(236);
+    let a237 = make(237);
+    let a238 = make(238);
+    let a239 = make(239);
+    let a240 = make(240);
+    let a241 = make(241);
+    let a242 = make(242);
+    let a243 = make(243);
+    let a244 = make(244);
+    let a245 = make(245);
+    let a246 = make(246);
+    let a247 = make(247);
+    let a248 = make(248);
+    let a249 = make(249);
+    let a250 = make(250);
+    let a251 = make(251);
+    let a252 = make(252);
+    let a253 = make(253);
+    let a254 = make(254);
+    let a255 = make(255);
+    let a256 = make(256);
+    let a257 = make(257);
+    let a258 = make(258);
+    let a259 = make(259);
+    let a260 = make(260);
+    let a261 = make(261);
+    let a262 = make(262);
+    let a263 = make(263);
+    let a264 = make(264);
+    let a265 = make(265);
+    let a266 = make(266);
+    let a267 = make(267);
+    let a268 = make(268);
+    let a269 = make(269);
+    let a270 = make(270);
+    let a271 = make(271);
+    let a272 = make(272);
+    let a273 = make(273);
+    let a274 = make(274);
+    let a275 = make(275);
+    let a276 = make(276);
+    let a277 = make(277);
+    let a278 = make(278);
+    let a279 = make(279);
+    let a280 = make(280);
+    let a281 = make(281);
+    let a282 = make(282);
+    let a283 = make(283);
+    let a284 = make(284);
+    let a285 = make(285);
+    let a286 = make(286);
+    let a287 = make(287);
+    let a288 = make(288);
+    let a289 = make(289);
+    let a290 = make(290);
+    let a291 = make(291);
+    let a292 = make(292);
+    let a293 = make(293);
+    let a294 = make(294);
+    let a295 = make(295);
+    let a296 = make(296);
+    let a297 = make(297);
+    let a298 = make(298);
+    let a299 = make(299);
+    assert!(
+        a0.n + a1.n + a2.n + a3.n + a4.n + a5.n + a6.n + a7.n + a8.n + a9.n + a10.n + a11.n + a12.n +
+        a13.n + a14.n + a15.n + a16.n + a17.n + a18.n + a19.n + a20.n + a21.n + a22.n + a23.n +
+        a24.n + a25.n + a26.n + a27.n + a28.n + a29.n + a30.n + a31.n + a32.n + a33.n + a34.n +
+        a35.n + a36.n + a37.n + a38.n + a39.n + a40.n + a41.n + a42.n + a43.n + a44.n + a45.n +
+        a46.n + a47.n + a48.n + a49.n + a50.n + a51.n + a52.n + a53.n + a54.n + a55.n + a56.n +
+        a57.n + a58.n + a59.n + a60.n + a61.n + a62.n + a63.n + a64.n + a65.n + a66.n + a67.n +
+        a68.n + a69.n + a70.n + a71.n + a72.n + a73.n + a74.n + a75.n + a76.n + a77.n + a78.n +
+        a79.n + a80.n + a81.n + a82.n + a83.n + a84.n + a85.n + a86.n + a87.n + a88.n + a89.n +
+        a90.n + a91.n + a92.n + a93.n + a94.n + a95.n + a96.n + a97.n + a98.n + a99.n + a100.n +
+        a101.n + a102.n + a103.n + a104.n + a105.n + a106.n + a107.n + a108.n + a109.n + a110.n +
+        a111.n + a112.n + a113.n + a114.n + a115.n + a116.n + a117.n + a118.n + a119.n + a120.n +
+        a121.n + a122.n + a123.n + a124.n + a125.n + a126.n + a127.n + a128.n + a129.n + a130.n +
+        a131.n + a132.n + a133.n + a134.n + a135.n + a136.n + a137.n + a138.n + a139.n + a140.n +
+        a141.n + a142.n + a143.n + a144.n + a145.n + a146.n + a147.n + a148.n + a149.n + a150.n +
+        a151.n + a152.n + a153.n + a154.n + a155.n + a156.n + a157.n + a158.n + a159.n + a160.n +
+        a161.n + a162.n + a163.n + a164.n + a165.n + a166.n + a167.n + a168.n + a169.n + a170.n +
+        a171.n + a172.n + a173.n + a174.n + a175.n + a176.n + a177.n + a178.n + a179.n + a180.n +
+        a181.n + a182.n + a183.n + a184.n + a185.n + a186.n + a187.n + a188.n + a189.n + a190.n +
+        a191.n + a192.n + a193.n + a194.n + a195.n + a196.n + a197.n + a198.n + a199.n + a200.n +
+        a201.n + a202.n + a203.n + a204.n + a205.n + a206.n + a207.n + a208.n + a209.n + a210.n +
+        a211.n + a212.n + a213.n + a214.n + a215.n + a216.n + a217.n + a218.n + a219.n + a220.n +
+        a221.n + a222.n + a223.n + a224.n + a225.n + a226.n + a227.n + a228.n + a229.n + a230.n +
+        a231.n + a232.n + a233.n + a234.n + a235.n + a236.n + a237.n + a238.n + a239.n + a240.n +
+        a241.n + a242.n + a243.n + a244.n + a245.n + a246.n + a247.n + a248.n + a249.n + a250.n +
+        a251.n + a252.n + a253.n + a254.n + a255.n + a256.n + a257.n + a258.n + a259.n + a260.n +
+        a261.n + a262.n + a263.n + a264.n + a265.n + a266.n + a267.n + a268.n + a269.n + a270.n +
+        a271.n + a272.n + a273.n + a274.n + a275.n + a276.n + a277.n + a278.n + a279.n + a280.n +
+        a281.n + a282.n + a283.n + a284.n + a285.n + a286.n + a287.n + a288.n + a289.n + a290.n +
+        a291.n + a292.n + a293.n + a294.n + a295.n + a296.n + a297.n + a298.n + a299.n == 44850,
+    );
+}

@@ -1,0 +1,69 @@
+// A generator suspended at a `yield` keeps its frame's objects on its own
+// stack. Once nothing can resume it, those objects go too: when its last
+// owner lets go, and when it only lives in a cycle through what it holds.
+use tests::assert;
+use gc::collect;
+
+static let drops: int = 0;
+
+class Tracked {
+    pub n: int,
+}
+
+impl Tracked {
+    fn drop() {
+        drops += 1;
+    }
+}
+
+gen fn holds(int k) {
+    let t = new Tracked(k);
+    yield 0;
+    yield t.n;
+}
+
+fn abandon_one(int k) -> int {
+    let g = holds(k);
+    return resume g;
+}
+
+test("an abandoned generator frees what its frame holds") {
+    drops = 0;
+    let i = 0;
+    while i < 100 {
+        assert!(abandon_one(i) == 0);
+        i += 1;
+    }
+    collect();
+    assert!(drops == 100);
+}
+
+shared class Holder {
+    pub g: Option<coroutine<int>>,
+}
+
+gen fn holds_its_holder(Holder h) {
+    let t = new Tracked(1);
+    yield 0;
+    if h.g.is_some() {
+        yield t.n;
+    }
+}
+
+fn close_a_cycle() {
+    let h = new Holder(None);
+    let g = holds_its_holder(h);
+    let _ = resume g;
+    h.g = Some(g);
+}
+
+test("a suspended generator in a cycle is collected") {
+    drops = 0;
+    let i = 0;
+    while i < 100 {
+        close_a_cycle();
+        i += 1;
+    }
+    collect();
+    assert!(drops == 100);
+}

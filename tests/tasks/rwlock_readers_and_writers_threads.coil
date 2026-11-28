@@ -1,0 +1,29 @@
+// Threads that mix `with_write` and `with_read` on one `RwLock`: a reader's
+// release while a writer waits ends the read hold, so the writer gets it
+// (#2861).
+use tests::assert;
+use thread::{join, rwlock, spawn, with_read, with_write, RwLock, Thread};
+
+fn worker(RwLock<int> l) -> int {
+    let i = 0;
+    while i < 25 {
+        let _ = with_write(l, fn (int n) => (n + 2, 0));
+        let _ = with_read(l, fn (int n) => n);
+        i += 1;
+    }
+    return 0;
+}
+
+test("eight threads read and write one lock") {
+    let l: RwLock<int> = rwlock(0).ok() ?? panic "rwlock";
+    let hs: Vec<Thread<int>> = Vec::new();
+    let i = 0;
+    while i < 8 {
+        hs.push(spawn(worker, l).ok() ?? panic "spawn");
+        i += 1;
+    }
+    for h in hs {
+        let _ = join(h);
+    }
+    assert!(with_read(l, fn (int n) => n).unwrap_or(-1) == 400);
+}

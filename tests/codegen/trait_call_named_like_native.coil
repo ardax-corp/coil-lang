@@ -1,0 +1,70 @@
+// A trait method called through its trait (`Wave::math_floor(w)`,
+// `T::now()`) runs the impl, whatever host native has the method's name:
+// the caller is not pure, and every call of it runs (#2437).
+use tests::assert;
+
+static let HITS: int = 0;
+
+class W {
+    pub x: float,
+}
+
+trait Wave<T> {
+    fn math_floor(T w) -> float {}
+    static fn math_sqrt() -> float {}
+}
+
+impl Wave for W {
+    fn math_floor(W w) -> float {
+        HITS = HITS + 1;
+        return w.x;
+    }
+    static fn math_sqrt() -> float {
+        HITS = HITS + 1;
+        return 2.0;
+    }
+}
+
+#[inline(never)]
+fn level(W w) -> float {
+    return Wave::math_floor(w);
+}
+
+#[inline(never)]
+fn root() -> float {
+    return W::math_sqrt();
+}
+
+#[inline(never)]
+fn root_of<T: Wave>(T w) -> float {
+    return T::math_sqrt();
+}
+
+test("a caller of a trait method named like a pure native runs every time") {
+    let w = new W(1.5);
+    HITS = 0;
+    let acc = 0.0;
+    let i = 0;
+    while i < 10 {
+        acc = acc + level(w);
+        level(w);
+        i += 1;
+    }
+    assert!(acc == 15.0);
+    assert!(HITS == 20);
+}
+
+test("the same for a trait's static method, on a type and on a type parameter") {
+    let w = new W(1.5);
+    HITS = 0;
+    let acc = 0.0;
+    let i = 0;
+    while i < 10 {
+        acc = acc + root() + root_of(w);
+        root();
+        root_of(w);
+        i += 1;
+    }
+    assert!(acc == 40.0);
+    assert!(HITS == 40);
+}

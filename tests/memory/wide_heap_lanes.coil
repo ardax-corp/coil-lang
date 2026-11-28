@@ -1,0 +1,158 @@
+// A `Vec` of a tuple nested at any depth whose leaves are numbers or heap
+// words (`((string, int), int)`, `(Handle, int, int)`) keeps every leaf of
+// each element in place, one lane each, its heap leaves pointer lanes the
+// counts and the collector see. Reads, stores, pushes, `pop` / `remove` /
+// `insert` and `for` patterns work on the leaves; an array that goes on to
+// code reading one word per element turns into boxed tuples, nested as its
+// type, in place first, and lane code still reads and writes it after.
+use tests::assert;
+use gc::collect;
+
+static let drops: int = 0;
+
+class Handle {
+    pub id: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+fn first<T>(Vec<T> v) -> T {
+    return v[0];
+}
+
+fn grow<T>(Vec<T> v, T x) -> Vec<T> {
+    v.push(x);
+    return v;
+}
+
+#[inline(never)]
+fn tag(int i) -> ((string, int), int) {
+    return (("t" + i.show(), i), i * 10);
+}
+
+#[inline(never)]
+fn tags(int n) -> Vec<((string, int), int)> {
+    let v: Vec<((string, int), int)> = [];
+    let i = 0;
+    while i < n {
+        v.push(tag(i));
+        i += 1;
+    }
+    return v;
+}
+
+test("nested elements with a string leaf") {
+    let v = tags(6);
+    assert!(v.len() == 6);
+    assert!(v[2][0][0] == "t2" && v[2][0][1] == 2 && v[2][1] == 20);
+    v[3] = (("x" + "y", 7), 8);
+    let ((s, a), b) = v[3];
+    assert!(s == "xy" && a == 7 && b == 8);
+    let inner = v[4][0];
+    assert!(inner[0] == "t4");
+    let names = "";
+    let total = 0;
+    for ((name, n), m) in v {
+        names = names + name;
+        total += n + m;
+    }
+    assert!(names == "t0t1t2xyt4t5");
+    assert!(total == (0 + 1 + 2 + 4 + 5) * 11 + 15);
+    for (pair, _) in v {
+        total += pair[1];
+    }
+    assert!(total == 147 + 19);
+    let popped = v.pop();
+    assert!(popped == Option::Some((("t5", 5), 50)));
+    let removed = v.remove(0);
+    assert!(removed == Option::Some((("t0", 0), 0)));
+    v.insert(1, (("in", 1), 2));
+    assert!(v[1][0][0] == "in" && v[2][0][0] == "t2" && v[3][0][0] == "xy" && v.len() == 5);
+}
+
+#[inline(never)]
+fn handles(int n) -> Vec<(Handle, int, int)> {
+    let v: Vec<(Handle, int, int)> = [];
+    let i = 0;
+    while i < n {
+        v.push((new Handle(i), i, i * 2));
+        i += 1;
+    }
+    v[0] = (new Handle(100), 0, 0);
+    return v;
+}
+
+#[inline(never)]
+fn handle_sum() -> int {
+    let v = handles(5);
+    let s = 0;
+    for (h, a, b) in v {
+        s += h.id + a + b;
+    }
+    return s;
+}
+
+test("a heap leaf of a class with a drop is counted in its lane") {
+    drops = 0;
+    assert!(handle_sum() == 100 + 1 + 2 + 3 + 4 + 30);
+    collect();
+    assert!(drops == 6);
+}
+
+#[inline(never)]
+fn escaped() -> int {
+    let v: Vec<(Handle, (int, int))> = [];
+    v.push((new Handle(1), (1, 2)));
+    v.push((new Handle(2), (3, 4)));
+    // Generic code reads one word per element: the array turns into
+    // nested tuples in place, and lane code goes on with it.
+    let f = first(v);
+    let w = grow(v, (new Handle(3), (5, 6)));
+    w[0] = (new Handle(4), (7, 8));
+    let s = 0;
+    for (h, (a, b)) in w {
+        s += h.id * 100 + a * 10 + b;
+    }
+    return s + f[0].id * 1000 + f[1][1];
+}
+
+test("a generic escape boxes each element as its nested tuple") {
+    drops = 0;
+    assert!(escaped() == 478 + 234 + 356 + 1002);
+    collect();
+    assert!(drops == 4);
+}
+
+test("deeply nested and wide elements") {
+    let v: Vec<(int, (string, (int, int)), int)> = [(1, ("a", (2, 3)), 4)];
+    v.push((5, ("b" + "c", (6, 7)), 8));
+    assert!(v[1][1][0] == "bc" && v[1][1][1][1] == 7 && v[1][2] == 8);
+    let (x, (s, (y, z)), w) = v[0];
+    assert!(x + y + z + w == 10 && s == "a");
+    let sixteen: Vec<
+        (int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, string),
+    > = [];
+    sixteen.push((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, "end"));
+    sixteen.push((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, "more"));
+    assert!(sixteen[0][14] == 15 && sixteen[0][15] == "end");
+    assert!(sixteen[1][14] == 16 && sixteen[1][15] == "more");
+    let g = first(sixteen);
+    assert!(g[15] == "end" && g[0] == 1);
+}
+
+test("a cycle through a lane is collected") {
+    let i = 0;
+    while i < 20 {
+        let v: Vec<(Vec<int>, int, int)> = [];
+        let xs: Vec<int> = [1, 2];
+        v.push((xs, 1, 2));
+        v.push((xs, 3, 4));
+        assert!(v[1][0].len() == 2);
+        i += 1;
+    }
+    collect();
+}

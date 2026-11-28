@@ -1,0 +1,44 @@
+// @skip rc-check the heap check at every safepoint walks the 700k live words each time
+// Enough short strings freed at once that whole slab chunks go back to the
+// OS (resident past twice the live bytes and 32 MiB), then the freed and
+// released slots are carved and filled again: no word reads another's
+// bytes, and a word kept across the release stays intact.
+use tests::assert;
+use string::format;
+
+fn words(int n, int salt) -> Vec<string> {
+    let out: Vec<string> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        out.push(format("w%i_%i", i % 4099, salt));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn check(Vec<string> ws, int salt) -> bool {
+    let i = 0;
+    while i < ws.len() {
+        if ws[i] != format("w%i_%i", i % 4099, salt) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+test("words freed past the release threshold are carved again") {
+    let kept = words(1000, 1);
+    let r = 0;
+    while r < 3 {
+        let big = words(700000, r + 10);
+        assert!(check(big, r + 10));
+        r = r + 1;
+    }
+    let small = words(5000, 2);
+    assert!(check(small, 2));
+    assert!(check(kept, 1));
+    let again = words(700000, 3);
+    assert!(check(again, 3));
+    assert!(check(kept, 1));
+}

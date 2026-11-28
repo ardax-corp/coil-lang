@@ -270,18 +270,6 @@ impl<'s> Formatter<'s> {
         (ptr >= base && ptr + text.len() <= base + self.src.len()).then(|| ptr - base)
     }
 
-    /// Whether `name` (borrowed from the source) is followed by `()`. The
-    /// parser folds `Vec::new()` and `Vec::new` into one node; the source
-    /// keeps the spelling.
-    fn empty_parens_after(&self, name: &str) -> bool {
-        let Some(start) = self.offset_of(name) else {
-            return false;
-        };
-        let rest = self.src[start + name.len()..].trim_start();
-        rest.strip_prefix('(')
-            .is_some_and(|inner| inner.trim_start().starts_with(')'))
-    }
-
     /// Position of the `close` delimiter after `from`, skipping whitespace,
     /// comments and a trailing comma.
     fn closing_after(&self, from: usize, close: u8) -> Option<usize> {
@@ -780,6 +768,11 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_expression(&mut self, expr: &Expression<'_>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.fmt_expression_level(expr))
+    }
+
+    fn fmt_expression_level(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::Integer(n) => self.push_str(&n.to_string()),
             // Display never uses an exponent, which Coil cannot parse
@@ -798,7 +791,6 @@ impl<'s> Formatter<'s> {
                 self.push_str("\"");
             }
             Expression::Identifier(id) => self.push_str(id),
-            Expression::RegionMark => self.push_str("region"),
             Expression::Type(n) => self.push_str(n),
             Expression::Break => self.push_str("break"),
             Expression::Continue => self.push_str("continue"),
@@ -825,12 +817,8 @@ impl<'s> Formatter<'s> {
                 self.push_str(")");
             }
             Expression::ExprStatement(e) => {
-                // A statement `match` or `region { … }` ends at its `}`; no `;`.
-                let semi = match strip_groups(e).1.as_ref() {
-                    Expression::Match { .. } => false,
-                    Expression::Block(items) => !matches!(items.first().map(|i| i.1.as_ref()), Some(Expression::RegionMark)),
-                    _ => true,
-                };
+                // A statement `match` ends at its `}`; no `;`.
+                let semi = !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. });
                 self.with_trailing(usize::from(semi), |f| f.fmt_value(e));
                 if semi {
                     self.push_str(";");
@@ -886,14 +874,8 @@ impl<'s> Formatter<'s> {
                 }
             }
 
-            Expression::Negate(n) => {
-                self.push_str("-");
-                self.fmt_operand(n, PREC_UNARY);
-            }
-            Expression::Positive(n) => {
-                self.push_str("+");
-                self.fmt_operand(n, PREC_UNARY);
-            }
+            Expression::Negate(n) => self.fmt_prefix("-", |f| f.fmt_operand(n, PREC_UNARY)),
+            Expression::Positive(n) => self.fmt_prefix("+", |f| f.fmt_operand(n, PREC_UNARY)),
             Expression::Not(n) => {
                 self.push_str("~");
                 self.fmt_operand(n, PREC_UNARY);
@@ -991,8 +973,7 @@ impl<'s> Formatter<'s> {
                     AdjustOp::Dec => "--",
                 };
                 if *prefix {
-                    self.push_str(sym);
-                    self.fmt_output(target);
+                    self.fmt_prefix(sym, |f| f.fmt_output(target));
                 } else {
                     self.fmt_output(target);
                     self.push_str(sym);
@@ -1121,8 +1102,10 @@ impl<'s> Formatter<'s> {
                 self.fmt_delimited_outputs("(", ")", args, false);
             }
 
-            Expression::Use { path, name, alias } => {
-                self.fmt_use(path, name, alias.as_ref());
+            Expression::Use { path, name, alias, public, written } => {
+                let (path, name, alias) =
+                    written.as_deref().map_or((path, name, alias), |(p, n, a)| (p, n, a));
+                self.fmt_use(*public, path, name, alias.as_ref());
             }
 
             Expression::Variable(name, ty) => {
@@ -1298,9 +1281,6 @@ impl<'s> Formatter<'s> {
                 self.push_str(enum_name);
                 self.push_str("::");
                 self.push_str(variant_name);
-                if matches!(fields, EnumConstructPayload::Unit) && self.empty_parens_after(variant_name) {
-                    self.push_str("()");
-                }
                 self.fmt_construct_payload(fields);
             }
 
@@ -1737,12 +1717,6 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_block_braced(&mut self, items: &[Output<'_>]) {
-        if let Some((first, rest)) = items.split_first()
-            && matches!(first.1.as_ref(), Expression::RegionMark)
-        {
-            self.push_str("region ");
-            return self.fmt_block_braced(rest);
-        }
         let open = items
             .first()
             .and_then(|first| self.opening_before(self.content_start(first.0), b'{'));
@@ -1868,7 +1842,10 @@ impl<'s> Formatter<'s> {
         }
     }
 
-    fn fmt_use(&mut self, path: &[String], name: &str, alias: Option<&String>) {
+    fn fmt_use(&mut self, public: bool, path: &[String], name: &str, alias: Option<&String>) {
+        if public {
+            self.push_str("pub ");
+        }
         self.push_str("use ");
         for (i, segment) in path.iter().enumerate() {
             if i > 0 {
@@ -1898,13 +1875,14 @@ impl<'s> Formatter<'s> {
             while end < items.len()
                 && use_parts(items[end].1.as_ref())
                     .is_some_and(|(candidate, _, _)| candidate.first() == root.first())
+                && use_public(items[end].1.as_ref()) == use_public(items[start].1.as_ref())
             {
                 end += 1;
             }
             let group = &items[start..end];
             if group.len() < 2 {
                 if let Some((path, name, alias)) = use_parts(group[0].1.as_ref()) {
-                    self.fmt_use(path, name, alias);
+                    self.fmt_use(use_public(group[0].1.as_ref()), path, name, alias);
                 }
             } else if can_group_uses(group) {
                 self.fmt_grouped_use(group);
@@ -1914,7 +1892,7 @@ impl<'s> Formatter<'s> {
                         self.newline();
                     }
                     if let Some((path, name, alias)) = use_parts(item.1.as_ref()) {
-                        self.fmt_use(path, name, alias);
+                        self.fmt_use(use_public(item.1.as_ref()), path, name, alias);
                     }
                 }
             }
@@ -1935,6 +1913,9 @@ impl<'s> Formatter<'s> {
         let root_len = if same_namespace { first_path.len() } else { 1 };
         let root = &first_path[..root_len];
 
+        if use_public(items[0].1.as_ref()) {
+            self.push_str("pub ");
+        }
         self.push_str("use ");
         self.push_str(&root.join("::"));
         self.push_str("::{");
@@ -2059,6 +2040,7 @@ impl<'s> Formatter<'s> {
     fn fmt_construct_payload(&mut self, fields: &EnumConstructPayload<'_>) {
         match fields {
             EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Empty => self.push_str("()"),
             EnumConstructPayload::Tuple(args) => {
                 self.fmt_delimited_outputs("(", ")", args, false);
             }
@@ -2347,6 +2329,21 @@ impl<'s> Formatter<'s> {
     }
 
     /// Format `e`, in parentheses when it binds looser than `min`.
+    /// The prefix `op` (`-`, `+`, `--`, `++`) and then its operand, which
+    /// `operand` prints. An operand that starts with the operator's sign gets
+    /// a space before it: `- -a` glued is `--a`, a decrement, and `+ +a` is
+    /// `++a` (#2519). No other prefix operator forms a longer token with what
+    /// can start an operand.
+    fn fmt_prefix(&mut self, op: &str, operand: impl FnOnce(&mut Self)) {
+        self.push_str(op);
+        let at = self.out.len();
+        operand(self);
+        let sign = op.as_bytes()[op.len() - 1];
+        if self.out.as_bytes().get(at) == Some(&sign) {
+            self.out.insert(at, ' ');
+        }
+    }
+
     fn fmt_operand(&mut self, e: &Output<'_>, min: u8) {
         self.fmt_operand_expr(e.1.as_ref(), min);
     }
@@ -2380,7 +2377,7 @@ impl<'s> Formatter<'s> {
                 self.fmt_output(&args[0]);
             }
             Expression::Call { name, args } => {
-                self.fmt_output(name);
+                self.fmt_callee(name);
                 // A lone block lambda argument opens on the call's line:
                 // `scope(fn (Scope s) {` (#1796), as after a short receiver.
                 if let Some([arg]) = args.as_deref()
@@ -2394,6 +2391,19 @@ impl<'s> Formatter<'s> {
                 }
             }
             other => self.fmt_expression(other),
+        }
+    }
+
+    /// A call's callee. Parens around a field read stay: `(o.f)(x)` calls
+    /// the function the field `f` holds, `o.f(x)` the method `f` (#2472).
+    fn fmt_callee(&mut self, name: &Output<'_>) {
+        let inner = strip_groups(name);
+        if has_group(name) && matches!(inner.1.as_ref(), Expression::Access(..) | Expression::OptionalAccess(..)) {
+            self.push_str("(");
+            self.fmt_output(inner);
+            self.push_str(")");
+        } else {
+            self.fmt_output(name);
         }
     }
 
@@ -3049,9 +3059,18 @@ fn use_parts<'a, 'expr>(
     expr: &'a Expression<'expr>,
 ) -> Option<(&'a [String], &'a str, Option<&'a String>)> {
     match expr {
-        Expression::Use { path, name, alias } => Some((path, name, alias.as_ref())),
+        Expression::Use { path, name, alias, written, .. } => {
+            let (path, name, alias) =
+                written.as_deref().map_or((path, name, alias), |(p, n, a)| (p, n, a));
+            Some((path, name, alias.as_ref()))
+        }
         _ => None,
     }
+}
+
+/// Whether `expr` is a `pub use`.
+fn use_public(expr: &Expression<'_>) -> bool {
+    matches!(expr, Expression::Use { public: true, .. })
 }
 
 fn can_group_uses(items: &[Output<'_>]) -> bool {
@@ -3088,6 +3107,19 @@ fn strip_groups<'a, 'e>(mut output: &'a Output<'e>) -> &'a Output<'e> {
             Expression::Group(inner) | Expression::Expr(inner) => output = inner,
             Expression::Fragment(items) if items.len() == 1 => output = &items[0],
             _ => return output,
+        }
+    }
+}
+
+/// Whether `output` is wrapped in parentheses (above what [`strip_groups`]
+/// strips to).
+fn has_group(mut output: &Output<'_>) -> bool {
+    loop {
+        match output.1.as_ref() {
+            Expression::Group(_) => return true,
+            Expression::Expr(inner) => output = inner,
+            Expression::Fragment(items) if items.len() == 1 => output = &items[0],
+            _ => return false,
         }
     }
 }
@@ -3192,13 +3224,6 @@ mod tests {
     fn comptime_value_block_round_trips() {
         let src = "fn f() -> int {\n    let n = comptime {\n        let a = sq(3);\n        return a + 1;\n    };\n    return n;\n}\n";
         assert_eq!(format_source(src).unwrap(), src);
-    }
-
-    #[test]
-    fn region_blocks_round_trip() {
-        let src = "fn f(int n) -> int {\n    let region = n;\n    region {\n        let a = g(region);\n        if a > 1 {\n            return a;\n        }\n    }\n    let v = region {\n        let b = g(2);\n        b + 1\n    };\n    return v + region;\n}\n";
-        assert_eq!(format_source(src).unwrap(), src);
-        round_trip(src);
     }
 
     #[test]
@@ -3372,9 +3397,10 @@ fn main() {
 
     #[test]
     fn keeps_empty_call_parens_on_paths() {
-        let src = "fn main() {\n    let v: Vec<int> = Vec::new();\n    let n = Option::None;\n    let t = clock::mono_nanos();\n    let f = Vec::new;\n}\n";
+        let src = "fn main() {\n    let v: Vec<int> = Vec::new();\n    let n = Option::None;\n    let m = Option::None();\n    let t = clock::mono_nanos();\n    let f = Vec::new;\n    let g = Src::inc;\n    let h = Src::fresh();\n}\n";
         let formatted = format_source(src).unwrap();
         assert_eq!(formatted, src);
+        round_trip(src);
     }
 
     #[test]
@@ -3877,6 +3903,38 @@ fn main() { return; }
             text.match_indices(k).count()
                 + usize::from(k == " Access(") * text.match_indices("(Access(").count()
         })
+    }
+
+    #[test]
+    fn parens_around_a_field_callee_stay() {
+        // #2472: `(o.f)(1)` calls the function the field `f` holds;
+        // `o.f(1)` is the method call.
+        let chain = ".show().len()".repeat(7);
+        for (body, kept) in [
+            ("(o.f)(1)".to_string(), "(o.f)(1)"),
+            ("((o.f))(1)".to_string(), "(o.f)(1)"),
+            ("(a.b.f)(x)".to_string(), "(a.b.f)(x)"),
+            ("(o.f)(1)(2)".to_string(), "(o.f)(1)(2)"),
+            ("(o.f)(1).show()".to_string(), "(o.f)(1).show()"),
+            ("(self.f)(self.v)".to_string(), "(self.f)(self.v)"),
+            ("(o?.f)(1)".to_string(), "(o?.f)(1)"),
+            ("g((o.f)(1), (o.f)(2))".to_string(), "g((o.f)(1), (o.f)(2))"),
+            (format!("(o.f)(1){chain}"), "(o.f)(1)"),
+        ] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(kept), "{src}\n=>\n{once}");
+            stable(&once);
+        }
+        // A statement, too.
+        stable("fn main() {\n    (o.f)(1);\n}\n");
+        // Parens around any other callee are still dropped, and a method
+        // call stays one.
+        for (body, want) in [("(f)(1)", "f(1)"), ("(m::f)(1)", "m::f(1)"), ("(fs[0])(1)", "fs[0](1)"), ("o.f(1)", "o.f(1)")] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(&format!("let n = {want};")), "{src}\n=>\n{once}");
+        }
     }
 
     #[test]

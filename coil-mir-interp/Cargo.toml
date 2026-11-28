@@ -1,0 +1,10 @@
+[package]
+name = "coil-mir-interp"
+version = "0.1.0"
+edition = "2024"
+description = "Runs Coil's MIR directly: the engine for hosts with no machine code (docs/internals/mir-interp.md)"
+
+[dependencies]
+compiler = { path = "../compiler", default-features = false }
+common = { path = "../common" }
+machine = { path = "../machine", default-features = false }

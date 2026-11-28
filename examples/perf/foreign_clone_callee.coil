@@ -1,0 +1,13 @@
+// A foreign clone that calls another foreign clone in its loop (#2219):
+// `Drive<string>::run`, cloned from another module, calls
+// `Cell<string>::bump`, cloned from a third. Compiled callees first, the
+// clone of `run` splices `bump`'s clone, so its loop makes no calls.
+use xm_cell::cell;
+use xm_drive::Drive;
+use string::format;
+use io::sync::print;
+
+fn main() {
+    let d = new Drive(cell("x"));
+    let _ = print(format("%i\n", d.run(30000000)));
+}

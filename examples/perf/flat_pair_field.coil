@@ -1,0 +1,21 @@
+// CPU: a flat two-word class field written in a loop: both slots are
+// number slots, so a store keeps no count.
+use io::sync::print;
+use string::format;
+
+class P {
+    pub t: (int, int),
+    pub n: int,
+}
+
+fn main() {
+    let p = new P((0, 1), 0);
+    let i = 0;
+    while i < 10000000 {
+        let (a, b) = p.t;
+        p.t = (b, a + i % 7);
+        p.n += a;
+        i += 1;
+    }
+    let _ = print(format("%i\n", p.n));
+}

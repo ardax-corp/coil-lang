@@ -1,0 +1,85 @@
+// An enum constructor's payload and a class constructor's argument take
+// their declared type as the expected one, as a `let` or a call argument
+// does (#2781): an array literal builds the `Vec` declared there, and an
+// empty `[]` takes its type.
+use tests::assert;
+
+enum K {
+    V(Vec<int>),
+    R { xs: Vec<string>, n: int },
+}
+
+enum Gen<T> {
+    G(T),
+    N,
+}
+
+class C {
+    pub n: int,
+    pub v: Vec<int>,
+}
+
+fn size(K k) -> int {
+    return match k {
+        K::V(xs) => xs.len(),
+        K::R { xs, n } => xs.len() * 10 + n,
+    };
+}
+
+fn opt_len(Option<Vec<int>> o) -> int {
+    return match o {
+        Option::Some(v) => v.len(),
+        Option::None => -1,
+    };
+}
+
+fn made() -> Option<Vec<int>> {
+    return Option::Some([4, 5]);
+}
+
+test("a user enum's tuple and record payloads") {
+    let k = K::V([1, 2]);
+    let e = K::V([]);
+    let r = K::R { xs: ["a", "b"], n: 3 };
+    assert!(size(k) == 2 && size(e) == 0 && size(r) == 23);
+}
+
+test("a class constructor's empty literal, positional and named") {
+    let c = new C(5, []);
+    let d = new C(v: [], n: 2);
+    c.v.push(9);
+    assert!(c.v.len() == 1 && c.v[0] == 9 && d.v.len() == 0 && d.n == 2);
+}
+
+test("Option payloads: a let, a call argument, a result") {
+    let o: Option<Vec<int>> = Option::Some([1, 2]);
+    let e: Option<Vec<int>> = Option::Some([]);
+    assert!(opt_len(o) == 2 && opt_len(e) == 0);
+    assert!(opt_len(Option::Some([1, 2, 3])) == 3 && opt_len(made()) == 2);
+}
+
+test("a generic enum's payload and a nested Option") {
+    let g: Gen<Vec<int>> = Gen::G([1]);
+    let n: Option<Option<Vec<int>>> = Option::Some(Option::Some([7, 8]));
+    let a = match g {
+        Gen::G(v) => v.len(),
+        Gen::N => 0,
+    };
+    let b = match n {
+        Option::Some(Option::Some(v)) => v[1],
+        default => 0,
+    };
+    assert!(a == 1 && b == 8);
+}
+
+test("the payload is a Vec that grows") {
+    let k = K::V([1]);
+    let got = match k {
+        K::V(xs) => {
+            xs.push(2);
+            xs.len()
+        },
+        K::R { xs, n } => xs.len() + n,
+    };
+    assert!(got == 2);
+}

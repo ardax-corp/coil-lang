@@ -1,0 +1,170 @@
+// A bounded generic function that calls itself (#2540): the call passes
+// the dictionaries the body was given, its own dictionary parameters in the
+// shared body and its own instance in a per-type clone. Direct recursion,
+// at a `Vec` and an enum parameter, a recursive insert into a tree, mutual
+// recursion, a method of a generic class with a bounded impl, and
+// polymorphic recursion (the body calls itself at a growing type, so the
+// inner calls take the shared body). The `clone-budget-0` cell runs every
+// case on the shared bodies.
+use tests::assert;
+
+fn count<T: Show>(T x, int n) -> int {
+    if n == 0 {
+        return 0;
+    }
+    return 1 + count(x, n - 1);
+}
+
+fn shows<T: Show>(Vec<T> xs, int i) -> string {
+    if i == xs.len() {
+        return "";
+    }
+    return xs[i].show() + ";" + shows(xs, i + 1);
+}
+
+// No declared result: the call still forwards the bound.
+fn tally<T: Show>(T x, int n, Vec<string> out) {
+    if n > 0 {
+        out.push(x.show());
+        tally(x, n - 1, out);
+    }
+}
+
+enum Tree<T> {
+    Leaf,
+    Node(Tree<T>, T, Tree<T>),
+}
+
+fn insert<T: Ord>(Tree<T> t, T x) -> Tree<T> {
+    return match t {
+        Tree::Leaf => Tree::Node(Tree::Leaf, x, Tree::Leaf),
+        Tree::Node(l, v, r) => if x < v {
+            Tree::Node(insert(l, x), v, r)
+        } else {
+            Tree::Node(l, v, insert(r, x))
+        },
+    };
+}
+
+fn walk<T: Show>(Tree<T> t) -> string {
+    return match t {
+        Tree::Leaf => "",
+        Tree::Node(l, v, r) => walk(l) + v.show() + " " + walk(r),
+    };
+}
+
+fn build<T: Ord>(Vec<T> xs) -> Tree<T> {
+    let t: Tree<T> = Tree::Leaf;
+    for x in xs {
+        t = insert(t, x);
+    }
+    return t;
+}
+
+fn even<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return "even " + x.show();
+    }
+    return odd(x, n - 1);
+}
+
+fn odd<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return "odd " + x.show();
+    }
+    return even(x, n - 1);
+}
+
+class Node<T> {
+    pub v: T,
+    pub kids: Vec<Node<T>>,
+}
+
+impl Node<T: Show> {
+    pub fn render() -> string {
+        let s = self.v.show();
+        for k in self.kids {
+            s = s + "(" + k.render() + ")";
+        }
+        return s;
+    }
+
+    pub fn depth_of(int n) -> int {
+        if n == 0 {
+            return 0;
+        }
+        return 1 + self.depth_of(n - 1);
+    }
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+impl Show for Box<T: Show> {
+    fn show(Box<T> b) -> string {
+        return "[" + b.v.show() + "]";
+    }
+}
+
+fn nest<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return x.show();
+    }
+    return nest(new Box(x), n - 1);
+}
+
+fn pairs<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return x.show();
+    }
+    return pairs((x, n), n - 1);
+}
+
+fn wraps<T>(T x, int n) -> int {
+    if n == 0 {
+        return 0;
+    }
+    return 1 + wraps(Some(x), n - 1);
+}
+
+test("a bounded generic calls itself at its own type") {
+    assert!(count(1, 3) == 3);
+    assert!(count("s", 2) == 2);
+    assert!(count(1.5, 0) == 0);
+    assert!(count(Some("x"), 4) == 4);
+    assert!(shows([1, 2, 3], 0) == "1;2;3;");
+    assert!(shows(["a", "b"], 0) == "a;b;");
+    let out: Vec<string> = Vec::new();
+    tally(true, 2, out);
+    tally(7, 1, out);
+    assert!(out.len() == 3 && out[0] == "true" && out[2] == "7");
+}
+
+test("a recursive insert into a tree of an Ord type") {
+    assert!(walk(build([5, 2, 8, 1, 9])) == "1 2 5 8 9 ");
+    assert!(walk(build(["m", "c", "x"])) == "c m x ");
+    assert!(walk(build([2.5, -1.0])) == "-1.0 2.5 ");
+}
+
+test("two bounded generics call each other") {
+    assert!(even(1, 3) == "odd 1");
+    assert!(odd("s", 3) == "even s");
+    assert!(even(true, 4) == "even true");
+}
+
+test("a method of a generic class with a bounded impl calls itself") {
+    let t = new Node(1, [new Node(2, Vec::new()), new Node(3, [new Node(4, Vec::new())])]);
+    assert!(t.render() == "1(2)(3(4))");
+    assert!(t.depth_of(3) == 3);
+    let u = new Node("a", [new Node("b", Vec::new())]);
+    assert!(u.render() == "a(b)");
+}
+
+test("a bounded generic calls itself at a growing type") {
+    assert!(nest(1, 3) == "[[[1]]]");
+    assert!(nest("s", 1) == "[s]");
+    assert!(pairs(1, 2) == "((1, 2), 1)");
+    assert!(wraps(1, 3) == 3);
+    assert!(wraps("s", 0) == 0);
+}

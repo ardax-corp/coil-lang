@@ -1,5 +1,5 @@
 // Each lambda a body plans is queued as a function of its own when the
-// body lowers to MIR, not when its stack IL is emitted: lambdas on a cold
+// body lowers to MIR, not when code is emitted: lambdas on a cold
 // path, in a small function inlined into its caller, inside a loop, and
 // passed to a generic callee that boxes their arguments.
 use tests::assert;

@@ -1,0 +1,31 @@
+// A `float` goes through the thread natives as its word: sent on a
+// channel, a spawned thread's argument and result, a mutex's value (#2851).
+use tests::assert;
+use thread::{channel, join, mutex, recv, send, spawn, try_send, with_lock, Receiver, Sender};
+
+fn produce(Sender<float> tx) -> int {
+    let _ = send(tx, 2.5);
+    return 0;
+}
+
+test("a float sent on a channel comes back") {
+    let ends: (Sender<float>, Receiver<float>) = channel().ok() ?? panic "channel";
+    let _ = produce(ends[0]);
+    assert!(recv(ends[1]).unwrap_or(0.0) == 2.5);
+    let _ = try_send(ends[0], -0.125);
+    assert!(recv(ends[1]).unwrap_or(0.0) == -0.125);
+}
+
+test("a spawned thread takes and returns a float") {
+    let th = spawn(fn (float x) => x * 2.0, 2.5).ok() ?? panic "spawn";
+    let back: float = join(th).ok() ?? panic "join";
+    assert!(back == 5.0);
+}
+
+test("a mutex holds a float") {
+    let m = mutex(2.5).ok() ?? panic "mutex";
+    let n = with_lock(m, fn (float x) => (x + 1.0, x * 4.0)).ok() ?? panic "lock";
+    assert!(n == 10.0);
+    let again = with_lock(m, fn (float x) => (x, x)).ok() ?? panic "lock";
+    assert!(again == 3.5);
+}

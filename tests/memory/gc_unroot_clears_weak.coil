@@ -3,12 +3,14 @@ use gc::{collect, get, root, unroot, weak, upgrade};
 use io::{stdout, write};
 use string::to_bytes;
 
+// A fresh array, not a string literal: a literal lives as long as the
+// program, so a weak handle to it never clears.
 fn only_weak() {
-    let r = root("temp");
+    let r = root([1, 2, 3]);
     let v = match get(r) {
         Option::Some(x) => x,
         Option::None => {
-            return weak("");
+            return weak([0, 0, 0]);
         },
     };
     let w = weak(v);

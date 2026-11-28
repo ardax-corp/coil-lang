@@ -1,0 +1,6 @@
+// @expected E0410 — an absolute path to libc is the libc alias, always denied.
+extern "/lib/x86_64-linux-gnu/libc.so.6" {
+    fn abs(int x) -> int;
+}
+
+fn main() {}

@@ -1,0 +1,284 @@
+// After a `for` over an iterator, the iterator that shared the collection
+// is gone, so the next write need not copy it (#2821). Wherever another
+// name may still hold the collection or an element, the write still
+// copies and that name keeps its value.
+use tests::assert;
+use string::format;
+use collections::map::HashMap;
+use task::{scope, Scope, TaskError};
+
+class C {
+    pub x: int,
+}
+
+shared class Trace {
+    pub text: string,
+}
+
+class Shelf {
+    pub maps: Vec<HashMap<int, int>>,
+}
+
+class Bag {
+    pub items: Vec<C>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = C;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = C;
+    fn next(BagIter it) -> Option<C> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+// An iterator that keeps what it walks somewhere else as well.
+class Hoard {
+    pub items: Vec<int>,
+}
+
+class HoardIter {
+    pub h: Hoard,
+    pub i: int,
+}
+
+static let HOARDED: Vec<Hoard> = Vec::new();
+
+impl IntoIterator for Hoard {
+    type Item = int;
+    type IntoIter = HoardIter;
+    fn into_iter(Hoard h) -> HoardIter {
+        HOARDED.push(h);
+        return new HoardIter(h, 0);
+    }
+}
+
+impl Iterator for HoardIter {
+    type Item = int;
+    fn next(HoardIter it) -> Option<int> {
+        if it.i >= it.h.items.len() {
+            return None;
+        }
+        let v = it.h.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+fn total(HashMap<int, int> m) -> int {
+    let n = 0;
+    for p in m {
+        n += p.value;
+    }
+    return n;
+}
+
+fn first_key(HashMap<int, int> m) -> int {
+    for p in m {
+        return p.key;
+    }
+    return -1;
+}
+
+fn walk_and_keep(Shelf s, HashMap<int, int> m) -> int {
+    let n = 0;
+    for p in m {
+        n += p.value;
+    }
+    s.maps.push(m);
+    return n;
+}
+
+fn hoard_total(Hoard h) -> int {
+    let n = 0;
+    for x in h {
+        n += x;
+    }
+    return n;
+}
+
+gen fn values(HashMap<int, int> m) {
+    for p in m {
+        yield p.value;
+    }
+}
+
+fn keys(HashMap<int, int> m) -> string {
+    let s = "";
+    for p in m {
+        s = s + format("%i,", p.key);
+    }
+    return s;
+}
+
+fn one() -> HashMap<int, int> {
+    let m: HashMap<int, int> = HashMap::new();
+    let _ = m.insert(1, 10);
+    return m;
+}
+
+test("a callee walks the map; the caller grows it") {
+    let m = one();
+    let n = total(m);
+    let _ = m.insert(2, 20);
+    assert!(n == 10);
+    assert!(total(m) == 30);
+}
+
+test("a second name made before the walk keeps its value") {
+    let m = one();
+    let other = m;
+    let _ = total(m);
+    let _ = m.insert(2, 20);
+    assert!(other.len() == 1);
+    assert!(m.len() == 2);
+}
+
+test("a callee that walks the map and keeps it") {
+    let m = one();
+    let s = new Shelf(Vec::new());
+    let _ = walk_and_keep(s, m);
+    let _ = m.insert(2, 20);
+    assert!(s.maps[0].len() == 1);
+    assert!(m.len() == 2);
+}
+
+test("the loop body stores the map") {
+    let m = one();
+    let kept: Vec<HashMap<int, int>> = Vec::new();
+    for p in m {
+        kept.push(m);
+    }
+    let _ = m.insert(2, 20);
+    assert!(kept[0].len() == 1);
+    assert!(m.len() == 2);
+}
+
+test("the loop body passes the map to a callee that keeps it") {
+    let m = one();
+    let s = new Shelf(Vec::new());
+    for p in m {
+        s.maps.push(m);
+    }
+    let _ = m.insert(2, 20);
+    assert!(s.maps[0].len() == 1);
+}
+
+test("the loop body captures the map") {
+    let m = one();
+    let f: unit -> int = fn () => 0;
+    for p in m {
+        f = fn () use (m) => m.len();
+    }
+    let _ = m.insert(2, 20);
+    assert!(f() == 1);
+    assert!(m.len() == 2);
+}
+
+test("the loop body keeps an element; a write to it through the collection copies it") {
+    let b = new Bag(Vec::new());
+    b.items.push(new C(1));
+    b.items.push(new C(2));
+    let kept: Vec<C> = Vec::new();
+    for c in b {
+        kept.push(c);
+    }
+    b.items[0].x = 99;
+    b.items.push(new C(3));
+    assert!(kept[0].x == 1);
+    assert!(b.items[0].x == 99);
+    assert!(b.items.len() == 3);
+}
+
+test("an iterator that keeps the collection elsewhere") {
+    let h = new Hoard(Vec::new());
+    h.items.push(1);
+    let _ = hoard_total(h);
+    h.items.push(2);
+    let n = 0;
+    for x in h {
+        n += x;
+    }
+    h.items.push(3);
+    assert!(n == 3);
+    assert!(HOARDED[0].items.len() == 1);
+    assert!(HOARDED[1].items.len() == 2);
+    assert!(h.items.len() == 3);
+}
+
+test("a loop left early by break or return") {
+    let m = one();
+    let _ = m.insert(2, 20);
+    for p in m {
+        if p.key == 1 {
+            break;
+        }
+    }
+    let _ = m.insert(3, 30);
+    assert!(first_key(m) == 1);
+    let _ = m.insert(4, 40);
+    assert!(m.len() == 4);
+    assert!(keys(m) == "1,2,3,4,");
+}
+
+test("a generator suspended in the middle of its walk walks the old map") {
+    let m = one();
+    let _ = m.insert(2, 20);
+    let g = values(m);
+    let a = resume g;
+    let _ = m.insert(3, 30);
+    let b = resume g;
+    let _ = m.insert(4, 40);
+    assert!(a + b == 30);
+    assert!(m.len() == 4);
+    let later = values(m);
+    let s = 0;
+    for v in later {
+        s += v;
+    }
+    assert!(s == 100);
+}
+
+// The defer writes a map of the task's own (a defer on a shared local is
+// #2830).
+test("a task that panics in the middle of its walk; a defer writes the map") {
+    let t = new Trace("");
+    let r = scope(fn (Scope s) use (t) {
+        let _ = s.spawn(fn () use (t) {
+            let mm = one();
+            defer use (mut mm, t) {
+                let _ = mm.insert(9, 90);
+                t.text = keys(mm);
+            }
+            for p in mm {
+                if p.key == 1 {
+                    panic "stop";
+                }
+            }
+            0
+        });
+        0
+    });
+    let msg = match r {
+        Result::Err(TaskError::Panicked(m)) => m,
+        default => "none",
+    };
+    assert!(msg == "stop");
+    assert!(t.text == "1,9,");
+}

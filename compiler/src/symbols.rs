@@ -454,7 +454,7 @@ impl SymbolIndex {
                     visit_output(index, file, source, body);
                 }
                 // Expanded before this runs; its body is the expansion program's.
-                Expression::ComptimeBlock(_) | Expression::RegionMark => {}
+                Expression::ComptimeBlock(_) => {}
                 Expression::EnumDecl { variants, .. } => visit_outputs(index, file, source, variants),
                 Expression::EnumVariant { payload, .. } => match payload {
                     EnumVariantPayload::Unit => {}
@@ -475,7 +475,7 @@ impl SymbolIndex {
                 } => {
                     visit_path(index, file, source, enum_name, variant_name, &span);
                     match fields {
-                        EnumConstructPayload::Unit => {}
+                        EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
                         EnumConstructPayload::Tuple(parts) => visit_outputs(index, file, source, parts),
                         EnumConstructPayload::Record(fields) => {
                             for field in fields {

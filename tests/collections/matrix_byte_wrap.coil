@@ -1,0 +1,67 @@
+// Linear algebra on `byte` cells wraps each result modulo 256, as the
+// scalar operators do (coil-lang#882): `Matrix` `+`, `-`, negation and
+// `*`, `matmul`, `dot` and `cross`. A stored cell, a cell read and `%v`
+// agree.
+use string::format;
+use tests::assert;
+
+fn b(int n) -> byte {
+    return n as byte;
+}
+
+fn left() -> [[byte; 2]; 2] {
+    return [[250, 1], [2, 3]];
+}
+
+fn right() -> [[byte; 2]; 2] {
+    return [[10, 2], [2, 255]];
+}
+
+test("matrix add and subtract") {
+    let a = matrix(left());
+    let c = matrix(right());
+    let s = a + c;
+    assert!(s[0][0] == b(4) && s[1][1] == b(2));
+    let first: byte = s[0][0];
+    assert!(first == b(4));
+    assert!(format("%v %v", s[0], s[1]) == "[4, 3] [4, 2]", format("%v %v", s[0], s[1]));
+    let d = c - a;
+    assert!(format("%v %v", d[0], d[1]) == "[16, 1] [0, 252]", format("%v %v", d[0], d[1]));
+}
+
+test("matrix negation") {
+    let n = -matrix(left());
+    assert!(n[0][0] == b(6) && n[0][1] == b(255));
+    assert!(format("%v %v", n[0], n[1]) == "[6, 255] [254, 253]", format("%v %v", n[0], n[1]));
+}
+
+test("matrix product") {
+    let p = matrix(left()) * matrix(right());
+    assert!(p[0][0] == b(198) && p[1][1] == b(1));
+    assert!(format("%v %v", p[0], p[1]) == "[198, 243] [26, 1]", format("%v %v", p[0], p[1]));
+    let m = matmul(left(), right());
+    assert!(format("%v %v", m[0], m[1]) == "[198, 243] [26, 1]", format("%v %v", m[0], m[1]));
+}
+
+test("dot and cross") {
+    let u: [byte; 3] = [250, 3, 7];
+    let v: [byte; 3] = [10, 200, 9];
+    let d = dot(u, v);
+    assert!(d == b(91), format("%v", d));
+    let c = cross(u, v);
+    assert!(c[0] == b(163));
+    assert!(format("%v", c) == "[163, 124, 50]", format("%v", c));
+    let t = (b(250), b(3), b(7));
+    let w = (b(10), b(200), b(9));
+    assert!(dot(t, w) == b(91));
+    let ct = cross(t, w);
+    assert!(format("%v", ct) == "(163, 124, 50)", format("%v", ct));
+}
+
+test("bitwise cells stay masked and int cells exact") {
+    let sh = matrix(left()) << 2;
+    assert!(format("%v %v", sh[0], sh[1]) == "[232, 4] [8, 12]", format("%v %v", sh[0], sh[1]));
+    let i = matrix([[250, 1], [2, 3]]) + matrix([[10, 2], [2, 255]]);
+    assert!(i[0][0] == 260 && i[1][1] == 258);
+    assert!(dot([250, 3, 7], [10, 200, 9]) == 3163);
+}

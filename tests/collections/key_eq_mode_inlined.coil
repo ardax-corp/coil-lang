@@ -1,0 +1,157 @@
+// `key_index::eq_mode(k)` folds to the mode of `k`'s type in every body
+// that holds the call, also in a body that gets it by inlining: a map
+// generic only in its values, whose `find` hands a `string` key's mode to
+// `map_find`, finds the key when `get_or`, `has` or a caller of those
+// inlines `find` (#2975).
+use tests::assert;
+use key_index::{eq_mode, map_table, map_find, map_upsert, map_len};
+
+class Map<V> {
+    pub ix: Vec<int>,
+    pub keys: Vec<string>,
+    pub vals: Vec<V>,
+}
+
+impl Map<V> {
+    pub static fn new() -> Map<V> {
+        let keys: Vec<string> = Vec::new();
+        let vals: Vec<V> = Vec::new();
+        return new Map(map_table(0), keys, vals);
+    }
+
+    pub fn len() -> int {
+        return map_len(self.ix);
+    }
+
+    pub fn find(string k) -> int {
+        return map_find(self.ix, self.keys, k.hash(), k, eq_mode(k));
+    }
+
+    pub fn insert(string k, V v) -> bool {
+        let r = map_upsert(self.ix, self.keys, k.hash(), k, eq_mode(k));
+        if r >= 0 {
+            self.vals[r] = v;
+            return false;
+        }
+        self.keys.push(k);
+        self.vals.push(v);
+        return true;
+    }
+
+    pub fn get_or(string k, V d) -> V {
+        let s = self.find(k);
+        if s >= 0 {
+            return self.vals[s];
+        }
+        return d;
+    }
+
+    pub fn has(string k) -> bool {
+        return self.find(k) >= 0;
+    }
+}
+
+class IntMap<V> {
+    pub ix: Vec<int>,
+    pub keys: Vec<int>,
+    pub vals: Vec<V>,
+}
+
+impl IntMap<V> {
+    pub static fn new() -> IntMap<V> {
+        let keys: Vec<int> = Vec::new();
+        let vals: Vec<V> = Vec::new();
+        return new IntMap(map_table(0), keys, vals);
+    }
+
+    pub fn find(int k) -> int {
+        return map_find(self.ix, self.keys, k.hash(), k, eq_mode(k));
+    }
+
+    pub fn insert(int k, V v) {
+        let r = map_upsert(self.ix, self.keys, k.hash(), k, eq_mode(k));
+        if r >= 0 {
+            self.vals[r] = v;
+            return;
+        }
+        self.keys.push(k);
+        self.vals.push(v);
+    }
+
+    pub fn get_or(int k, V d) -> V {
+        let s = self.find(k);
+        if s >= 0 {
+            return self.vals[s];
+        }
+        return d;
+    }
+}
+
+fn total(Map<int> m, Vec<string> ks) -> int {
+    let t = 0;
+    for k in ks {
+        t += m.get_or(k, 1000);
+    }
+    return t;
+}
+
+test("string keys found through an inlined find") {
+    let m: Map<int> = Map::new();
+    let ks: Vec<string> = Vec::new();
+    let i = 0;
+    while i < 200 {
+        ks.push("k" + i.show());
+        assert!(m.insert(ks[i], i * 3));
+        i += 1;
+    }
+    assert!(m.len() == 200);
+    i = 0;
+    while i < 200 {
+        let k = "k" + i.show();
+        assert!(m.find(k) == i);
+        assert!(m.get_or(k, -1) == i * 3);
+        assert!(m.has(k));
+        i += 1;
+    }
+    assert!(m.get_or("k200", -1) == -1);
+    assert!(!m.has("nope"));
+}
+
+test("a caller of the inlining body finds the keys too") {
+    let m: Map<int> = Map::new();
+    let ks: Vec<string> = Vec::new();
+    let i = 0;
+    while i < 50 {
+        ks.push("w" + i.show());
+        m.insert(ks[i], i);
+        i += 1;
+    }
+    assert!(total(m, ks) == 49 * 50 / 2);
+    ks.push("absent");
+    assert!(total(m, ks) == 49 * 50 / 2 + 1000);
+}
+
+test("values of a class type") {
+    let m: Map<Vec<int>> = Map::new();
+    m.insert("a", [1, 2]);
+    m.insert("b", [3]);
+    let none: Vec<int> = Vec::new();
+    assert!(m.get_or("a", none).len() == 2);
+    assert!(m.get_or("b", none)[0] == 3);
+    assert!(m.get_or("c", none).len() == 0);
+}
+
+test("int keys found through an inlined find") {
+    let m: IntMap<string> = IntMap::new();
+    let i = 0;
+    while i < 300 {
+        m.insert(i * 7, i.show());
+        i += 1;
+    }
+    i = 0;
+    while i < 300 {
+        assert!(m.get_or(i * 7, "") == i.show());
+        i += 1;
+    }
+    assert!(m.get_or(1, "none") == "none");
+}

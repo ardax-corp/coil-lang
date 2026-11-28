@@ -22,3 +22,9 @@ COIL_MAX_WORKER_THREADS = { value = "1", force = false }
 # sections (COI-376 G3). rust-lld otherwise folds `.text.*` into `.text`.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-Wl,-z,keep-text-section-prefix"]
+
+# Windows gives a main thread 1 MiB, and `coil` compiles on its main thread: a
+# body with a hundred parameters overflowed that in a debug build. Match the
+# 8 MiB of Linux and macOS.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]

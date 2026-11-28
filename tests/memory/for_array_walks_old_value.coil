@@ -1,0 +1,208 @@
+// A `for` over a `Vec` or an array walks the value it had when the loop
+// began (#2827), as a `for` over an iterator does (#2819): a write to it in
+// the body, whether or not anything else shares it, is not seen by the
+// loop, and the length is read once. After the loop the write is there.
+// A read-only walk over a `Vec` that a `let w = mut v` borrows is legal.
+use tests::assert;
+use string::format;
+
+class C {
+    pub x: int,
+}
+
+class Bag {
+    pub items: Vec<int>,
+    pub n: int,
+}
+
+fn three() -> Vec<int> {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    return v;
+}
+
+fn show(Vec<int> v) -> string {
+    let s = "";
+    for x in v {
+        s = s + format("%i,", x);
+    }
+    return s;
+}
+
+// The body writes its parameter, which is the caller's place.
+fn walk_param(Vec<int> v) -> string {
+    let seen = "";
+    for x in v {
+        v[2] = 99;
+        seen = seen + format("%i,", x);
+    }
+    return seen;
+}
+
+fn set_last(Vec<int> v, int x) {
+    v[v.len() - 1] = x;
+}
+
+impl Bag {
+    pub fn walk() -> string {
+        let seen = "";
+        for x in self.items {
+            self.items[2] = 99;
+            self.n += 1;
+            seen = seen + format("%i,", x);
+        }
+        return seen;
+    }
+}
+
+test("a fresh Vec written ahead of the loop's position") {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    let seen = "";
+    for x in v {
+        v[2] = 99;
+        seen = seen + format("%i,", x);
+    }
+    assert!(seen == "1,2,3,");
+    assert!(v[2] == 99);
+}
+
+test("a shared Vec written ahead of the loop's position") {
+    let v = three();
+    let keep = v;
+    let seen = "";
+    for x in v {
+        v[2] = 99;
+        seen = seen + format("%i,", x);
+    }
+    assert!(seen == "1,2,3,");
+    assert!(v[2] == 99);
+    assert!(keep[2] == 3);
+}
+
+test("a push in the body does not extend the walk") {
+    let v = three();
+    let n = 0;
+    for x in v {
+        v.push(x + 10);
+        n += 1;
+    }
+    assert!(n == 3);
+    assert!(show(v) == "1,2,3,11,12,13,");
+}
+
+test("a callee writes the walked Vec") {
+    let v = three();
+    let seen = "";
+    for x in v {
+        set_last(v, 99);
+        seen = seen + format("%i,", x);
+    }
+    assert!(seen == "1,2,3,");
+    assert!(v[2] == 99);
+}
+
+test("a parameter the body writes for the caller") {
+    let v = three();
+    assert!(walk_param(v) == "1,2,3,");
+    assert!(v[2] == 99);
+}
+
+test("a field of self the method writes") {
+    let b = new Bag(three(), 0);
+    assert!(b.walk() == "1,2,3,");
+    assert!(b.items[2] == 99);
+    assert!(b.n == 3);
+}
+
+test("an element object written ahead of the loop's position") {
+    let v: Vec<C> = Vec::new();
+    v.push(new C(1));
+    v.push(new C(2));
+    v.push(new C(3));
+    let seen = "";
+    for c in v {
+        v[2].x = 99;
+        seen = seen + format("%i,", c.x);
+    }
+    assert!(seen == "1,2,3,");
+    assert!(v[2].x == 99);
+}
+
+test("a fixed array written ahead of the loop's position") {
+    let a = [1, 2, 3];
+    let seen = "";
+    for x in a {
+        a[2] = 99;
+        seen = seen + format("%i,", x);
+    }
+    assert!(seen == "1,2,3,");
+    assert!(a[2] == 99);
+}
+
+test("a write in a nested loop and one after a break") {
+    let v = three();
+    let seen = "";
+    for x in v {
+        let i = 0;
+        while i < 3 {
+            v[i] = v[i] * 10;
+            i += 1;
+        }
+        seen = seen + format("%i,", x);
+        if x == 2 {
+            break;
+        }
+    }
+    assert!(seen == "1,2,");
+    assert!(show(v) == "100,200,300,");
+}
+
+test("the loop runs twice: each walk sees the value at its start") {
+    let v = three();
+    let seen = "";
+    let round = 0;
+    while round < 2 {
+        for x in v {
+            v[2] = v[2] + 1;
+            seen = seen + format("%i,", x);
+        }
+        round += 1;
+    }
+    assert!(seen == "1,2,3,1,2,6,");
+    assert!(v[2] == 9);
+}
+
+test("a read-only walk over a borrowed Vec") {
+    let v = three();
+    let w = mut v;
+    let s = 0;
+    for x in v {
+        s += x;
+    }
+    w.push(5);
+    assert!(s == 6);
+    assert!(v.len() == 4);
+    assert!(show(v) == show(w));
+}
+
+test("a read-only walk over a borrowed Vec of objects") {
+    let v: Vec<C> = Vec::new();
+    v.push(new C(1));
+    v.push(new C(2));
+    let w = mut v;
+    let s = 0;
+    for c in v {
+        s += c.x;
+    }
+    for c in w {
+        s += c.x;
+    }
+    w[0].x = 7;
+    assert!(s == 6);
+    assert!(v[0].x == 7);
+}

@@ -1,0 +1,458 @@
+// The `key_index::map_*` natives under a small map class shaped like the
+// stdlib `HashMap`: `int` and `string` keys find and insert in one call
+// (`map_find`, `map_upsert`, which native code runs in place), other keys
+// probe and compare with `==`. Covers growth, removal and tombstones, the
+// renumbering `compact`, insertion order, copy-on-write separation and
+// values of one, two and three words.
+use tests::assert;
+use text::Text;
+use key_index::{eq_mode, word_mode, map_table, map_find, map_upsert, map_put, map_probe, map_add, map_live, map_len, map_remove, map_compact, map_clear};
+
+class Map<K, V> {
+    pub ix: Vec<int>,
+    pub keys: Vec<K>,
+    pub vals: Vec<V>,
+}
+
+impl Map<K, V> {
+    pub static fn new() -> Map<K, V> {
+        let keys: Vec<K> = Vec::new();
+        let vals: Vec<V> = Vec::new();
+        return new Map(map_table(0), keys, vals);
+    }
+
+    pub fn len() -> int {
+        return map_len(self.ix);
+    }
+
+    /// The live keys, in slot order.
+    pub fn key_list() -> Vec<K> {
+        let out: Vec<K> = Vec::new();
+        let s = 0;
+        while s < self.keys.len() {
+            if map_live(self.ix, s) {
+                out.push(self.keys[s]);
+            }
+            s = s + 1;
+        }
+        return out;
+    }
+
+    /// Drops the removed slots from the keys and values, then the table.
+    pub fn compact() -> int {
+        let ks: Vec<K> = Vec::new();
+        let vs: Vec<V> = Vec::new();
+        let s = 0;
+        while s < self.keys.len() {
+            if map_live(self.ix, s) {
+                ks.push(self.keys[s]);
+                vs.push(self.vals[s]);
+            }
+            s = s + 1;
+        }
+        self.keys = ks;
+        self.vals = vs;
+        return map_compact(self.ix);
+    }
+}
+
+impl Map<K: Eq + Hash, V> {
+    pub fn find(K k) -> int {
+        let h = k.hash();
+        let mode = eq_mode(k);
+        if mode > 0 {
+            return map_find(self.ix, self.keys, h, k, mode);
+        }
+        let s = map_probe(self.ix, h, -1);
+        while s >= 0 {
+            if self.keys[s] == k {
+                return s;
+            }
+            s = map_probe(self.ix, h, s);
+        }
+        return -1;
+    }
+
+    /// `true` when `k` is new.
+    pub fn insert(K k, V v) -> bool {
+        let h = k.hash();
+        let mode = eq_mode(k);
+        if mode > 0 {
+            let r = map_upsert(self.ix, self.keys, h, k, mode);
+            if r >= 0 {
+                self.vals[r] = v;
+                return false;
+            }
+            self.keys.push(k);
+            self.vals.push(v);
+            return true;
+        }
+        let s = self.find(k);
+        if s >= 0 {
+            self.vals[s] = v;
+            return false;
+        }
+        let _ = map_add(self.ix, h);
+        self.keys.push(k);
+        self.vals.push(v);
+        return true;
+    }
+
+    pub fn get_or(K k, V d) -> V {
+        let s = self.find(k);
+        if s >= 0 {
+            return self.vals[s];
+        }
+        return d;
+    }
+
+    pub fn remove(K k) -> bool {
+        let s = self.find(k);
+        return s >= 0 && map_remove(self.ix, s);
+    }
+}
+
+// All keys hash alike: every lookup walks the candidates with `==`.
+#[derive(Eq)]
+class Clash {
+    pub name: string,
+}
+
+impl Hash for Clash {
+    pub fn hash(Clash c) -> int {
+        return 7;
+    }
+}
+
+test("int keys: insert, overwrite and find through growth") {
+    let m: Map<int, int> = Map::new();
+    let i = 0;
+    while i < 20000 {
+        assert!(m.insert((i * 7919) % 10000019, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 20000 {
+        assert!(!m.insert((i * 7919) % 10000019, i * 2));
+        i = i + 1;
+    }
+    assert!(m.len() == 20000);
+    assert!(m.get_or(7919 * 123, -1) == 246);
+    assert!(m.get_or(1, -1) == -1);
+    assert!(m.find(7919 * 5) == 5);
+    // Negative keys and hashes.
+    assert!(m.insert(-5, 1) && m.insert(-1, 2) && m.insert(-9223372036854775807, 3));
+    assert!(
+        m.get_or(-5, 0) == 1 &&
+        m.get_or(-1, 0) == 2 &&
+        m.get_or(0, -1) == 0 &&
+        m.get_or(-9223372036854775807, 0) == 3,
+    );
+}
+
+test("string keys equal in contents but other objects") {
+    let m: Map<string, int> = Map::new();
+    let i = 0;
+    while i < 3000 {
+        assert!(m.insert("k" + i.show(), i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 3000 {
+        let k = ("K" + i.show()).to_lower();
+        assert!(m.get_or(k, -1) == i);
+        assert!(!m.insert(k, i + 1));
+        i = i + 1;
+    }
+    assert!(m.len() == 3000);
+    assert!(m.get_or("k2999", 0) == 3000);
+    assert!(m.get_or("k3000", -7) == -7);
+    assert!(m.insert("", 9) && m.get_or("", 0) == 9);
+}
+
+test("keys with one hash are told apart by ==") {
+    let m: Map<Clash, int> = Map::new();
+    let i = 0;
+    while i < 50 {
+        assert!(m.insert(new Clash("c" + i.show()), i));
+        i = i + 1;
+    }
+    assert!(m.find(new Clash("c37")) == 37);
+    assert!(m.find(new Clash("nope")) == -1);
+    assert!(m.remove(new Clash("c3")));
+    assert!(m.find(new Clash("c3")) == -1 && m.find(new Clash("c4")) == 4);
+    assert!(m.insert(new Clash("c3"), 99));
+    assert!(m.get_or(new Clash("c3"), 0) == 99 && m.len() == 50);
+}
+
+test("tuple keys probe and compare") {
+    let m: Map<(int, string), int> = Map::new();
+    let i = 0;
+    while i < 500 {
+        assert!(m.insert((i, "x"), i));
+        i = i + 1;
+    }
+    assert!(m.get_or((10, "x"), -1) == 10 && m.get_or((10, "y"), -1) == -1);
+    assert!(!m.insert((10, "x"), 11) && m.get_or((10, "x"), -1) == 11);
+}
+
+test("remove leaves a tombstone; reinsert gets a new slot at the end") {
+    let m: Map<string, int> = Map::new();
+    for w in ["a", "b", "c", "d"] {
+        let _ = m.insert(w, w.len());
+    }
+    assert!(m.remove("b"));
+    assert!(!m.remove("b"));
+    assert!(!map_live(m.ix, 1) && map_live(m.ix, 0));
+    assert!(m.find("b") == -1 && m.find("d") == 3 && m.len() == 3);
+    assert!(m.insert("b", 7));
+    assert!(m.find("b") == 4);
+    let ks = m.key_list();
+    assert!(ks.len() == 4 && ks[0] == "a" && ks[1] == "c" && ks[2] == "d" && ks[3] == "b");
+    assert!(m.compact() == 4);
+    assert!(m.find("a") == 0 && m.find("c") == 1 && m.find("d") == 2 && m.find("b") == 3);
+    assert!(m.get_or("b", 0) == 7 && m.keys.len() == 4);
+}
+
+test("many removes and re-adds keep finding") {
+    let m: Map<int, int> = Map::new();
+    let round = 0;
+    while round < 20 {
+        let i = 0;
+        while i < 300 {
+            let _ = m.insert(i * 31 + round, i);
+            i = i + 1;
+        }
+        i = 0;
+        while i < 300 {
+            if i % 3 != 0 {
+                assert!(m.remove(i * 31 + round));
+            }
+            i = i + 1;
+        }
+        assert!(m.get_or(3 * 31 + round, -1) == 3 && m.get_or(31 + round, -1) == -1);
+        if round % 4 == 3 {
+            let _ = m.compact();
+        }
+        round = round + 1;
+    }
+    assert!(m.len() == 20 * 100);
+    assert!(m.get_or(297 * 31 + 19, -1) == 297);
+}
+
+test("clear empties the table and keeps working") {
+    let m: Map<string, int> = Map::new();
+    let _ = m.insert("a", 1);
+    let _ = m.insert("b", 2);
+    map_clear(m.ix);
+    m.keys.clear();
+    m.vals.clear();
+    assert!(m.find("a") == -1 && m.len() == 0);
+    assert!(m.insert("b", 3) && m.find("b") == 0);
+}
+
+test("a copied map is its own") {
+    let a: Map<string, int> = Map::new();
+    let _ = a.insert("x", 1);
+    let b = a;
+    let _ = b.insert("y", 2);
+    let _ = b.insert("x", 5);
+    assert!(b.find("y") == 1 && b.get_or("x", 0) == 5);
+    assert!(a.find("y") == -1 && a.get_or("x", 0) == 1 && a.len() == 1);
+    assert!(a.remove("x") && b.get_or("x", 0) == 5);
+}
+
+test("values of one, two and three words") {
+    let o: Map<int, Option<int>> = Map::new();
+    let t: Map<string, (int, int, int)> = Map::new();
+    let s: Map<int, string> = Map::new();
+    let i = 0;
+    while i < 1000 {
+        let _ = o.insert(
+            i,
+            if i % 2 == 0 {
+                Some(i)
+            } else {
+                None
+            },
+        );
+        let _ = t.insert("t" + i.show(), (i, i * 2, i * 3));
+        let _ = s.insert(i, "v" + i.show());
+        i = i + 1;
+    }
+    assert!(o.get_or(10, None) == Some(10) && o.get_or(11, Some(0)) == None);
+    let (a, b, c) = t.get_or("t77", (0, 0, 0));
+    assert!(a == 77 && b == 154 && c == 231);
+    assert!(s.get_or(999, "") == "v999");
+    let _ = o.insert(10, None);
+    assert!(o.get_or(10, Some(1)) == None);
+}
+
+test("a malformed table finds nothing") {
+    let bad = Vec::from([6, 0, 0, 0]);
+    let keys = Vec::from([1]);
+    assert!(map_find(bad, keys, 1, 1, 1) == -1);
+    assert!(map_len(bad) == 0 && !map_live(bad, 0));
+    assert!(map_add(bad, 1) == -1);
+    assert!(bad.len() == 4);
+}
+
+// `map_put` on a map object: an instance whose fields 0, 1 and 2 are its
+// table, keys and values.
+class Put<K, V> {
+    pub ix: Vec<int>,
+    pub keys: Vec<K>,
+    pub vals: Vec<V>,
+}
+
+impl Put<K, V> {
+    pub static fn new() -> Put<K, V> {
+        let keys: Vec<K> = Vec::new();
+        let vals: Vec<V> = Vec::new();
+        return new Put(map_table(0), keys, vals);
+    }
+}
+
+// A shared body (a type parameter's `eq_mode` is `0`) probes and compares
+// with `==` instead, as the stdlib `HashMap` does.
+impl Put<K: Eq + Hash, V> {
+    fn find(K k, int h) -> int {
+        let s = map_probe(self.ix, h, -1);
+        while s >= 0 && self.keys[s] != k {
+            s = map_probe(self.ix, h, s);
+        }
+        return s;
+    }
+
+    // `map_put`'s answer, by the general path where it does not apply.
+    fn put_with(K k, V v, int replace) -> int {
+        let h = k.hash();
+        let (mode, vmode) = (eq_mode(k), word_mode(v));
+        if mode > 0 && vmode > 0 {
+            return map_put(self, h, k, v, mode, vmode, replace);
+        }
+        let s = self.find(k, h);
+        if s >= 0 {
+            if replace == 1 {
+                self.vals[s] = v;
+            }
+            return s;
+        }
+        let n = map_add(self.ix, h);
+        self.keys.push(k);
+        self.vals.push(v);
+        return -1 - n;
+    }
+
+    /// `true` when `k` is new.
+    pub fn put(K k, V v) -> bool {
+        return self.put_with(k, v, 1) < 0;
+    }
+
+    /// The value under `k`, storing `v` first when `k` is new.
+    pub fn keep(K k, V v) -> V {
+        let r = self.put_with(k, v, 0);
+        if r >= 0 {
+            return self.vals[r];
+        }
+        return v;
+    }
+
+    pub fn get_or(K k, V d) -> V {
+        let s = self.find(k, k.hash());
+        if s >= 0 {
+            return self.vals[s];
+        }
+        return d;
+    }
+}
+
+test("map_put finds or adds int keys through growth") {
+    let m: Put<int, int> = Put::new();
+    let i = 0;
+    while i < 20000 {
+        assert!(m.put((i * 7919) % 10000019, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 20000 {
+        assert!(!m.put((i * 7919) % 10000019, i * 2));
+        i = i + 1;
+    }
+    assert!(map_len(m.ix) == 20000 && m.keys.len() == 20000 && m.vals.len() == 20000);
+    assert!(m.get_or(7919 * 123, -1) == 246 && m.get_or(1, -1) == -1);
+    assert!(m.keep(7919 * 5, 0) == 10 && m.keep(-3, 4) == 4 && m.get_or(-3, 0) == 4);
+}
+
+test("map_put compares string keys that are other objects") {
+    let m: Put<string, string> = Put::new();
+    let i = 0;
+    while i < 2000 {
+        assert!(m.put("k" + i.show(), "v" + i.show()));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 2000 {
+        let k = ("K" + i.show()).to_lower();
+        assert!(!m.put(k, "w" + i.show()));
+        i = i + 1;
+    }
+    assert!(map_len(m.ix) == 2000 && m.get_or("k1999", "") == "w1999");
+    assert!(m.keep("k7", "x") == "w7" && m.keep("new", "n") == "n" && m.keys.len() == 2001);
+}
+
+test("map_put on a copied map leaves the original") {
+    let a: Put<string, int> = Put::new();
+    let _ = a.put("x", 1);
+    let b = a;
+    let _ = b.put("y", 2);
+    let _ = b.put("x", 5);
+    assert!(b.get_or("y", 0) == 2 && b.get_or("x", 0) == 5 && map_len(b.ix) == 2);
+    assert!(
+        a.get_or("y", 0) == 0 && a.get_or("x", 0) == 1 && map_len(a.ix) == 1 && a.vals.len() == 1,
+    );
+}
+
+test("map_put stores object values as their own") {
+    let m: Put<int, Vec<int>> = Put::new();
+    let w: Vec<int> = Vec::with_capacity(9);
+    w.push(4);
+    assert!(m.put(1, w));
+    w.push(5);
+    let got = m.get_or(1, Vec::new());
+    assert!(got.len() == 1 && got[0] == 4 && w.len() == 2);
+    let first = m.keep(2, Vec::with_capacity(7));
+    let again = m.keep(2, Vec::with_capacity(8));
+    assert!(first.capacity() == again.capacity() && map_len(m.ix) == 2);
+    assert!(!m.put(1, Vec::from([7, 8])) && m.get_or(1, Vec::new()).len() == 2);
+}
+
+test("map_put on a malformed map object changes nothing") {
+    let t = map_table(0);
+    let m = new Put(t, Vec::from([1]), Vec::from([2]));
+    m.keys = m.vals;
+    assert!(map_put(m, 1, 1, 3, 1, 1, 1) == -1);
+    assert!(map_len(m.ix) == 0 && m.keys.len() == 1 && m.vals.len() == 1);
+    let bad = new Put(Vec::from([6, 0, 0, 0]), Vec::from([1]), Vec::from([2]));
+    assert!(map_put(bad, 1, 1, 3, 1, 1, 1) == -1 && bad.ix.len() == 4 && bad.vals.len() == 1);
+}
+
+test("a string hashed for the first time hashes as its literal") {
+    // Fresh strings (built, lowered, split) carry no cached hash: native
+    // code computes it in place. Each must match the literal's, before and
+    // after the hash is cached, for short, long, empty and non-ASCII text.
+    let words = ["", "a", "w1234", "a string longer than any inline one, by far", "żółw €"];
+    for w in words {
+        let built = "" + w + "";
+        assert!(built.hash() == w.hash());
+        assert!(built.hash() == w.hash());
+    }
+    let parts = "w1 w22 w1 w333".split(" ");
+    let firsts: Vec<int> = Vec::new();
+    for p in parts {
+        firsts.push(p.hash());
+    }
+    assert!(firsts[0] == "w1".hash() && firsts[2] == "w1".hash());
+    assert!(firsts[1] == "w22".hash() && firsts[3] == "w333".hash());
+    assert!("ABC".to_lower().hash() == "abc".hash());
+}

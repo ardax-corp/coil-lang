@@ -1,0 +1,92 @@
+// A `forall` parameter whose result holds its type parameters (`T ->
+// Option<T>`, `T -> (T, T)`, `T -> T -> Vec<T>`, `A -> B -> (B, A)`) is
+// called at any type: the call reads the shared body's result in its own
+// layout and converts it to the call's, as a direct call of the shared
+// body does (coil-lang#2723).
+use tests::assert;
+use string::format;
+
+#[derive(Show)]
+class Pt {
+    pub a: int,
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn dup<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn vec2<T>(T x, T y) -> Vec<T> {
+    let v: Vec<T> = Vec::new();
+    v.push(x);
+    v.push(y);
+    return v;
+}
+
+fn swap<A, B>(A a, B b) -> (B, A) {
+    return (b, a);
+}
+
+fn okr<T>(T x) -> Result<T, string> {
+    return Result::Ok(x);
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+fn wraps(forall T. T -> Option<T> g) -> string {
+    let o: Option<int> = Option::Some(3);
+    return show(g(1)) + " " + show(g("s")) + " " + show(g(2.5)) + " " + show(g(o)) + " " +
+           show(g(new Pt(4))) + " " + show(g(true));
+}
+
+fn dups(forall T. T -> (T, T) g) -> string {
+    let o: Option<int> = Option::Some(3);
+    return show(g(1)) + " " + show(g("s")) + " " + show(g(o)) + " " + show(g(1.5));
+}
+
+fn vecs(forall T. T -> T -> Vec<T> g) -> string {
+    let o: Option<int> = Option::Some(1);
+    return show(g(1, 2)) + " " + show(g("s", "t")) + " " + show(g(o, Option::None));
+}
+
+fn swaps(forall A, B. A -> B -> (B, A) g) -> string {
+    let o: Option<int> = Option::Some(2);
+    return show(g(1, true)) + " " + show(g("s", o));
+}
+
+fn oks(forall T. T -> Result<T, string> g) -> string {
+    return show(g(1)) + " " + show(g("s")) + " " + show(g(new Pt(1)));
+}
+
+fn relay(forall T. T -> Option<T> g) -> string {
+    return wraps(g);
+}
+
+test("T -> Option<T> at niche, two-word, scalar and class types") {
+    assert!(wraps(wrap) == "Some(1) Some(s) Some(2.5) Some(Some(3)) Some(Pt { a: 4 }) Some(true)");
+    assert!(relay(wrap) == "Some(1) Some(s) Some(2.5) Some(Some(3)) Some(Pt { a: 4 }) Some(true)");
+}
+
+test("T -> (T, T) and A -> B -> (B, A)") {
+    assert!(dups(dup) == "(1, 1) (s, s) (Some(3), Some(3)) (1.5, 1.5)");
+    assert!(swaps(swap) == "(true, 1) (Some(2), s)");
+}
+
+test("T -> T -> Vec<T>") {
+    assert!(vecs(vec2) == "[1, 2] [s, t] [Some(1), None]");
+}
+
+test("T -> Result<T, string>") {
+    assert!(oks(okr) == "Ok(1) Ok(s) Ok(Pt { a: 1 })");
+}
+
+test("a let of the forall type") {
+    let w: forall T. T -> Option<T> = wrap;
+    let o = w("x");
+    assert!(show(o) == "Some(x)");
+}

@@ -1,0 +1,38 @@
+// A field or index read straight off a `match` of a local enum built in
+// place: the local splits into its tag and payload, and the read still
+// takes its base from the one arm that runs.
+use tests::assert;
+
+class Cell {
+    pub v: int,
+    pub tag: string,
+}
+
+test("a field of a match on a variant built in place") {
+    let some = Option::Some(new Cell(3, "s"));
+    let got = (match some {
+        Option::Some(c) => c,
+        Option::None => new Cell(0, "d"),
+    })
+        .v;
+    assert!(got == 3);
+}
+
+test("a string field of a match on a variant built in place") {
+    let none: Option<Cell> = Option::None;
+    let got = (match none {
+        Option::Some(c) => c,
+        Option::None => new Cell(0, "d"),
+    })
+        .tag;
+    assert!(got == "d");
+}
+
+test("an index of a match on a variant built in place") {
+    let none: Option<[int; 3]> = Option::None;
+    let got = (match none {
+        Option::Some(xs) => xs,
+        Option::None => [4, 5, 6],
+    })[1];
+    assert!(got == 5);
+}

@@ -1,0 +1,25 @@
+// A task that waits again after other tasks have come and gone suspends on
+// its own fiber: more tasks than the driver keeps stacks for finish first.
+use tests::assert;
+use task::{scope, Scope, sleep};
+
+test("a task waits again after many others finished") {
+    let r = scope(fn (Scope s) {
+        let a = s.spawn(fn () {
+            sleep(30);
+            sleep(1);
+            sleep(1);
+            7
+        });
+        let i = 0;
+        while i < 24 {
+            let _ = s.spawn(fn () {
+                sleep(1);
+                0
+            });
+            i = i + 1;
+        }
+        return a.join();
+    });
+    assert!(r == Result::Ok(Result::Ok(7)));
+}

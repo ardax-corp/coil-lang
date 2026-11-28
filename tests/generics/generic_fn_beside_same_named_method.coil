@@ -1,0 +1,71 @@
+// A generic free function's clones compile from its own body, whatever
+// methods of the same name exist: through a function value, by a direct
+// call, beside an instance or a static method, and with a method of that
+// name declared after it (#2548).
+use tests::assert;
+
+class K {
+    pub k: int,
+}
+
+impl K {
+    pub fn wrap<T>(T a) -> Vec<Option<T>> {
+        let v: Vec<Option<T>> = Vec::new();
+        v.push(Option::None);
+        return v;
+    }
+
+    pub static fn tag<T>(T a) -> int {
+        return 1;
+    }
+}
+
+fn wrap<T>(T a) -> Vec<Option<T>> {
+    let v: Vec<Option<T>> = Vec::new();
+    v.push(Option::Some(a));
+    v.push(Option::None);
+    return v;
+}
+
+fn tag<T>(T a) -> int {
+    return 2;
+}
+
+fn later<T>(T a, int n) -> int {
+    return n;
+}
+
+class L {
+    pub l: int,
+}
+
+impl L {
+    pub fn later<T>(int n, T a) -> int {
+        return n + 100;
+    }
+}
+
+test("a generic fn through a value runs its own body, not a same-named method's") {
+    let g = wrap;
+    let t = g("a");
+    assert!(t.len() == 2);
+    assert!(t[0] == Option::Some("a"));
+}
+
+test("a direct call of a generic fn beside a same-named method") {
+    let t = wrap(3);
+    assert!(t.len() == 2);
+    assert!(t[0] == Option::Some(3));
+    let m = new K(0).wrap(3);
+    assert!(m.len() == 1);
+}
+
+test("a generic fn beside a same-named static method") {
+    assert!(tag("x") == 2);
+    assert!(K::tag("x") == 1);
+}
+
+test("a method declared after the fn keeps the fn's signature") {
+    assert!(later("a", 5) == 5);
+    assert!(new L(0).later(5, "a") == 105);
+}

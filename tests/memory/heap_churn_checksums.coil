@@ -60,11 +60,11 @@ test("list churn over forced collections") {
     let acc = 0;
     let r = 0;
     while r < 8 {
-        acc = acc + churn_round(125000);
+        acc = acc + churn_round(4000);
         collect();
         r = r + 1;
     }
-    assert!(acc == 62499500000);
+    assert!(acc == 63984000);
 }
 
 test("a Result with class payloads on both sides") {

@@ -1,6 +1,7 @@
 //! Untagged runtime values: immediates and heap pointers in one word.
 
-/// Runtime type tag used by the generics boxing opcodes (`BoxValue` / `UnboxValue`).
+/// A value's static scalar or heap type, as the compiler tags it (a
+/// `STRINGIFY` operand names one; [`stringify_operand`]).
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ValueTag {
@@ -42,9 +43,9 @@ impl ValueTag {
 }
 
 /// `STRINGIFY` operand for an immediate of static type `tag` (`Int`,
-/// `Float`, `Bool`, `Unit`): `1 + tag`. Operand `0` (archives before major
-/// 6 / minor 17, and values with no static scalar type) inspects the word:
-/// a box by its tag, a heap string as itself, anything else as an `int`.
+/// `Float`, `Bool`, `Unit`): `1 + tag`. Operand `0` (values with no static
+/// scalar type) inspects the word: a heap string as itself, anything else
+/// as an `int`.
 pub const fn stringify_operand(tag: ValueTag) -> u32 {
     1 + tag as u32
 }
@@ -54,11 +55,6 @@ pub fn stringify_tag(operand: u32) -> Option<ValueTag> {
     let raw = operand.checked_sub(1)?;
     ValueTag::from_u16(u16::try_from(raw).ok()?)
 }
-
-/// `UnboxValue` operand that unwraps a boxed word whatever its tag: a shared
-/// generic body normalizes a type parameter's value to its raw word without
-/// knowing the instance's type.
-pub const UNBOX_ANY_TAG: u32 = 0xFFFF;
 
 type Storage = u64;
 
@@ -71,6 +67,7 @@ type Word = *mut u8;
 type Word = u64;
 
 #[derive(Default, Copy, Clone, Eq)]
+#[repr(transparent)]
 pub struct Value(Word);
 
 // `self.0 as u64` is a no-op where the word is already a `u64`.
@@ -206,38 +203,14 @@ impl Value {
     pub fn heap_addr(&self) -> u64 {
         self.word_bits() & !1
     }
-
-    pub fn inc_int(&mut self) -> &Self {
-        self.replace((self.as_int() + 1) as _);
-        self
-    }
-
-    pub fn dec_int(&mut self) -> &Self {
-        self.replace((self.as_int() - 1) as _);
-        self
-    }
-
-    pub fn inc_float(&mut self) -> &Self {
-        let v = self.as_float() + 1.0;
-        self.replace(v.to_bits() as _);
-        self
-    }
-
-    pub fn dec_float(&mut self) -> &Self {
-        let v = self.as_float() - 1.0;
-        self.replace(v.to_bits() as _);
-        self
-    }
 }
 
-#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0 as Storage,)
     }
 }
 
-#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0 as Storage,)

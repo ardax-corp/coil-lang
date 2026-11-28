@@ -1,0 +1,80 @@
+// ffi_callbacks.coil — `extern` functions that take a C function pointer.
+// A parameter of function type, `fn(int) -> int cb`, takes a top-level coil
+// function; C calls it like any function pointer, and each argument and
+// the result convert as an `extern` call's do (a C string becomes a coil
+// string). A callback takes up to five `int`, `float`, `bool`, `ptr` or
+// `string` parameters and returns one of those but `string`, or nothing.
+//
+// Uses examples/sum.c (see ffi_extern.coil for building and granting it).
+//
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+
+use io::sync::print;
+use string::format;
+
+extern struct Vec2 {
+    x: float,
+    y: float,
+};
+
+extern "sum" {
+    fn apply_cb(fn(int x) -> int cb, int x) -> int;
+    fn apply_fcb(fn(float x, int k) -> float cb, float x, int k) -> float;
+    fn count_if(fn(int i) -> bool pred, int n) -> int;
+    fn name_len(fn(string s) -> int cb) -> int;
+    fn call0(fn() -> int cb) -> int;
+    fn each_up_to(fn(int i) -> unit cb, int n);
+    fn vec2_add(Vec2 a, Vec2 b) -> Vec2;
+    fn vec2_code(Vec2 v) -> float;
+}
+
+fn doubler(int x) -> int {
+    return x * 2;
+}
+
+fn scaled(float x, int k) -> float {
+    return x * 0.5 + (k as float);
+}
+
+fn is_odd(int i) -> bool {
+    return i % 2 == 1;
+}
+
+fn length(string s) -> int {
+    return s.len();
+}
+
+fn seven() -> int {
+    return 7;
+}
+
+fn show(int i) {
+    let _ = print(format("<%i>", i));
+}
+
+// A callback may allocate (and collect) while its caller's values live.
+fn churn(int i) {
+    let v: Vec<string> = [];
+    let k: int = 0;
+    while k < 100 {
+        v.push(format("item %i of %i", k, i));
+        k = k + 1;
+    }
+    if v[99] != format("item 99 of %i", i) {
+        panic "a callback's strings went wrong";
+    }
+}
+
+fn main() {
+    let _ = print(format("%i ", apply_cb(doubler, 21)));
+    let _ = print(format("%f ", apply_fcb(scaled, 3.0, 2)));
+    let _ = print(format("%i ", count_if(is_odd, 10)));
+    let _ = print(format("%i ", name_len(length)));
+    let _ = print(format("%i ", call0(seven)));
+    each_up_to(show, 3);
+    let kept = [format("kept %i", 1), format("kept %i", 2)];
+    each_up_to(churn, 500);
+    let _ = print(format(" %s %s", kept[0], kept[1]));
+    // Structs by value in a program that calls back.
+    let _ = print(format(" %f", vec2_code(vec2_add({ x: 1.0, y: 2.0 }, { x: 0.5, y: 0.25 }))));
+}

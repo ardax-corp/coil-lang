@@ -1,0 +1,92 @@
+// A numeric range's `to_vec` on a range value held in a local, built at
+// run time, returned by a function or passed to one: `Range<int>`,
+// `RangeInclusive<int>` and their `float` forms, empty and reversed ones
+// too. Each gives the elements a `for` over the range visits.
+use tests::assert;
+
+fn span(int lo, int n) -> Range<int> {
+    return lo..lo + n;
+}
+
+fn closed(int lo, int hi) -> RangeInclusive<int> {
+    return lo..=hi;
+}
+
+#[inline(never)]
+fn count(Range<int> r) -> int {
+    return r.to_vec().len();
+}
+
+#[inline(never)]
+fn sum_closed(RangeInclusive<int> r) -> int {
+    let v = r.to_vec();
+    let s = 0;
+    let i = 0;
+    while i < v.len() {
+        s += v[i];
+        i += 1;
+    }
+    return s;
+}
+
+fn for_sum(Range<int> r) -> int {
+    let s = 0;
+    for x in r {
+        s += x;
+    }
+    return s;
+}
+
+test("an int range in a local and from a function") {
+    let r = 2..6;
+    let v = r.to_vec();
+    assert!(v.len() == 4);
+    assert!(v[0] == 2 && v[3] == 5);
+    let w = span(10, 3).to_vec();
+    assert!(w.len() == 3 && w[2] == 12);
+    assert!(count(span(-4, 9)) == 9);
+    assert!(count(5..5) == 0);
+    assert!(count(7..3) == 0);
+    let n = 0;
+    let total = 0;
+    while n < 20 {
+        let q = span(n, n % 5);
+        total += count(q);
+        let qv = q.to_vec();
+        let s = 0;
+        let i = 0;
+        while i < qv.len() {
+            s += qv[i];
+            i += 1;
+        }
+        assert!(s == for_sum(q));
+        n += 1;
+    }
+    assert!(total == 40);
+}
+
+test("an inclusive int range") {
+    let c = closed(1, 4);
+    assert!(c.to_vec().len() == 4);
+    assert!(sum_closed(c) == 10);
+    assert!(sum_closed(closed(3, 3)) == 3);
+    assert!(sum_closed(closed(5, 1)) == 0);
+    let k = 0;
+    while k < 6 {
+        assert!(sum_closed(closed(0, k)) == k * (k + 1) / 2);
+        k += 1;
+    }
+}
+
+test("float ranges") {
+    let lo = 0.5;
+    let f = lo..lo + 3.0;
+    let fv = f.to_vec();
+    assert!(fv.len() == 3);
+    assert!(fv[0] == 0.5 && fv[2] == 2.5);
+    let g = lo..=lo + 2.0;
+    let gv = g.to_vec();
+    assert!(gv.len() == 3 && gv[2] == 2.5);
+    let e = 4.0..1.0;
+    assert!(e.to_vec().len() == 0);
+}

@@ -1,0 +1,151 @@
+// A `for mut` binding over a `Vec<T>` in a shared generic body makes each
+// item unique in its vector before the body writes it, as a per-type clone
+// does (#2797): the body's `kinds` word says whether `T` is a
+// copy-on-write object at the call. At `--clone-budget 0` every generic
+// call below takes the shared body; before the fix the writes reached a
+// copy of the vector that shared its elements (coil-lang#2836).
+// @flags --clone-budget 0
+use tests::assert;
+
+trait Reset<R> {
+    fn reset(R self) {}
+}
+
+class C {
+    pub x: int,
+}
+
+impl Reset for C {
+    fn reset(C self) {
+        self.x = 0;
+    }
+}
+
+impl Reset for Vec<int> {
+    fn reset(Vec<int> self) {
+        self[0] = 0;
+    }
+}
+
+impl Reset for string {
+    fn reset(string self) {}
+}
+
+impl Reset for int {
+    fn reset(int self) {}
+}
+
+// An `Option` is no copy-on-write object (its `kinds` bit is clear): the
+// loop leaves its items as they are.
+impl Reset for Option<C> {
+    fn reset(Option<C> self) {}
+}
+
+fn reset_all<T: Reset>(Vec<T> v) {
+    for mut t in v {
+        t.reset();
+    }
+}
+
+fn reset_nested<T: Reset>(Vec<Vec<T>> vv) {
+    for mut v in vv {
+        reset_all(v);
+    }
+}
+
+class Tool {
+    pub n: int,
+}
+
+impl Tool {
+    pub fn wipe<T: Reset>(Vec<T> v) {
+        for mut t in v {
+            t.reset();
+        }
+        self.n = self.n + 1;
+    }
+}
+
+class Bag<T> {
+    pub items: Vec<T>,
+}
+
+impl Bag<T: Reset> {
+    pub fn wipe() {
+        for mut t in self.items {
+            t.reset();
+        }
+    }
+}
+
+test("T at a class") {
+    let v: Vec<C> = [new C(1), new C(2)];
+    let keep = v;
+    reset_all(v);
+    assert!(v[0].x == 0 && v[1].x == 0);
+    assert!(keep[0].x == 1 && keep[1].x == 2);
+}
+
+test("T at Vec<int>") {
+    let v: Vec<Vec<int>> = [[1, 2], [3]];
+    let keep = v;
+    reset_all(v);
+    assert!(v[0][0] == 0 && v[1][0] == 0);
+    assert!(keep[0][0] == 1 && keep[1][0] == 3);
+}
+
+test("T at string and int") {
+    let s: Vec<string> = ["a", "b"];
+    let ks = s;
+    reset_all(s);
+    assert!(s[0] == "a" && ks[1] == "b");
+    let n: Vec<int> = [4, 5];
+    let kn = n;
+    reset_all(n);
+    assert!(n[0] == 4 && kn[1] == 5);
+}
+
+test("T at Option<C>") {
+    let v: Vec<Option<C>> = [Option::Some(new C(1)), Option::None];
+    let keep = v;
+    reset_all(v);
+    let x = match v[0] {
+        Option::Some(c) => c.x,
+        Option::None => -1,
+    };
+    let k = match keep[0] {
+        Option::Some(c) => c.x,
+        Option::None => -1,
+    };
+    assert!(x == 1 && k == 1);
+    assert!(v[1] == Option::None && keep[1] == Option::None);
+}
+
+test("a generic method") {
+    let tool = new Tool(0);
+    let v: Vec<C> = [new C(3)];
+    let keep = v;
+    tool.wipe(v);
+    assert!(v[0].x == 0 && keep[0].x == 3);
+    assert!(tool.n == 1);
+}
+
+test("a generic class's method") {
+    let v: Vec<C> = [new C(4), new C(5)];
+    let b = new Bag(v);
+    let keep = b.items;
+    b.wipe();
+    assert!(b.items[0].x == 0 && b.items[1].x == 0);
+    assert!(keep[0].x == 4 && keep[1].x == 5);
+    assert!(v[0].x == 4);
+}
+
+test("nested Vec<Vec<T>>") {
+    let vv: Vec<Vec<C>> = [[new C(6)], [new C(7), new C(8)]];
+    let keep = vv;
+    let inner = vv[1];
+    reset_nested(vv);
+    assert!(vv[0][0].x == 0 && vv[1][1].x == 0);
+    assert!(keep[0][0].x == 6 && keep[1][1].x == 8);
+    assert!(inner[0].x == 7);
+}

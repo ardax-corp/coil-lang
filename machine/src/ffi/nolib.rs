@@ -46,6 +46,13 @@ pub struct PreparedCall {
     pub cif: Cif,
 }
 
+impl PreparedCall {
+    /// No C function to call directly.
+    pub fn address(&self) -> u64 {
+        0
+    }
+}
+
 pub struct InvokeContext;
 
 impl InvokeContext {
@@ -113,22 +120,19 @@ impl OwnedClosure {
     }
 }
 
-/// Type-erased reentrant call into a `Machine<S>` (set per closure).
-pub type VmCallFn = unsafe fn(*mut c_void, u32, *const Value, usize) -> Value;
+/// Type-erased reentrant call into the running program (set per closure).
+pub type ProgramCallFn = unsafe fn(*mut c_void, u32, u32, *const u64, usize) -> u64;
 
-pub fn callback_cif(
-    _args: &[FfiType],
-    _ret: FfiType,
-    _layouts: &[CStructLayout],
-) -> Result<Cif, FfiError> {
+pub fn make_callback(_program: *mut c_void, _fn_offset: u32, _aux: u32, _call_fn: ProgramCallFn) -> Result<OwnedClosure, FfiError> {
     Err(unsupported())
 }
 
-pub fn make_int_callback(
-    _vm: *mut c_void,
-    _fn_offset: u32,
-    _call_fn: VmCallFn,
-    _cif: Cif,
-) -> Result<OwnedClosure, FfiError> {
-    Err(unsupported())
+/// No C calls here: nothing packs.
+pub fn pack_struct_into(_heap: &mut Heap, _value: Value, _id: u32, _layouts: &[CStructLayout], _out: &mut [u8]) -> bool {
+    false
+}
+
+/// No C calls here: nothing unpacks.
+pub fn unpack_struct_from(_heap: &mut Heap, _id: u32, _layouts: &[CStructLayout], _buf: &[u8]) -> Option<Value> {
+    None
 }

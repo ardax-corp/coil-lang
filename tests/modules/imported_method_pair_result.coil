@@ -1,0 +1,32 @@
+// Another module's inherent methods whose results move as two words
+// (`Option<int>`, `(int, int)`, `Result<int, string>`, a generic class's
+// closed `Option<int>`) return them to direct calls in both modules and
+// through a partial application here (#2333).
+// Needs `--root examples/src` (method_pair_mod) and the stdlib.
+use tests::assert;
+use method_pair_mod::{Cell, Meter, use_here};
+
+test("direct calls of another module's methods") {
+    let m = new Meter(2);
+    assert!(m.at(1) == Option::Some(3));
+    assert!(m.at(-1) == Option::None);
+    assert!(m.pair(7) == (2, 7));
+    assert!(m.check(1) == Result::Ok(1));
+    assert!(m.check(5) == Result::Err("5"));
+    assert!(m.local_sum(3) == 5);
+    assert!(use_here(1) == 6 + 5 + 1);
+}
+
+test("a partial application of another module's method") {
+    let m = new Meter(2);
+    let f = m.at();
+    assert!(f(4) == Option::Some(6));
+    assert!(f(-4) == Option::None);
+}
+
+test("another module's generic class's method") {
+    let c = new Cell("s", 4);
+    assert!(c.count(1) == Option::Some(3));
+    let d = new Cell(1, 4);
+    assert!(d.count(9) == Option::None);
+}

@@ -1,0 +1,187 @@
+// An anonymous record holding a bounded type parameter has the record
+// shape's structural instances with open items, as a tuple has
+// (coil-lang#2631): `{ a: x }.show()` and `format("%v", { a: x })` under
+// `T: Show`, `==` / `!=` under `T: Eq` and `.hash()` under `T: Hash` meet
+// the shape's instance, whose context the bound covers, and give what the
+// ground record gives for the same values. `P`'s instances are not the
+// structural ones, so a result built without them differs.
+//
+// The same cases as open_record_structural.coil with no mono clones.
+// @flags --clone-budget 0
+use string::format;
+use tests::assert;
+
+class P {
+    pub v: int,
+}
+
+impl Show for P {
+    fn show(P p) -> string {
+        return "P" + p.v.show();
+    }
+}
+
+impl Eq for P {
+    fn eq(P a, P b) -> bool {
+        return a.v / 10 == b.v / 10;
+    }
+}
+
+impl Hash for P {
+    fn hash(P p) -> int {
+        return p.v / 10;
+    }
+}
+
+fn shown<T: Show>(T x) -> string {
+    return { a: x }.show();
+}
+
+fn formatted<T: Show>(T x) -> string {
+    return format("%v", { a: x });
+}
+
+fn several<T: Show, U: Show>(T x, U y) -> string {
+    return { b: y, a: x, c: 1 }.show();
+}
+
+fn several_v<T: Show, U: Show>(T x, U y) -> string {
+    let r = { b: y, a: x, c: 1 };
+    return format("%v", r);
+}
+
+fn agree<T: Show>(T x) -> bool {
+    let r = { z: x, m: Some(x), a: 2 };
+    return format("%v", r) == r.show();
+}
+
+fn in_tuple<T: Show>(T x) -> string {
+    return format("%v", ({ a: x }, 1)) + " " + ({ a: x }, 1).show();
+}
+
+fn tuple_in<T: Show>(T x) -> string {
+    return format("%v", { p: (x, 1) }) + " " + { p: (x, 1) }.show();
+}
+
+fn in_option<T: Show>(T x) -> string {
+    return format("%v", Some({ a: x })) + " " + Some({ a: x }).show();
+}
+
+fn twice<E>(E e) -> Vec<E> {
+    let v: Vec<E> = [e, e];
+    return v;
+}
+
+fn in_vec<T: Show>(T x) -> string {
+    let v = twice({ a: x });
+    return format("%v", v) + " " + v.show();
+}
+
+fn in_lambda<T: Show>(T x) -> string {
+    let f = fn (int k) use (x) => { a: x, k: k }.show() + format("%v", { a: x, k: k });
+    return f(3);
+}
+
+trait Label<S> {
+    fn label<U: Show>(S s, U x) -> string {}
+}
+
+class Tag {
+    pub name: string,
+}
+
+impl Label for Tag {
+    fn label<U: Show>(Tag s, U x) -> string {
+        return s.name + { a: x }.show() + format("%v", { a: x });
+    }
+}
+
+fn same<T: Eq>(T x, T y) -> bool {
+    return { a: x, b: 1 } == { b: 1, a: y };
+}
+
+fn differ<T: Eq>(T x, T y) -> bool {
+    return { a: x, b: 1 } != { a: y, b: 1 };
+}
+
+fn same_two<T: Eq, U: Eq>(T x, U y, T z, U w) -> bool {
+    return { y: y, x: x } == { x: z, y: w };
+}
+
+fn hashed<T: Hash>(T x) -> int {
+    return { a: x, b: 1 }.hash();
+}
+
+fn hashed_two<T: Hash, U: Hash>(T x, U y) -> int {
+    return { b: y, a: x }.hash();
+}
+
+test("the issue's record holding a bounded type parameter") {
+    assert!(shown(1) == { a: 1 }.show());
+    assert!(formatted(1) == { a: 1 }.show());
+    assert!(formatted(1) == format("%v", { a: 1 }));
+}
+
+test("one open field at int, string, a class, Option<int> and ()") {
+    assert!(shown(1) == "{ a: 1 }");
+    assert!(shown("s") == { a: "s" }.show());
+    assert!(shown(new P(4)) == "{ a: P4 }");
+    let o: Option<int> = Some(2);
+    assert!(shown(o) == { a: o }.show());
+    assert!(shown(o) == "{ a: Some(2) }");
+    assert!(shown(()) == { a: () }.show());
+    assert!(formatted("s") == shown("s"));
+    assert!(formatted(new P(4)) == "{ a: P4 }");
+    assert!(formatted(o) == shown(o));
+    assert!(formatted(()) == shown(()));
+}
+
+test("several open fields, in the record's own order") {
+    assert!(several(1, "b") == { b: "b", a: 1, c: 1 }.show());
+    assert!(several(new P(1), new P(2)) == { b: new P(2), a: new P(1), c: 1 }.show());
+    assert!(several_v(1, "b") == several(1, "b"));
+    assert!(several_v((), new P(7)) == several((), new P(7)));
+    assert!(agree(4));
+    assert!(agree(()));
+    assert!(agree(new P(3)));
+}
+
+test("a record in a tuple, a tuple in a record, in Option and Vec") {
+    assert!(in_tuple(1) == "({ a: 1 }, 1) ({ a: 1 }, 1)");
+    assert!(in_tuple(new P(2)) == "({ a: P2 }, 1) ({ a: P2 }, 1)");
+    assert!(tuple_in(1) == "{ p: (1, 1) } { p: (1, 1) }");
+    assert!(tuple_in(new P(2)) == "{ p: (P2, 1) } { p: (P2, 1) }");
+    assert!(in_option(1) == "Some({ a: 1 }) Some({ a: 1 })");
+    assert!(in_option(new P(2)) == "Some({ a: P2 }) Some({ a: P2 })");
+    assert!(in_vec(1) == "[{ a: 1 }, { a: 1 }] [{ a: 1 }, { a: 1 }]");
+    assert!(in_vec(new P(2)) == "[{ a: P2 }, { a: P2 }] [{ a: P2 }, { a: P2 }]");
+}
+
+test("in a lambda and in a trait method with its own bound") {
+    assert!(in_lambda(1) == { a: 1, k: 3 }.show() + { a: 1, k: 3 }.show());
+    assert!(in_lambda(new P(5)) == "{ a: P5, k: 3 }{ a: P5, k: 3 }");
+    let t = new Tag("t");
+    assert!(Label::label(t, 2) == "t{ a: 2 }{ a: 2 }");
+    assert!(t.label(new P(6)) == "t{ a: P6 }{ a: P6 }");
+}
+
+test("== and != of a record holding a bounded type parameter") {
+    assert!(same(1, 1) && !same(1, 2));
+    assert!(same(new P(31), new P(35)));
+    assert!(!same(new P(31), new P(45)));
+    assert!(differ(new P(31), new P(45)) && !differ(new P(31), new P(35)));
+    assert!(same("s", "s") && !same("s", "t"));
+    assert!(same((), ()));
+    assert!(same_two(1, new P(11), 1, new P(12)));
+    assert!(!same_two(1, new P(11), 2, new P(12)));
+}
+
+test(".hash() of a record holding a bounded type parameter") {
+    assert!(hashed(7) == { a: 7, b: 1 }.hash());
+    assert!(hashed(new P(31)) == { a: new P(31), b: 1 }.hash());
+    assert!(hashed(new P(31)) == hashed(new P(35)));
+    assert!(hashed("s") == { a: "s", b: 1 }.hash());
+    assert!(hashed(()) == { a: (), b: 1 }.hash());
+    assert!(hashed_two(1, new P(20)) == { a: 1, b: new P(20) }.hash());
+    assert!(hashed_two(1, new P(20)) == hashed_two(1, new P(29)));
+}

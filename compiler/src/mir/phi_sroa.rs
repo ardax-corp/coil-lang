@@ -16,7 +16,7 @@
 //! 2. A `HeapRef` φ whose every incoming value is a fresh `alloc.object`
 //!    (seen through `Word` casts to and from the niche word), used for
 //!    nothing but `heapsetfield` in its own block, and whose own uses are
-//!    all `heaploadfield`, becomes one φ per read field.
+//!    all `productload`, becomes one φ per read field.
 //!
 //! An object that escapes or is stored to after the φ keeps its
 //! allocation. The passes run before the deopt sites are drawn from the
@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{Defs, MirFunc};
 use super::inst::{BlockId, MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId};
 use super::ty::MirTy;
 
@@ -47,30 +47,9 @@ pub fn phi_sroa(func: &mut MirFunc) -> usize {
     threaded + split
 }
 
-/// Where each value is defined: its block and the instruction.
-fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i))))
-        .collect()
-}
-
 /// Drop removed values from the sidecars that name them.
 fn forget(func: &mut MirFunc, gone: &HashSet<ValueId>) {
-    for inst in func.blocks.iter_mut().flat_map(|b| &mut b.insts) {
-        if let MirInst::GcBarrier { roots, .. } = inst {
-            roots.retain(|v| !gone.contains(v));
-        }
-    }
-    func.slot_env.retain(|at, _| !gone.contains(at));
-    for env in func.slot_env.values_mut() {
-        env.retain(|(_, v)| !gone.contains(v));
-    }
     func.debug_slots.retain(|_, v| !gone.contains(v));
-    func.gc_roots.retain(|s| !gone.contains(&s.at));
-    for set in &mut func.gc_roots {
-        set.values.retain(|v| !gone.contains(v));
-    }
 }
 
 /// Every block that reads `v` (in an instruction or its terminator).
@@ -97,7 +76,7 @@ fn term_reads(term: &Terminator, v: ValueId) -> bool {
 
 /// What a niche `Option` word is known to hold: `Some(true)` for `None`
 /// (the zero word), `Some(false)` for a fresh object.
-fn niche_is_none(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option<bool> {
+fn niche_is_none(defs: &Defs, v: ValueId) -> Option<bool> {
     match defs.get(&v)?.1 {
         MirInst::Cast {
             kind: MirCastKind::Word,
@@ -163,7 +142,7 @@ fn thread_one(func: &mut MirFunc) -> bool {
         let Some(opt_phi) = phis.iter().find(|i| i.dest() == opt) else {
             continue;
         };
-        let d = defs(func);
+        let d = func.defs();
         let known: Option<Vec<bool>> = from
             .iter()
             .map(|&p| incoming(opt_phi, p).and_then(|v| niche_is_none(&d, v)))
@@ -242,7 +221,7 @@ fn reachable(func: &MirFunc) -> HashSet<BlockId> {
 
 /// `Word` casts heap → niche → heap read the heap word itself.
 fn forward_word_round_trips(func: &mut MirFunc) {
-    let d = defs(func);
+    let d = func.defs();
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
     for (&v, (_, inst)) in &d {
         if let MirInst::Cast { kind: MirCastKind::Word, to: MirTy::HeapRef, src, .. } = inst
@@ -255,15 +234,7 @@ fn forward_word_round_trips(func: &mut MirFunc) {
     if subst.is_empty() {
         return;
     }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-        }
-    }
-    func.rewrite_debug_slots(|v| subst.get(&v).copied().unwrap_or(v));
+    func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
 }
 
 /// One fresh object reaching a φ: its allocation and the value each field
@@ -296,11 +267,11 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                 continue;
             }
             match inst {
-                MirInst::HeapFieldStore { dest, object, value, index } if *object == alloc => {
+                MirInst::HeapFieldStore { dest, object, value, index, .. } if *object == alloc => {
                     if b.id != block || !seen_alloc || *value == alloc {
                         return None;
                     }
-                    // The store's own value (the VM leaves it on the stack)
+                    // The store's own value (the runtime leaves it on the stack)
                     // must be unused: it goes with the object.
                     if !user_blocks(func, *dest).is_empty() {
                         return None;
@@ -308,8 +279,13 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                     fields.insert(*index, *value);
                 }
                 MirInst::Phi { dest, .. } if *dest == phi => {}
-                // A safepoint's root list only says the word is live.
-                MirInst::GcBarrier { .. } => {}
+                // Its own safepoint goes with it, when nothing reads the
+                // word through it.
+                MirInst::GcBarrier { dest, object, .. } if *object == alloc => {
+                    if !user_blocks(func, *dest).is_empty() {
+                        return None;
+                    }
+                }
                 _ if inst.operands().contains(&alloc) => return None,
                 _ => {}
             }
@@ -350,9 +326,8 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for b in &func.blocks {
             for inst in &b.insts {
                 match inst {
-                    MirInst::HeapFieldLoad { dest, object, index } if *object == phi => loads.push((*dest, *index)),
+                    MirInst::ProductLoad { dest, object, slot } if *object == phi => loads.push((*dest, *slot)),
                     MirInst::Phi { dest, .. } if *dest == phi => {}
-                    MirInst::GcBarrier { .. } => {}
                     _ if inst.operands().contains(&phi) => ok = false,
                     _ => {}
                 }
@@ -419,15 +394,11 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for b in &mut func.blocks {
             b.insts.retain(|i| {
                 let d = i.dest();
-                d != phi && !allocs.contains(&d) && !dead_stores.contains(&d) && !subst.contains_key(&d)
+                let own_barrier = matches!(i, MirInst::GcBarrier { object, .. } if allocs.contains(object));
+                d != phi && !own_barrier && !allocs.contains(&d) && !dead_stores.contains(&d) && !subst.contains_key(&d)
             });
-            for inst in &mut b.insts {
-                inst.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-            }
-            if let Some(term) = &mut b.term {
-                term.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-            }
         }
+        func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
         let mut new_phis: Vec<(u32, MirInst)> = field_phis
             .into_iter()
             .map(|(i, (dest, args))| (i, MirInst::Phi { dest, ty: func.ty(dest), args }))
@@ -436,12 +407,6 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         let at = func.block_mut(block);
         for (k, (_, inst)) in new_phis.into_iter().enumerate() {
             at.insts.insert(k, inst);
-        }
-        func.rewrite_debug_slots(|v| subst.get(&v).copied().unwrap_or(v));
-        for env in func.slot_env.values_mut() {
-            for (_, v) in env.iter_mut() {
-                *v = subst.get(v).copied().unwrap_or(*v);
-            }
         }
         let gone: HashSet<ValueId> = allocs.iter().copied().chain([phi]).chain(dead_stores).collect();
         forget(func, &gone);

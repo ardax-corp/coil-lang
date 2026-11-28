@@ -35,13 +35,15 @@ cargo build --bin coil && ./target/debug/coil test path/to/file.coil  # the test
 | Run archive | `cargo run -- run out.ccoil` |
 | Project tests | `cargo run -- test [path] [--fail-fast]` |
 
-`coil compile` always recompiles; `coil run` never recompiles. Default mode always recompiles in memory — no stale bytecode cache.
+`coil compile` always recompiles; `coil run` never recompiles. Default mode always recompiles in memory — no stale compiled output.
 
 ## File shape
 
 Every runnable program needs `fn main()` **unless** the file only has `test("…")` cases (harness injects virtual `main` for `coil test`; do not mix `main` and `test()` in one file).
 
 Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::math`) — injected by the compiler, not written in source. `prelude::math` holds only the linear-algebra helpers (`dot`, `cross`, `matmul`, `matrix`, `intersect`, `diff`). Float functions (`sin` … `tanh`, `sqrt`, `floor`, `ceil`, `exp`, `ln`, `atan2`, …) are [coil-stdlib `math`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md), userland Coil: write `use math::{sin, sqrt};` (a bare `sin(x)` is E0101). Powers and float remainder are `**` and `%`. Named `PI` / `E` / `TAU` are coil-stdlib `num` (`const`), not natives.
+
+Imports are private to the file: `use b::x` works only if `b` declares `x` or re-exports it with `pub use a::{x};` (top level only; a plain `use` in `b` is E0100 for importers). Qualified `b::x` paths do not follow re-exports yet.
 
 Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `process`, `gc`, `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms`), `entropy` (`bytes(n)`, OS CSPRNG). Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
@@ -67,8 +69,9 @@ There is **no `print` statement**: `io::sync::println` / `print` (no newline) wr
 | Enums | `enum E { A, B(T) }`; constructors are per-enum (`Status::Ok` next to `Result::Ok`). Canonical spelling is `Enum::Case` (`Status::Ok`, `Option::Some(x)`, `Color::Red`). Bare `Some`/`None`/`Ok`/`Err` is sugar only when unambiguous. `match e { … }` with record/nested patterns. `default` is the only whole-arm catch-all; `_` is nested wildcard only (`Result::Err(_)`, `Some(_)`, tuple/record slots). Scalar-backed: `#[repr(int)]` / `float` / `string` / `bool` or inferred when every case is `Case = lit` of one simple type. `#[derive(Show, Eq, Ord, Hash)]` composes with `#[repr]`. Runtime is the unboxed literal; type is still `E`. Show of a scalar case is the backing (`Status::Ok` → `200`). In expression position the value implicitly coerces to the backing (`let n: int = Status::Ok`). No reverse coerce (`int` → `Status`) and no matching raw `200` on a `Status` scrutinee. Payload enums are niche, two-slot, or boxed `ObjEnum` by shape (heap Option / heap-heap Result niches; immediate-Ok / arity-≤1 two-slot on direct CALL — [#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297); arity-2 immediate products [#302](https://github.com/ardax-corp/coil-lang/pull/302)); not always boxed. |
 | Errors | Built-in `Option`/`Result`; `raise` (catchable `Err`), `?`, `??`, `?.`. `panic` **aborts the process** (Q5). Checksum / CLI boards use `panic`, not `raise`. |
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
+| Traits | `trait Area<T> { fn area(T x) -> int; }`, `impl Area for Sq { … }`. Call a trait method as `x.area()` or `Area::area(x)` (both lower to the same call; the qualified form picks between traits sharing a name). A bare `area(x)` is not a trait call (`E0153`). Static trait methods: `Sq::make()`, `T::make()` or `Make::make()` |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
-| FFI | `extern "lib" { fn …; }` (any stem but the libc aliases) or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
+| FFI | `extern "lib" { fn …; }` (any stem but the libc aliases; `ffi::types::{Bytes, ConstBytes}` for buffers); load at run time with the coil-ffi package (`use coil_ffi::{Library}`) |
 | Attributes | `#[derive(Show, Eq, Ord, Hash, Default, Send, Sensitive)]` (composes with `#[repr(int)]` on scalar enums), user derives and attribute macros (below); tests are `test("desc") { … }` only |
 | Macros | `derive Name(TypeDecl t) -> Code attrs(helper) { … }`, `attr name(FnDecl f, int by) -> Code { … }` and `macro name(Expr a, Vec<Expr> rest) -> Code { … }` (used as `name!(…)` in expression, statement or item position) run at compile time; build output with `quote items|expr|stmts|type { … ${x} … $(xs),* }` (`use macro::{TypeDecl, Expr, Code, lit, raw, ident}`). Import with `use`; a module cannot use its own macros. No IO in macros; `panic` to inspect. See `docs/internals/macros.md` |
 | Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime); unary prefix, so `typeof x == "int"` compares the name |
@@ -90,7 +93,7 @@ userland modules. Prelude is auto-injected.
 | `io` | `use io::{stdout, open, read, write};` | `Stream`, `Vec<byte>` buffers, files, TCP/UDP; non-blocking L0 |
 | `io::tty` | `use io::tty::{is_tty, size, enter_raw, leave_raw, read_timeout};` | terminal on a `Stream`: isatty, `(cols, rows)`, raw mode (restored at exit), timed read, `resized()`; no flag |
 | `string` | `use string::{format, to_bytes, from_bytes};` | Formatting / UTF-8 bytes |
-| `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
+| `ffi` | `use ffi::types::{Bytes, ConstBytes};` | Buffer params of `extern` blocks; `ffi::{Error, ErrorKind}` |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |
 | `env` | `use env::{args, var, set_var, exit};` | process environment |
 | `process` | `use process::{Command, Stdio, exec};` | run programs (no shell): `Command` setters, `spawn` / `status` / `output`, child pipes are `Stream`s; needs `--allow-exec` |
@@ -104,7 +107,7 @@ userland modules. Prelude is auto-injected.
 
 ## Coroutines
 
-`gen fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. Resume after done → default value.
+`gen fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. The `resume` that completes the body (falling off its end, or a bare `return;`) reads the value type's zero (`0`, `0.0`, `false`, `""`, `None`, an empty `Vec`, tuples of those); at a type with no zero (a class, `Result`, another enum, a function) it panics `the generator finished without a value of T`. A binding `yield` resumed without `with` reads the zero in the same way (`resumed without a value of T`). A `resume` after completion panics `resumed after completion`. A gen fn's bare `return;` is not `Ok`-wrapped. See `docs/internals/limitations.md` ("A generator's value nobody produced").
 
 Tutorial: [12-generators](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/12-generators.md) (`/docs/manual/tutorial/12-generators`).
 
@@ -118,7 +121,7 @@ test("addition") {
 }
 ```
 
-Body is Result mode. `raise` / failed `assert!` (stdlib `tests` macro) is a catchable `Err` (harness fails the case). `panic` aborts that VM; `coil test` also treats it as failure. Default `coil` / `coil run` / `coil-embed` exit 1 **only** on `panic` — an uncaught `raise` from `main` is `Result::Err` and exits 0. `#[test]` on `fn` is a type error.
+Body is Result mode. `raise` / failed `assert!` (stdlib `tests` macro) is a catchable `Err` (harness fails the case). `panic` aborts that run; `coil test` also treats it as failure. Default `coil` / `coil run` / `coil-embed` exit 1 **only** on `panic` — an uncaught `raise` from `main` is `Result::Err` and exits 0. `#[test]` on `fn` is a type error.
 
 ## Multi-file projects
 
@@ -132,7 +135,7 @@ Module search roots come from `--root DIR` (repeatable); `coil` reads no `coil.t
 | Option/Result | `examples/option.coil`, `examples/result.coil` |
 | Modules | `examples/modules.coil` |
 | Coroutines | `examples/coro.coil` |
-| FFI | `examples/ffi_extern.coil` (extern block), `examples/ffi_sum.coil` (`dload`) |
+| FFI | `examples/ffi_extern.coil` (extern block), `examples/ffi_sum.coil`, `examples/ffi_callback.coil` |
 | GC `fn drop()` | `examples/finalizer.coil` |
 | Full catalog | [examples](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/examples.md) (`/docs/manual/examples`) |
 
@@ -141,12 +144,12 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 ## Common pitfalls
 
 1. **`main` + `test()`** — do not combine in one file.
-2. **Assuming stdlib** — no `sort` or HTTP in the VM; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) ([modules](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)) for collections/IO adapters/`num` constants; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. IEEE `sqrt`/`atan`/… are prelude math; `PI`/`E`/`TAU` are `num`.
+2. **Assuming stdlib** — no `sort` or HTTP in the runtime; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) ([modules](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)) for collections/IO adapters/`num` constants; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. IEEE `sqrt`/`atan`/… are prelude math; `PI`/`E`/`TAU` are `num`.
 3. **Missing `use`** — `io`/`string` are not auto-imported.
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `--ffi-search-path` dirs, system; `dload` needs `--allow-dload` plus `--dload-pin` / `--dload-trusted`.
 5. **Stale `out.ccoil`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/error-codes.md) (`/docs/language/error-codes`).
-7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
+7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two words on a direct call and return ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
 8. **`raise` is not abort** — `raise` returns `Result::Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.
 
 ## Debugging programs

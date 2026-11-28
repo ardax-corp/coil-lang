@@ -40,17 +40,17 @@ impl Ordered for Ver {
 }
 
 fn compare<c: * -> Constraint, T: c>(T a, T b) -> int {
-    if lt_val(a, b) {
+    if a.lt_val(b) {
         return 0 - 1;
     }
-    if eq_val(a, b) {
+    if a.eq_val(b) {
         return 0;
     }
     return 1;
 }
 
 fn same<c: * -> Constraint, T: c>(T a, T b) -> bool {
-    return eq_val(a, b);
+    return a.eq_val(b);
 }
 
 test("pinned to Ordered, with the Equal superclass") {

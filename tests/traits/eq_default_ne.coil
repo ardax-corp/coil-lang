@@ -54,7 +54,7 @@ test("the default ne is reached as a method and as a function") {
     let a = mat(Vec::from([3]));
     let b = mat(Vec::from([4]));
     assert!(a.ne(b));
-    assert!(ne(a, b));
+    assert!(a.ne(b));
     assert!(!a.ne(a));
     assert!(Eq::ne(a, b));
 }

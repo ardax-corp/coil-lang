@@ -1,5 +1,5 @@
 // Canary (gate 1): hot match on boxed Option / Result / 3-variant payload
-// enum. A later match/unbox cut should drop VM-only time vs this baseline.
+// enum. A later match/unbox cut should drop time vs this baseline.
 use io::sync::print;
 use string::format;
 

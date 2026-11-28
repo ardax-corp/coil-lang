@@ -1,0 +1,103 @@
+// A generic class's function field and a generic enum's function payload
+// that hold the parameter below their top (`fn(T) -> Option<T>`) make the
+// type a nested open enum (coil-lang#2493, #2509): its generics are
+// clone-only, so a shared body calls only closures made where `T` is
+// open, which return the open enum's object. This is the twin of
+// `nested_open_fun.coil`, at `--clone-budget 0`.
+// @flags --clone-budget 0
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+class Deep<T> {
+    pub find: fn(T) -> Option<T>,
+    pub v: T,
+}
+
+impl Deep<T> {
+    pub fn go() -> Option<T> {
+        return (self.find)(self.v);
+    }
+
+    pub fn twice() -> int {
+        let f = self.find;
+        let n = 0;
+        match f(self.v) {
+            Option::Some(_) => {
+                n = n + 1;
+            },
+            Option::None => {},
+        }
+        match (self.find)(self.v) {
+            Option::Some(_) => {
+                n = n + 1;
+            },
+            Option::None => {},
+        }
+        return n;
+    }
+}
+
+fn go_deep<T>(Deep<T> d) -> Option<T> {
+    return (d.find)(d.v);
+}
+
+enum P<T> {
+    Find(fn(T) -> Option<T>),
+    N,
+}
+
+fn positive(int x) -> Option<int> {
+    if x > 0 {
+        return Option::Some(x);
+    }
+    return Option::None;
+}
+
+fn find<T>(P<T> p, [T; 1] x) -> Option<T> {
+    return match p {
+        P::Find(f) => f(x[0]),
+        P::N => Option::None,
+    };
+}
+
+fn long(string s) -> Option<string> {
+    if s.len() > 2 {
+        return Option::Some(s);
+    }
+    return Option::None;
+}
+
+test("a function field over the parameter") {
+    let d = new Deep(fn (int x) => Option::Some(x + 1), 4);
+    assert!((d.find)(1) == Option::Some(2));
+    assert!(d.go() == Option::Some(5));
+    assert!(d.twice() == 2);
+    assert!(go_deep(d) == Option::Some(5));
+    let s = new Deep(long, "abc");
+    assert!(s.go() == Option::Some("abc"));
+    assert!(go_deep(new Deep(long, "ab")) == Option::None);
+    let c = new Deep(
+        fn (C c) => if c.n > 0 {
+            Option::Some(c)
+        } else {
+            Option::None
+        },
+        new C(3),
+    );
+    assert!((c.go() ?? new C(0)).n == 3);
+    let f = new Deep(fn (float x) => Option::Some(x * 2.0), 1.5);
+    assert!((f.go() ?? 0.0) == 3.0);
+}
+
+test("an enum's function payload over the parameter") {
+    let p: P<int> = P::Find(positive);
+    assert!(find(p, [3]) == Option::Some(3));
+    assert!(find(p, [-3]) == Option::None);
+    let s: P<string> = P::Find(long);
+    assert!(find(s, ["abcd"]) == Option::Some("abcd"));
+    let n: P<string> = P::N;
+    assert!(find(n, ["abcd"]) == Option::None);
+}

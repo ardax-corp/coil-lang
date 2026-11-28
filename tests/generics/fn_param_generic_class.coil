@@ -1,0 +1,47 @@
+// A generic function's function parameter whose type holds the type
+// parameter inside a generic class (`Cell<T> -> T`, `T -> Cell<T>`) is
+// called in the shared body (coil-lang#2530): a class instance is one
+// object word on both sides, its fields of `T` the ground type's words.
+// The `_shared` twin runs the same at `--clone-budget 0`.
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+class Cell<T> {
+    value: T,
+}
+
+impl Cell<T> {
+    pub fn get() -> T {
+        return self.value;
+    }
+}
+
+fn apply<T>(Cell<T> -> T f, Cell<T> c) -> T {
+    return f(c);
+}
+
+fn build<T>(T -> Cell<T> f, [T; 1] v) -> Cell<T> {
+    return f(v[0]);
+}
+
+fn step<T>(Cell<T> -> Cell<T> f, Cell<T> c) -> T {
+    return f(f(c)).get();
+}
+
+test("a function over a generic class, called in a generic body") {
+    assert!(apply(fn (Cell<int> k) => k.get(), new Cell(4)) == 4);
+    assert!(apply(fn (Cell<string> k) => k.get() + "!", new Cell("a")) == "a!");
+    assert!(apply(fn (Cell<C> k) => k.get(), new Cell(new C(7))).n == 7);
+    assert!(apply(fn (Cell<float> k) => k.get() * 2.0, new Cell(1.5)) == 3.0);
+}
+
+test("a function returning a generic class, and one taking and returning it") {
+    assert!(build(fn (int x) => new Cell(x + 1), [1]).get() == 2);
+    assert!(build(fn (string s) => new Cell(s), ["b"]).get() == "b");
+    assert!(step(fn (Cell<int> k) => new Cell(k.get() * 10), new Cell(3)) == 300);
+    assert!(step(fn (Cell<string> k) => new Cell(k.get() + "x"), new Cell("s")) == "sxx");
+    assert!(step(fn (Cell<C> k) => new Cell(new C(k.get().n + 1)), new Cell(new C(1))).n == 3);
+}

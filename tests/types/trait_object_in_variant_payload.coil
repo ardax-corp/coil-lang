@@ -19,7 +19,7 @@ impl Named for Dog {
 
 fn show(Option<Named> o) -> string {
     return match o {
-        Option::Some(x) => name(x),
+        Option::Some(x) => x.name(),
         Option::None => "none",
     };
 }
@@ -37,7 +37,7 @@ fn main() {
     let _ = println(show(Option::None));
     match found(true) {
         Result::Ok(d) => {
-            let _ = println(name(d));
+            let _ = println(d.name());
         },
         Result::Err(e) => {
             let _ = println(e);

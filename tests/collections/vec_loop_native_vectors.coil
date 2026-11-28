@@ -1,0 +1,536 @@
+// Native code runs counted map and reduce loops on vectors, a block of
+// lanes at a time. An int add keeps a sum per lane only while no partial
+// of the scalar loop's left fold can overflow; past that, blocks fold one
+// lane at a time. Each loop is checked against the same loop kept scalar
+// (`black_box` in its body), over long arrays and at the edges of `int`.
+use tests::assert;
+use string::{slice_bytes, to_bytes};
+use thread::{join, spawn, ThreadError};
+
+const MAX = 9223372036854775807;
+
+const BIG = 4611686018427387904;
+
+fn sum_from(Vec<int> xs, int s) -> int {
+    let i = 0;
+    while i < xs.len() {
+        s = s + xs[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sum_from_scalar(Vec<int> xs, int s) -> int {
+    let i = 0;
+    while i < xs.len() {
+        s = s + black_box(xs[i]);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn vmax(Vec<int> xs, int m) -> int {
+    let i = 0;
+    while i < xs.len() {
+        if xs[i] > m {
+            m = xs[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn vmax_scalar(Vec<int> xs, int m) -> int {
+    let i = 0;
+    while i < xs.len() {
+        if black_box(xs[i]) > m {
+            m = xs[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn fsum(Vec<float> xs) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < xs.len() {
+        s = s + xs[i] * 1.5;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fsum_scalar(Vec<float> xs) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < xs.len() {
+        s = s + black_box(xs[i] * 1.5);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn ints(int n, int big, int seed) -> Vec<int> {
+    let v: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        let x = ((i + seed) * 7919) % 1001 - 500;
+        v.push(x * big);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn alternating(int n, int x) -> Vec<int> {
+    let v: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        v.push(if i % 2 == 0 {
+            x
+        } else {
+            0 - x
+        });
+        i = i + 1;
+    }
+    return v;
+}
+
+test("int sums over long arrays, small and large terms") {
+    let lens = [0, 1, 7, 8, 9, 15, 16, 17, 511, 512, 513, 1000, 4099];
+    // Terms of 500 * 2^43 pass the per-lane range check (below 2^52) only
+    // in part, and of 500 * 2^45 not at all.
+    let scales = [1, 1024, 1099511627776, 8796093022208, 35184372088832];
+    for n in lens {
+        for k in scales {
+            let xs = ints(n, k, n);
+            assert!(sum_from(xs, 0) == sum_from_scalar(xs, 0));
+            assert!(sum_from(xs, 3) == sum_from_scalar(xs, 3));
+        }
+    }
+}
+
+test("a sum whose lanes would overflow but whose left fold does not") {
+    // Lanes 0, 2, 4, .. hold BIG and lanes 1, 3, .. hold -BIG: every
+    // partial of the left fold is BIG or 0.
+    let xs = alternating(1000, BIG);
+    assert!(sum_from(xs, 0) == 0);
+    assert!(sum_from(xs, 0) == sum_from_scalar(xs, 0));
+    assert!(sum_from(alternating(1001, BIG), 0) == BIG);
+}
+
+test("a sum that grows past 2^61 and on") {
+    // 2^51 per term: the lane sums go into the total every 512 lanes, and
+    // past 2^61 the rest folds lane by lane.
+    let xs: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 3000 {
+        xs.push(2251799813685248);
+        i = i + 1;
+    }
+    assert!(sum_from(xs, 0) == 3000 * 2251799813685248);
+    assert!(sum_from(xs, 0 - BIG) == sum_from_scalar(xs, 0 - BIG));
+}
+
+fn prefix_overflow() -> int {
+    // MAX + 1 overflows at the second lane, though MAX + 1 - 1 fits.
+    let xs: Vec<int> = Vec::new();
+    xs.push(MAX);
+    xs.push(1);
+    xs.push(-1);
+    let i = 0;
+    while i < 20 {
+        xs.push(0);
+        i = i + 1;
+    }
+    return sum_from(xs, 0);
+}
+
+fn late_overflow() -> int {
+    let xs: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 2000 {
+        xs.push(MAX / 1500);
+        i = i + 1;
+    }
+    return sum_from(xs, 0);
+}
+
+fn panics(() -> int f) -> bool {
+    let t = match spawn(f) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    return match join(t) {
+        Result::Err(ThreadError::Panicked(_)) => true,
+        default => false,
+    };
+}
+
+test("a partial that overflows panics as the scalar loop does") {
+    assert!(panics(prefix_overflow));
+    assert!(panics(late_overflow));
+}
+
+test("int max over long arrays from any start") {
+    let lens = [1, 9, 17, 513, 1000];
+    for n in lens {
+        let xs = ints(n, 1, n * 3);
+        assert!(vmax(xs, 0 - MAX) == vmax_scalar(xs, 0 - MAX));
+        assert!(vmax(xs, 400) == vmax_scalar(xs, 400));
+        assert!(vmax(xs, MAX) == MAX);
+    }
+}
+
+test("float sums keep the scalar loop's order") {
+    // Cancelling terms: a different order gives a different sum.
+    let xs: Vec<float> = Vec::new();
+    let i = 0;
+    while i < 999 {
+        xs.push(
+            if i % 3 == 0 {
+                10000000000000000.0
+            } else if i % 3 == 1 {
+                1.0
+            } else {
+                -10000000000000000.0
+            },
+        );
+        i = i + 1;
+    }
+    assert!(fsum(xs) == fsum_scalar(xs));
+}
+
+fn halve_into(Vec<int> out, Vec<int> a, Vec<int> d) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = a[i] / d[i] - 1;
+        i = i + 1;
+    }
+}
+
+fn to_ints(Vec<int> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] * 2.0) as int;
+        i = i + 1;
+    }
+}
+
+fn to_ints_scalar(Vec<int> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = black_box(a[i] * 2.0) as int;
+        i = i + 1;
+    }
+}
+
+fn zero_divisor() -> int {
+    let a = ints(40, 1, 0);
+    let d: Vec<int> = Vec::new();
+    let out: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 40 {
+        d.push(if i == 13 {
+            0
+        } else {
+            3
+        });
+        out.push(0);
+        i = i + 1;
+    }
+    halve_into(out, a, d);
+    return out[0];
+}
+
+test("a zero divisor in a block panics; other divisors divide") {
+    assert!(panics(zero_divisor));
+    let a = ints(37, 1, 5);
+    let d = ints(37, 1, 9);
+    let i = 0;
+    while i < d.len() {
+        if d[i] == 0 {
+            d[i] = 7;
+        }
+        i = i + 1;
+    }
+    let out = ints(37, 0, 0);
+    halve_into(out, a, d);
+    let j = 0;
+    while j < a.len() {
+        assert!(out[j] == a[j] / d[j] - 1);
+        j = j + 1;
+    }
+}
+
+test("float to int lanes saturate and take NaN as 0") {
+    let a: Vec<float> = Vec::new();
+    let vals = [
+        1.75,
+        -2.5,
+        0.0 / 0.0,
+        1.0 / 0.0,
+        -1.0 / 0.0,
+        4611686018427388000.0,
+        123.0,
+        -0.25,
+        9.5,
+    ];
+    for v in vals {
+        a.push(v);
+    }
+    let out = ints(9, 0, 0);
+    let out_s = ints(9, 0, 0);
+    to_ints(out, a);
+    to_ints_scalar(out_s, a);
+    let i = 0;
+    while i < 9 {
+        assert!(out[i] == out_s[i]);
+        i = i + 1;
+    }
+    assert!(out[2] == 0);
+    assert!(out[3] == MAX);
+}
+
+fn lower_into(string s, Vec<byte> out) {
+    let i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_into_scalar(string s, Vec<byte> out) {
+    let i = 0;
+    while i < s.len() {
+        let c = black_box(s[i]);
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+}
+
+fn scaled_push(Vec<float> a, Vec<float> out) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 0.5 - 1.0);
+        i = i + 1;
+    }
+}
+
+fn scaled_push_scalar(Vec<float> a, Vec<float> out) {
+    let i = 0;
+    while i < a.len() {
+        out.push(black_box(a[i]) * 0.5 - 1.0);
+        i = i + 1;
+    }
+}
+
+test("pushes from a string onto bytes, and floats onto floats, as they grow") {
+    let s = "";
+    let k = 0;
+    while k < 130 {
+        s = s + "The Quick BROWN fox; ";
+        k = k + 1;
+    }
+    for n in [0, 1, 7, 8, 9, 17, 100, 2730] {
+        let part = match slice_bytes(s, 0, n) {
+            Result::Ok(p) => p,
+            Result::Err(_) => panic "slice failed",
+        };
+        let p: Vec<byte> = Vec::new();
+        let q: Vec<byte> = Vec::new();
+        lower_into(part, p);
+        lower_into_scalar(part, q);
+        assert!(p.len() == n);
+        assert!(p == q);
+        // Onto an array that already holds a few, with room for some.
+        let x: Vec<byte> = Vec::with_capacity(12);
+        x.push(65 as byte);
+        let y: Vec<byte> = Vec::new();
+        y.push(65 as byte);
+        lower_into(part, x);
+        lower_into_scalar(part, y);
+        assert!(x == y);
+        let a: Vec<float> = Vec::new();
+        let i = 0;
+        while i < n {
+            a.push((i as float) * 1.25);
+            i = i + 1;
+        }
+        let f: Vec<float> = Vec::new();
+        let g: Vec<float> = Vec::new();
+        scaled_push(a, f);
+        scaled_push_scalar(a, g);
+        assert!(f == g);
+    }
+}
+
+fn lower_bytes(Vec<byte> out, Vec<byte> b, int from) {
+    let i = from;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_bytes_scalar(Vec<byte> out, Vec<byte> b, int from) {
+    let i = from;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_str(Vec<byte> out, string s) {
+    let i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+test("stores into bytes from bytes and from a string, at any start") {
+    let s = "";
+    let k = 0;
+    while k < 60 {
+        s = s + "Hello, WORLD of Bytes! ";
+        k = k + 1;
+    }
+    let b = to_bytes(s);
+    for from in [0, 1, 5, 8, 9, 100, 1379, 1380] {
+        let out: Vec<byte> = to_bytes(s);
+        let out_s: Vec<byte> = to_bytes(s);
+        lower_bytes(out, b, from);
+        lower_bytes_scalar(out_s, b, from);
+        assert!(out == out_s);
+    }
+    let out: Vec<byte> = to_bytes(s);
+    let out_s: Vec<byte> = to_bytes(s);
+    lower_str(out, s);
+    lower_bytes_scalar(out_s, b, 0);
+    assert!(out == out_s);
+}
+
+fn scale_sum(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i];
+        b[i] = v * 3 - 1;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn scale_sum_scalar(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i];
+        b[i] = black_box(v * 3 - 1);
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn triple_in_place(Vec<int> a) -> int {
+    let m = 0 - MAX;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i] * 3;
+        a[i] = v;
+        if v > m {
+            m = v;
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn fdot_into(Vec<float> a, Vec<float> b, Vec<float> out) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < a.len() {
+        let x = a[i] * b[i];
+        out[i] = x;
+        s = s + x;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fdot_into_scalar(Vec<float> a, Vec<float> b, Vec<float> out) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < a.len() {
+        let x = a[i] * b[i];
+        out[i] = black_box(x);
+        s = s + x;
+        i = i + 1;
+    }
+    return s;
+}
+
+test("sums and maxima that also store, against the scalar loop") {
+    for n in [0, 1, 7, 8, 9, 17, 511, 512, 513, 1000] {
+        let a = ints(n, 1024, n);
+        let b = ints(n, 0, 0);
+        let c = ints(n, 0, 0);
+        assert!(scale_sum(a, b) == scale_sum_scalar(a, c));
+        assert!(b == c);
+        let x = ints(n, 7, 1);
+        let y = ints(n, 7, 1);
+        let m = triple_in_place(x);
+        let j = 0;
+        let m2 = 0 - MAX;
+        while j < y.len() {
+            y[j] = y[j] * 3;
+            if y[j] > m2 {
+                m2 = y[j];
+            }
+            j = j + 1;
+        }
+        assert!(m == m2);
+        assert!(x == y);
+        let fa: Vec<float> = Vec::new();
+        let fb: Vec<float> = Vec::new();
+        let o1: Vec<float> = Vec::new();
+        let o2: Vec<float> = Vec::new();
+        let k = 0;
+        while k < n {
+            fa.push((k as float) * 0.37 - 20.0);
+            fb.push(1.0 / ((k + 1) as float));
+            o1.push(0.0);
+            o2.push(0.0);
+            k = k + 1;
+        }
+        assert!(fdot_into(fa, fb, o1) == fdot_into_scalar(fa, fb, o2));
+        assert!(o1 == o2);
+    }
+}

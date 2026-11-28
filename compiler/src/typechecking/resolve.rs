@@ -138,7 +138,7 @@ fn bind_uses(
                 bind_uses(interner, child, virtual_modules, local_defs);
             }
         }
-        Expression::Use { path, name, alias } => {
+        Expression::Use { path, name, alias, .. } => {
             if name == "*" {
                 return;
             }
@@ -158,8 +158,8 @@ fn bind_uses(
 }
 
 /// Every name a module's top level declares, of any kind: what a `use` of
-/// it may import (#1851). Includes the locals its own `use`s bind, so a
-/// module can pass an import on.
+/// it may import (#1851). Includes the locals its own `pub use`s bind, which
+/// re-export them (#2864).
 pub fn item_names(ast: &Output, out: &mut std::collections::HashSet<String>) {
     let ast = unwrap(ast);
     let name: &str = match ast.1.as_ref() {
@@ -180,7 +180,8 @@ pub fn item_names(ast: &Output, out: &mut std::collections::HashSet<String>) {
         | Expression::FnMacroDecl { name, .. } => name,
         Expression::ExternStruct(decl) => decl.name,
         Expression::Module(name, _) => name.as_str(),
-        Expression::Use { name, alias, .. } => alias.as_deref().unwrap_or(name),
+        // Only a `pub use` passes an import on (#2864).
+        Expression::Use { name, alias, public: true, .. } => alias.as_deref().unwrap_or(name),
         Expression::Constant(name, ..) => match name.1.as_ref() {
             Expression::Identifier(n) => n,
             _ => return,
@@ -192,6 +193,24 @@ pub fn item_names(ast: &Output, out: &mut std::collections::HashSet<String>) {
         _ => return,
     };
     out.insert(name.to_string());
+}
+
+/// The locals a module's top-level plain (not `pub`) `use`s bind, with the
+/// module each imports from: names a `use` of the module cannot import, as
+/// it does not re-export them (#2864).
+pub fn private_import_names(ast: &Output, out: &mut std::collections::HashMap<String, String>) {
+    let ast = unwrap(ast);
+    match ast.1.as_ref() {
+        Expression::Program(children) | Expression::Fragment(children) | Expression::Block(children) => {
+            for child in children {
+                private_import_names(child, out);
+            }
+        }
+        Expression::Use { path, name, alias, public: false, .. } if name != "*" => {
+            out.entry(alias.clone().unwrap_or_else(|| name.clone())).or_insert_with(|| path.join("::"));
+        }
+        _ => {}
+    }
 }
 
 /// DefId for `use path::name`.

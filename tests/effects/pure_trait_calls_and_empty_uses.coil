@@ -20,7 +20,7 @@ pure fn total(Area a, Area b) -> int {
     if !true {
         panic "assertion failed";
     }
-    return area(a) + area(b);
+    return a.area() + b.area();
 }
 
 fn apply(int -> int f, int x) -> int uses {} {

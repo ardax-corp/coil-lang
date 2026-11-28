@@ -1,8 +1,8 @@
 //! S2f / Q1: reuse the StoreIndex array instead of rematerializing `Alloc`.
 //!
 //! HIR lowering already keeps non-escaping `[T; N]` locals in slots. Dense /
-//! LIR emit can still see a second `Alloc` of the same elems
-//! after `StoreIndex` (dest is the stored *value*). VM mutates in place, so
+//! emit can still see a second `Alloc` of the same elems
+//! after `StoreIndex` (dest is the stored *value*). runtime mutates in place, so
 //! later `Index` must read that object — not a fresh `[0, 0, 0]`.
 
 use std::collections::HashMap;
@@ -20,14 +20,14 @@ pub fn sroa(func: &mut MirFunc) -> usize {
         // Reconstruct may Alloc the same elems immediately after StoreIndex.
         // A later sibling zip with the same recipe must stay a fresh object.
         let mut pending_reuse: Option<(Vec<ValueId>, ValueId)> = None;
-        // Identity for a barrier dest is the paired Alloc/ArrayPush, not
-        // `roots.first()` — intern keys / other HeapRefs sort first (D2).
+        // Identity for a barrier dest is the Alloc/ArrayPush right before
+        // it, as [`super::barrier_pairs`] pairs them (D2).
         let mut pending_alloc: Option<ValueId> = None;
         for inst in &block.insts {
             match inst {
                 MirInst::Alloc {
                     dest,
-                    kind: MirAllocKind::Array | MirAllocKind::Tuple,
+                    kind: MirAllocKind::Array | MirAllocKind::TUPLE,
                     elems,
                     ..
                 } => {
@@ -46,17 +46,12 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     pending_reuse = None;
                     pending_alloc = Some(*dest);
                 }
-                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } | MirInst::LanePush { dest, .. } | MirInst::LanesToWords { dest, .. } => {
                     pending_alloc = Some(*dest);
                     pending_reuse = None;
                 }
-                MirInst::GcBarrier { dest, roots, .. } => {
-                    let ident = pending_alloc
-                        .filter(|a| roots.is_empty() || roots.contains(a))
-                        .or_else(|| {
-                            roots.iter().copied().find(|r| alloc_of.contains_key(r))
-                        });
-                    if let Some(r0) = ident {
+                MirInst::GcBarrier { dest, object, .. } => {
+                    if let Some(r0) = pending_alloc.filter(|a| a == object) {
                         let obj = subst.get(&r0).copied().unwrap_or(r0);
                         subst.insert(*dest, obj);
                         if let Some(elems) = alloc_of.get(&r0).cloned() {
@@ -73,43 +68,131 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     pending_alloc = None;
                 }
                 MirInst::StoreIndex { array, .. } => {
+                    pending_alloc = None;
                     let arr = subst.get(array).copied().unwrap_or(*array);
                     if let Some(elems) = alloc_of.get(&arr).cloned() {
                         pending_reuse = Some((elems, arr));
                     }
                 }
-                _ => pending_reuse = None,
+                _ => {
+                    pending_reuse = None;
+                    pending_alloc = None;
+                }
             }
         }
     }
     if subst.is_empty() {
         return 0;
     }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
-        }
-    }
-    func.rewrite_debug_slots(|v| *subst.get(&v).unwrap_or(&v));
+    func.map_values(|v| *subst.get(&v).unwrap_or(&v));
     let used = used_values(func);
     let mut removed = 0;
     for block in &mut func.blocks {
         let before = block.insts.len();
         block.insts.retain(|inst| {
-            if matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
-                && !used.contains(&inst.dest())
-            {
-                return false;
-            }
-            true
+            !matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
+                || used.contains(&inst.dest())
         });
         removed += before - block.insts.len();
     }
     dce(func);
     removed
+}
+
+/// Read a fresh tuple's items from the words it was made of: each
+/// `productload` of an `alloc.tuple` (or of a safepoint barrier on one)
+/// becomes the item, and a tuple nothing else reads goes. A tuple is never
+/// written after it is made, so its items are the words it was made of.
+/// A flat wide field's read ([`crate::mir::HirFieldWord::Wide`]) makes
+/// such a tuple, which a destructuring then reads item by item.
+/// Returns how many loads it forwarded.
+pub fn forward_tuple_loads(func: &mut MirFunc) -> usize {
+    let mut items: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Alloc { dest, kind: MirAllocKind::TUPLE, elems, .. } => {
+                items.insert(*dest, elems.clone());
+            }
+            MirInst::GcBarrier { dest, object, .. } if items.contains_key(object) => {
+                let elems = items[object].clone();
+                items.insert(*dest, elems);
+            }
+            _ => {}
+        }
+    }
+    if items.is_empty() {
+        return 0;
+    }
+    // Anything that may write into an object keeps its loads as they are.
+    let written: std::collections::HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::HeapFieldStore { object, .. } => Some(*object),
+            MirInst::StoreIndex { array, .. } => Some(*array),
+            MirInst::Cow { src, .. } | MirInst::CowIndex { array: src, .. } => Some(*src),
+            _ => None,
+        })
+        .collect();
+    let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+    // A load of a forwarded load reads the item that load forwards to (a
+    // nested tuple's item, `t[0][1]`), to a fixed point.
+    loop {
+        let before = subst.len();
+        for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+            if let MirInst::ProductLoad { dest, object, slot } = inst
+                && !subst.contains_key(dest)
+            {
+                let read = *object;
+                let mut object = read;
+                while let Some(&o) = subst.get(&object) {
+                    object = o;
+                }
+                if !written.contains(&read)
+                    && !written.contains(&object)
+                    && let Some(&item) = items.get(&object).and_then(|e| e.get(*slot as usize))
+                    && super::frame_words::ty_of(func, item) == super::frame_words::ty_of(func, *dest)
+                {
+                    subst.insert(*dest, item);
+                }
+            }
+        }
+        if subst.len() == before {
+            break;
+        }
+    }
+    if subst.is_empty() {
+        return 0;
+    }
+    let n = subst.len();
+    // A load can forward to an item that is itself a forwarded load
+    // (`t = (e, t[1])` then `t[1]`): `replace_uses` follows the chain.
+    func.replace_uses(&subst);
+    // Drop the forwarded loads, then the tuples (and their barriers) no
+    // one reads any more, last made first.
+    for block in &mut func.blocks {
+        block.insts.retain(|i| !subst.contains_key(&i.dest()) || !matches!(i, MirInst::ProductLoad { .. }));
+    }
+    loop {
+        let used = used_values(func);
+        let mut gone = false;
+        for block in &mut func.blocks {
+            let before = block.insts.len();
+            block.insts.retain(|inst| match inst {
+                MirInst::Alloc { dest, kind: MirAllocKind::TUPLE, .. } | MirInst::GcBarrier { dest, .. } => {
+                    !items.contains_key(dest) || used.contains(dest)
+                }
+                _ => true,
+            });
+            gone |= block.insts.len() != before;
+        }
+        if !gone {
+            break;
+        }
+    }
+    dce(func);
+    n
 }
 
 fn used_values(func: &MirFunc) -> std::collections::HashSet<ValueId> {
@@ -121,28 +204,7 @@ fn used_values(func: &MirFunc) -> std::collections::HashSet<ValueId> {
             }
         }
         if let Some(term) = &block.term {
-            match term {
-                super::inst::Terminator::Br { cond, .. } => {
-                    used.insert(*cond);
-                }
-                super::inst::Terminator::JumpIfMatch {
-                    scrutinee,
-                    payloads,
-                    ..
-                } => {
-                    used.insert(*scrutinee);
-                    used.extend(payloads.iter().copied());
-                }
-                super::inst::Terminator::Return { lo, hi } => {
-                    if let Some(v) = lo {
-                        used.insert(*v);
-                    }
-                    if let Some(v) = hi {
-                        used.insert(*v);
-                    }
-                }
-                _ => {}
-            }
+            used.extend(term.uses().chain(term.binds().iter().copied()));
         }
     }
     used
@@ -161,12 +223,12 @@ mod tests {
         let z = b.ins_const(MirConst::I64(0)).unwrap();
         let a0 = b.ins_alloc(MirAllocKind::Array, vec![z, z, z]).unwrap();
         let g0 = b
-            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![a0])
+            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, a0)
             .unwrap();
         let _st = b.ins_store_index(g0, i, i, false).unwrap();
         let a1 = b.ins_alloc(MirAllocKind::Array, vec![z, z, z]).unwrap();
         let g1 = b
-            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![a1])
+            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, a1)
             .unwrap();
         let v = b.ins_index(g1, i, MirTy::I64, false).unwrap();
         b.set_ret_ty(MirTy::I64);
@@ -180,6 +242,66 @@ mod tests {
             .filter(|i| matches!(i, MirInst::Alloc { .. }))
             .count();
         assert_eq!(allocs, 1, "second Alloc must die; {func:?}");
+    }
+
+    #[test]
+    fn forwards_fresh_tuple_items() {
+        let mut b = MirBuilder::new("items");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let x = b.add_param(MirTy::F64).unwrap();
+        let t = b.ins_alloc(MirAllocKind::TUPLE, vec![i, x, i]).unwrap();
+        let g = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, t).unwrap();
+        let v = b.ins_product_load(g, 2, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert_eq!(forward_tuple_loads(&mut func), 1);
+        let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
+        assert_eq!(left, 0, "the tuple and its load go; {func:?}");
+    }
+
+    #[test]
+    fn forwards_a_load_of_a_forwarded_item() {
+        // `t2 = (x, t1[1])` then `t2[1]`: the second load forwards to the
+        // first load, which itself forwards to `i`.
+        let mut b = MirBuilder::new("chain");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let x = b.add_param(MirTy::F64).unwrap();
+        let t1 = b.ins_alloc(MirAllocKind::TUPLE, vec![x, i]).unwrap();
+        let g1 = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, t1).unwrap();
+        let a = b.ins_product_load(g1, 1, MirTy::I64).unwrap();
+        let t2 = b.ins_alloc(MirAllocKind::TUPLE, vec![x, a]).unwrap();
+        let g2 = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, t2).unwrap();
+        let v = b.ins_product_load(g2, 1, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert_eq!(forward_tuple_loads(&mut func), 2);
+        let ret: Vec<ValueId> = func.blocks.iter().filter_map(|bl| bl.term.as_ref()).flat_map(|t| t.uses()).collect();
+        assert_eq!(ret, vec![i], "returns the first tuple's item; {func}");
+        let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
+        assert_eq!(left, 0, "both tuples and loads go; {func:?}");
+    }
+
+    #[test]
+    fn forwards_a_nested_tuples_item_through_its_load() {
+        // `t = ((i, j), i)` then `t[0][1]`: the inner load reads the outer
+        // load, which forwards to the inner tuple.
+        let mut b = MirBuilder::new("nested");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let j = b.add_param(MirTy::I64).unwrap();
+        let inner = b.ins_alloc(MirAllocKind::TUPLE, vec![i, j]).unwrap();
+        let outer = b.ins_alloc(MirAllocKind::TUPLE, vec![inner, i]).unwrap();
+        let p = b.ins_product_load(outer, 0, MirTy::HeapRef).unwrap();
+        let v = b.ins_product_load(p, 1, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert_eq!(forward_tuple_loads(&mut func), 2);
+        let ret: Vec<ValueId> = func.blocks.iter().filter_map(|bl| bl.term.as_ref()).flat_map(|t| t.uses()).collect();
+        assert_eq!(ret, vec![j], "returns the inner tuple's item; {func}");
+        let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
+        assert_eq!(left, 0, "both tuples and loads go; {func:?}");
     }
 
     #[test]
@@ -222,7 +344,7 @@ mod tests {
             )
             .unwrap();
         let live = b
-            .ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+            .ins_gc_barrier(MirGcKind::Safepoint, obj)
             .unwrap();
         let _st = b
             .ins_heap_field_store(live, val, 0)
@@ -230,20 +352,6 @@ mod tests {
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(val)).unwrap();
         let mut func = b.finish().unwrap();
-        let barrier_roots: Vec<_> = func
-            .blocks
-            .iter()
-            .flat_map(|bl| bl.insts.iter())
-            .find_map(|i| match i {
-                MirInst::GcBarrier { roots, .. } => Some(roots.clone()),
-                _ => None,
-            })
-            .expect("gc barrier");
-        assert_eq!(
-            barrier_roots.first().copied(),
-            Some(intern),
-            "intern sorts first among live roots; {func}"
-        );
         let _ = sroa(&mut func);
         let mut intern_id = None;
         let mut alloc_id = None;

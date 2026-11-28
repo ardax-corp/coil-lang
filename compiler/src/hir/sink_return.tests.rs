@@ -18,7 +18,7 @@ fn returns_after(src: &str) -> Option<usize> {
     let mut stack = vec![out.root.expect("root")];
     while let Some(id) = stack.pop() {
         n += usize::from(matches!(out.expr(id).kind, HirKind::Return(_)));
-        stack.extend(children(&out, id));
+        stack.extend(out.children(id));
     }
     Some(n)
 }

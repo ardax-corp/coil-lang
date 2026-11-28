@@ -1,0 +1,22 @@
+// CPU: an (int, int, int) a loop carries as a mutable local, rebound from
+// a call's result and from a fresh tuple of its own items each turn. Its
+// words go around the loop in registers, no tuple built per turn.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn step((int, int, int) t) -> (int, int, int) {
+    return (t[1], t[2] & 0xffff, t[0] + t[1]);
+}
+
+fn main() {
+    let t = (0, 1, 1);
+    let u = (0, 1, 2);
+    let i = 0;
+    while i < 10000000 {
+        t = step(t);
+        u = (u[0] + 1, u[2] & 1023, u[1] + i);
+        i += 1;
+    }
+    let _ = print(format("%i %i %i\n", t[0] + t[1] + t[2], u[0], u[1] + u[2]));
+}

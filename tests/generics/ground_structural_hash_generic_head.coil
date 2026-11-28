@@ -1,0 +1,81 @@
+// A ground tuple or fixed array whose items have a bounded generic-head
+// `Hash` instance (coil-lang#2590): `(Box<int>, int).hash()` and
+// `[Box<int>; 2].hash()` hash each item through `Hash<Box<int>>` (its
+// per-type clone, or its shared entry with its dictionary under
+// `--clone-budget 0`), as `Show` and `Eq` of the same shapes do. `Box`'s
+// `hash` is its item's tens, so values that differ only below ten hash
+// alike and a hash built without the instance differs. Also an `Option`
+// item (the prelude's `impl Hash for Option<T: Hash>`), nested boxes, a
+// bounded generic called at such a shape, and the open shape in a shared
+// body.
+use tests::assert;
+
+class Box<T> {
+    pub item: T,
+}
+
+impl Hash for Box<T: Hash> {
+    fn hash(Box<T> b) -> int {
+        return b.item.hash() / 10;
+    }
+}
+
+fn hashed<V: Hash>(V v) -> int {
+    return v.hash();
+}
+
+fn boxed<T: Hash>(T x) -> int {
+    return hashed((new Box(x), 1));
+}
+
+test("Hash of a tuple of a bounded generic-head instance's class") {
+    let a: (Box<int>, int) = (new Box(31), 1);
+    let b: (Box<int>, int) = (new Box(35), 1);
+    let c: (Box<int>, int) = (new Box(45), 1);
+    assert!(a.hash() == b.hash());
+    assert!(a.hash() != c.hash());
+    assert!((1, new Box(31)).hash() == (1, new Box(38)).hash());
+    assert!((1, new Box(31)).hash() != (2, new Box(31)).hash());
+}
+
+test("Hash of an array of a bounded generic-head instance's class") {
+    let a: [Box<int>; 2] = [new Box(31), new Box(42)];
+    let b: [Box<int>; 2] = [new Box(35), new Box(47)];
+    let c: [Box<int>; 2] = [new Box(35), new Box(57)];
+    assert!(a.hash() == b.hash());
+    assert!(a.hash() != c.hash());
+}
+
+test("Hash of nested boxes and Option items") {
+    let a = (new Box(new Box(310)), "s");
+    let b = (new Box(new Box(399)), "s");
+    let c = (new Box(new Box(400)), "s");
+    assert!(a.hash() == b.hash());
+    assert!(a.hash() != c.hash());
+    let o: (Option<Box<int>>, int) = (Some(new Box(31)), 1);
+    let p: (Option<Box<int>>, int) = (Some(new Box(35)), 1);
+    let n: (Option<Box<int>>, int) = (None, 1);
+    assert!(o.hash() == p.hash());
+    assert!(o.hash() != n.hash());
+    // A literal beside the annotated type is one instance (#2607).
+    let i = (Some(3), 1);
+    let j: (Option<int>, int) = (Some(3), 1);
+    let k = (Some(4), 1);
+    assert!(i.hash() == j.hash());
+    assert!(i.hash() != k.hash());
+    assert!((Some(3), 1).hash() == j.hash());
+    let s = (Some("x"), 1);
+    let t: (Option<string>, int) = (Some("x"), 1);
+    let none: (Option<string>, int) = (None, 1);
+    assert!(s.hash() == t.hash());
+    assert!(s.hash() != none.hash());
+}
+
+test("a bounded generic at such a shape") {
+    assert!(hashed((new Box(31), 1)) == hashed((new Box(35), 1)));
+    assert!(hashed((new Box(31), 1)) == (new Box(31), 1).hash());
+    assert!(hashed([new Box(31)]) == hashed([new Box(39)]));
+    assert!(boxed(31) == boxed(35));
+    assert!(boxed(31) != boxed(45));
+    assert!(boxed(31) == (new Box(31), 1).hash());
+}

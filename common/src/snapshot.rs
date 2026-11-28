@@ -1,4 +1,4 @@
-//! Heap snapshots: an object graph copied out of the compile-time VM.
+//! Heap snapshots: an object graph copied out of the compile-time interpreter.
 //!
 //! A `const` whose value is computed at compile time keeps that value as a
 //! snapshot: the objects it reaches, in an order-free table, plus the static
@@ -29,15 +29,16 @@ const HEADER_WORDS: usize = 4;
 const OBJ_STRING: u64 = 0;
 const OBJ_BYTES: u64 = 1;
 const OBJ_ARRAY: u64 = 2;
-const OBJ_TUPLE: u64 = 3;
+// 3 was a tuple (`SnapObject::Tuple`); a tuple is an `Enum` of `PRODUCT_TAG` since archive major 8.
 const OBJ_ENUM: u64 = 4;
 const OBJ_INSTANCE: u64 = 5;
-const OBJ_BOXED: u64 = 6;
+// 6 was a generic-runtime box (`SnapObject::Boxed`, gone with archive major 8).
+const OBJ_LANES: u64 = 7;
 
 const TAG_RAW: u64 = 0;
 const TAG_REF: u64 = 1;
 const TAG_UNIT_ENUM: u64 = 2;
-const TAG_EMPTY_TUPLE: u64 = 3;
+// Word tag 3 was the shared `()`; it is the `UnitEnum` of `PRODUCT_TAG` since archive major 8.
 
 /// One word of a snapshot object (or of a static slot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,10 +48,9 @@ pub enum SnapWord {
     /// Object `index` of the snapshot. `err_bit` keeps a niche `Result`
     /// `Err` (pointer `| 1`).
     Ref { index: u32, err_bit: bool },
-    /// The shared unit variant with this tag; `err_bit` as for `Ref`.
+    /// The shared unit variant with this tag (`()` for
+    /// [`crate::PRODUCT_TAG`]); `err_bit` as for `Ref`.
     UnitEnum { tag: u32, err_bit: bool },
-    /// The shared `()`; `err_bit` as for `Ref`.
-    EmptyTuple { err_bit: bool },
 }
 
 /// One heap object of a snapshot.
@@ -60,12 +60,19 @@ pub enum SnapObject {
     /// A packed byte array (`Vec<byte>` / `Vec<bool>`).
     Bytes(Vec<u8>),
     Array { elem_kind: u8, words: Vec<SnapWord> },
-    Tuple { kinds: u8, words: Vec<SnapWord> },
-    Enum { tag: u32, type_id: u32, kinds: u8, words: Vec<SnapWord> },
-    /// A typed class instance's field slots.
-    Instance { type_id: u32, words: Vec<SnapWord> },
-    /// A generic-runtime box: its tag and payload.
-    Boxed { tag: u16, word: SnapWord },
+    /// An array of `k`-word elements, `k` words each in order; `tag_mask`
+    /// as `ObjArray::with_lanes` takes it.
+    Lanes { k: u8, tag_mask: u64, words: Vec<SnapWord> },
+    /// A variant's payload, or a tuple's elements under
+    /// [`crate::PRODUCT_TAG`].
+    /// `kinds` packed as [`crate::PackedKinds`], in the header's 24-bit
+    /// `aux` field (archive 8.2; earlier archives carry 4 words' kinds) and
+    /// for words 12 to 15 the high half of the type id word (8.5).
+    Enum { tag: u32, type_id: u32, kinds: crate::PackedKinds, words: Vec<SnapWord> },
+    /// A typed class instance's field slots; `kinds` its own packed kinds of
+    /// the slots its class row leaves unknown, in the header's `aux` field
+    /// (archive 8.5; `0` before): the first 12 slots' only.
+    Instance { type_id: u32, kinds: crate::PackedKinds, words: Vec<SnapWord> },
 }
 
 /// Objects plus the static slots that hold the roots.
@@ -87,8 +94,6 @@ pub enum SnapStep {
     Payload(usize),
     /// Field slot `index` of an instance of class or record `type_id`.
     Field { type_id: u32, index: usize },
-    /// The value inside a generic-runtime box.
-    Boxed,
 }
 
 /// A value reachable from a root that has no snapshot form.
@@ -110,6 +115,7 @@ pub enum SnapshotDecodeError {
     /// The header's length disagrees with what the body used.
     Length,
     BadObjectKind(u64),
+    BadWordTag(u64),
     /// A reference past the object table.
     BadRef(u32),
     BadUtf8,
@@ -122,6 +128,7 @@ impl std::fmt::Display for SnapshotDecodeError {
             Self::Truncated => write!(f, "heap snapshot is truncated"),
             Self::Length => write!(f, "heap snapshot length does not match its contents"),
             Self::BadObjectKind(k) => write!(f, "heap snapshot has unknown object kind {k}"),
+            Self::BadWordTag(t) => write!(f, "heap snapshot has unknown word tag {t}"),
             Self::BadRef(i) => write!(f, "heap snapshot refers to missing object {i}"),
             Self::BadUtf8 => write!(f, "heap snapshot string is not UTF-8"),
         }
@@ -142,8 +149,7 @@ impl HeapSnapshot {
         out
     }
 
-    /// Total encoded length read from the header at `words[0..]`, for the
-    /// bytecode verifier (which checks it fits the pool).
+    /// Total encoded length read from the header at `words[0..]`.
     pub fn encoded_len(words: &[u64]) -> Option<usize> {
         match words {
             [SNAPSHOT_MAGIC, len, ..] => usize::try_from(*len).ok(),
@@ -202,15 +208,17 @@ impl HeapSnapshot {
             match object {
                 SnapObject::String(_) | SnapObject::Bytes(_) => {}
                 SnapObject::Array { words, .. }
-                | SnapObject::Tuple { words, .. }
+                | SnapObject::Lanes { words, .. }
                 | SnapObject::Enum { words, .. }
                 | SnapObject::Instance { words, .. } => words.iter().try_for_each(check)?,
-                SnapObject::Boxed { word, .. } => check(word)?,
             }
         }
         Ok(())
     }
 }
+
+/// The packed kinds a header's 24-bit `aux` field holds: 12 words'.
+const AUX_KINDS: crate::PackedKinds = 0xff_ffff;
 
 fn encode_object(out: &mut Vec<u64>, object: &SnapObject) {
     let header = |kind: u64, aux: u64, extra: u64| kind | aux << 8 | extra << 32;
@@ -227,22 +235,20 @@ fn encode_object(out: &mut Vec<u64>, object: &SnapObject) {
             out.push(header(OBJ_ARRAY, u64::from(*elem_kind), 0));
             encode_words(out, words);
         }
-        SnapObject::Tuple { kinds, words } => {
-            out.push(header(OBJ_TUPLE, u64::from(*kinds), 0));
+        SnapObject::Lanes { k, tag_mask, words } => {
+            out.push(header(OBJ_LANES, u64::from(*k), 0));
+            out.push(*tag_mask);
             encode_words(out, words);
         }
         SnapObject::Enum { tag, type_id, kinds, words } => {
-            out.push(header(OBJ_ENUM, u64::from(*kinds), u64::from(*tag)));
-            out.push(u64::from(*type_id));
+            out.push(header(OBJ_ENUM, u64::from(*kinds & AUX_KINDS), u64::from(*tag)));
+            // The kinds of words 12 to 15 above the type id (archive 8.5).
+            out.push(u64::from(*type_id) | u64::from(*kinds >> 24) << 32);
             encode_words(out, words);
         }
-        SnapObject::Instance { type_id, words } => {
-            out.push(header(OBJ_INSTANCE, 0, u64::from(*type_id)));
+        SnapObject::Instance { type_id, kinds, words } => {
+            out.push(header(OBJ_INSTANCE, u64::from(*kinds & AUX_KINDS), u64::from(*type_id)));
             encode_words(out, words);
-        }
-        SnapObject::Boxed { tag, word } => {
-            out.push(header(OBJ_BOXED, 0, u64::from(*tag)));
-            encode_words(out, std::slice::from_ref(word));
         }
     }
 }
@@ -265,7 +271,6 @@ fn encode_words(out: &mut Vec<u64>, words: &[SnapWord]) {
                 SnapWord::Raw(_) => TAG_RAW,
                 SnapWord::Ref { .. } => TAG_REF,
                 SnapWord::UnitEnum { .. } => TAG_UNIT_ENUM,
-                SnapWord::EmptyTuple { .. } => TAG_EMPTY_TUPLE,
             };
             tags |= tag << (2 * i);
         }
@@ -275,7 +280,6 @@ fn encode_words(out: &mut Vec<u64>, words: &[SnapWord]) {
         SnapWord::Raw(raw) => raw,
         SnapWord::Ref { index, err_bit } => u64::from(index) << 1 | u64::from(err_bit),
         SnapWord::UnitEnum { tag, err_bit } => u64::from(tag) << 1 | u64::from(err_bit),
-        SnapWord::EmptyTuple { err_bit } => u64::from(err_bit),
     }));
 }
 
@@ -328,7 +332,7 @@ impl<'a> Reader<'a> {
                         tag: (raw >> 1) as u32,
                         err_bit: raw & 1 != 0,
                     },
-                    _ => SnapWord::EmptyTuple { err_bit: raw & 1 != 0 },
+                    tag => return Err(SnapshotDecodeError::BadWordTag(tag)),
                 })
             })
             .collect()
@@ -336,7 +340,8 @@ impl<'a> Reader<'a> {
 
     fn object(&mut self) -> Result<SnapObject, SnapshotDecodeError> {
         let header = self.next()?;
-        let aux = (header >> 8) as u8;
+        let wide_aux = (header >> 8) as u32 & 0xff_ffff;
+        let aux = wide_aux as u8;
         let extra = (header >> 32) as u32;
         Ok(match header & 0xff {
             OBJ_STRING => SnapObject::String(
@@ -344,19 +349,20 @@ impl<'a> Reader<'a> {
             ),
             OBJ_BYTES => SnapObject::Bytes(self.bytes()?),
             OBJ_ARRAY => SnapObject::Array { elem_kind: aux, words: self.words()? },
-            OBJ_TUPLE => SnapObject::Tuple { kinds: aux, words: self.words()? },
-            OBJ_ENUM => {
-                let type_id = self.next()? as u32;
-                SnapObject::Enum { tag: extra, type_id, kinds: aux, words: self.words()? }
-            }
-            OBJ_INSTANCE => SnapObject::Instance { type_id: extra, words: self.words()? },
-            OBJ_BOXED => {
+            OBJ_LANES => {
+                let tag_mask = self.next()?;
                 let words = self.words()?;
-                let [word] = words[..] else {
+                if aux < 2 || words.len() % usize::from(aux) != 0 {
                     return Err(SnapshotDecodeError::Length);
-                };
-                SnapObject::Boxed { tag: extra as u16, word }
+                }
+                SnapObject::Lanes { k: aux, tag_mask, words }
             }
+            OBJ_ENUM => {
+                let id = self.next()?;
+                let kinds = wide_aux | ((id >> 32) as u32 & 0xff) << 24;
+                SnapObject::Enum { tag: extra, type_id: id as u32, kinds, words: self.words()? }
+            }
+            OBJ_INSTANCE => SnapObject::Instance { type_id: extra, kinds: wide_aux, words: self.words()? },
             kind => return Err(SnapshotDecodeError::BadObjectKind(kind)),
         })
     }
@@ -375,10 +381,18 @@ mod tests {
                     elem_kind: 2,
                     words: (0..40).map(|i| if i % 2 == 0 { SnapWord::Raw(i) } else { SnapWord::Ref { index: 0, err_bit: false } }).collect(),
                 },
-                SnapObject::Tuple { kinds: 0b1001, words: vec![SnapWord::Raw(u64::MAX), SnapWord::Ref { index: 3, err_bit: false }] },
+                SnapObject::Enum { tag: crate::PRODUCT_TAG, type_id: 0, kinds: 0b1001, words: vec![SnapWord::Raw(u64::MAX), SnapWord::Ref { index: 3, err_bit: false }] },
+                SnapObject::Lanes { k: 2, tag_mask: 0b10, words: vec![SnapWord::Ref { index: 0, err_bit: false }, SnapWord::Raw(1), SnapWord::Raw(0), SnapWord::Raw(0)] },
                 SnapObject::Enum { tag: 7, type_id: 42, kinds: 2, words: vec![SnapWord::Ref { index: 0, err_bit: true }] },
-                SnapObject::Instance { type_id: 9, words: vec![SnapWord::UnitEnum { tag: 3, err_bit: true }, SnapWord::EmptyTuple { err_bit: false }, SnapWord::Ref { index: 5, err_bit: false }] },
-                SnapObject::Boxed { tag: 4, word: SnapWord::Raw(f64::NAN.to_bits()) },
+                // Sixteen payload words, each kind kept (the `aux` field's
+                // 24 bits and the type id word's high half).
+                SnapObject::Enum {
+                    tag: crate::PRODUCT_TAG,
+                    type_id: 5,
+                    kinds: crate::pack_word_kinds((0..16).map(|i| if i == 11 || i == 15 { crate::WORD_POINTER } else { crate::WORD_SCALAR })),
+                    words: (0..16).map(|i| if i == 11 || i == 15 { SnapWord::Ref { index: 0, err_bit: false } } else { SnapWord::Raw(i) }).collect(),
+                },
+                SnapObject::Instance { type_id: 9, kinds: crate::pack_word_kinds([crate::WORD_UNKNOWN, crate::WORD_SCALAR, crate::WORD_POINTER]), words: vec![SnapWord::UnitEnum { tag: 3, err_bit: true }, SnapWord::UnitEnum { tag: crate::PRODUCT_TAG, err_bit: false }, SnapWord::Ref { index: 5, err_bit: false }] },
             ],
             statics: vec![(0, SnapWord::Ref { index: 5, err_bit: false }), (3, SnapWord::Raw(17))],
         }

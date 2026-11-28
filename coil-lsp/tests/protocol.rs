@@ -241,7 +241,7 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     let geo = "class Point {\n    pub x: int,\n}\n\nimpl Point {\n    pub static fn at(int x) -> Point {\n        return new Point(x);\n    }\n}\n";
     // FFI process-exec is gated at typecheck, so the editor sees it; the
     // host-call gates (`env::exit`, …) run after codegen and do not.
-    let main = "use ffi::{declare};\nuse ffi::types::{Int, Ptr};\nuse geo::{Point};\n\nfn main() {\n    let p = Point::at(2);\n    let _ = declare(0, \"system\", (Ptr,), Int);\n    let _ = p.x;\n}\n";
+    let main = "use geo::{Point};\n\nextern \"plugin\" {\n    fn system() -> int;\n}\n\nfn main() {\n    let p = Point::at(2);\n    let _ = system();\n    let _ = p.x;\n}\n";
     let dir = project("cli-roots", &[("vendor/geo.coil", geo), ("src/main.coil", main)]);
     let main_uri = uri(&dir.join("src/main.coil"));
     let last = |args: &[&str]| -> Vec<String> {
@@ -262,7 +262,7 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     );
 
     let vendor = dir.join("vendor");
-    let with = last(&["--root", vendor.to_str().unwrap(), "--allow-ffi-exec"]);
+    let with = last(&["--root", vendor.to_str().unwrap(), "--allow-ffi-exec", "--allow-dload", "plugin"]);
     assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
 }
 

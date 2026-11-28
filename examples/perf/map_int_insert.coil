@@ -1,0 +1,37 @@
+// CPU: int-key inserts into a `HashMap<int, int>`: n new keys, then n
+// overwrites of the same keys (one probe each). `n` is the last argument
+// (default 1000000).
+use collections::map::HashMap;
+use conv::parse_int;
+use env::args;
+use io::sync::print;
+use string::format;
+
+fn arg_n(int fallback) -> int {
+    let argv = match args() {
+        Result::Ok(a) => a,
+        Result::Err(_) => Vec::new(),
+    };
+    if argv.len() < 2 {
+        return fallback;
+    }
+    return match parse_int(argv[argv.len() - 1]) {
+        Result::Ok(n) => n,
+        Result::Err(_) => fallback,
+    };
+}
+
+fn main() {
+    let n = arg_n(1000000);
+    let m: HashMap<int, int> = HashMap::new();
+    let round = 0;
+    while round < 2 {
+        let i = 0;
+        while i < n {
+            m.insert((i * 7919) % 10000019, i + round);
+            i += 1;
+        }
+        round += 1;
+    }
+    let _ = print(format("%i %i\n", m.len(), m.get_or(7919, -1)));
+}

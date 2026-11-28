@@ -1,8 +1,8 @@
 // A vector loop whose block panics stores exactly what the scalar loop
-// would have before the panic: the VM runs that block again one lane at a
-// time (`machine::vm::vloop_lanes`). Each loop panics in the middle of
+// would have before the panic: the engine runs that block again one lane at a
+// time (`machine::lanes::vloop_lanes`). Each loop panics in the middle of
 // the third 8-lane block; a `defer` counts the stores made.
-// @output map 18\nmap scalar 18\nmixed 20\nmixed scalar 20\n
+// @output map 18\nmap scalar 18\nmixed 20\nmixed scalar 20\nsum map 18\nsum map scalar 18\n
 use io::sync::println;
 use string::format;
 use thread::{join, spawn};
@@ -92,6 +92,45 @@ fn mixed_scalar(Vec<int> a, Vec<int> b) -> int {
     return s;
 }
 
+// A sum with a store whose value overflows: `a[18] * 2`, after 18 stores.
+fn sum_map(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        b[i] = a[i] * 2 + 1;
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sum_map_scalar(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        b[i] = black_box(a[i] * 2 + 1);
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn run_sum_map() -> int {
+    let o = new Out(zeros());
+    defer use (o) {
+        let _ = println(format("sum map %i", stored(o.b)));
+    }
+    return sum_map(input(), o.b);
+}
+
+fn run_sum_map_scalar() -> int {
+    let o = new Out(zeros());
+    defer use (o) {
+        let _ = println(format("sum map scalar %i", stored(o.b)));
+    }
+    return sum_map_scalar(input(), o.b);
+}
+
 fn run_map() -> int {
     let o = new Out(zeros());
     defer use (o) {
@@ -127,7 +166,7 @@ fn run_mixed_scalar() -> int {
 }
 
 fn main() {
-    for f in [run_map, run_map_scalar, run_mixed, run_mixed_scalar] {
+    for f in [run_map, run_map_scalar, run_mixed, run_mixed_scalar, run_sum_map, run_sum_map_scalar] {
         let t = match spawn(f) {
             Result::Ok(t) => t,
             Result::Err(_) => panic "spawn failed",

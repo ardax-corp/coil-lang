@@ -16,6 +16,8 @@ impl EffectFlags {
     pub const GC: u16 = 1 << 5;
     /// Reads a stream or the file system.
     pub const READ: u16 = 1 << 6;
+    /// May park the calling task on a stream's descriptor or let another task
+    /// run (`Stream.fd`, `suspend`). The name is historical.
     pub const ATTACH_PARK: u16 = 1 << 7;
     pub const UNKNOWN: u16 = 1 << 8;
     /// May change the length (or buffer) of an array it can reach: `Vec`
@@ -54,17 +56,6 @@ impl EffectFlags {
 
     pub const fn is_pure(self) -> bool {
         self.0 == 0
-    }
-
-    /// Effects a userland lock might cover for shared-heap steal (F3).
-    ///
-    /// IO / FFI / heap mutation / mutex. Yield, GC, clocks, and unknown
-    /// (`panic`) are not lockable edges.
-    pub const fn is_lockable_escape(self) -> bool {
-        self.contains(Self::IO)
-            || self.contains(Self::FFI)
-            || self.contains(Self::HEAP_MUT)
-            || self.contains(Self::THREAD)
     }
 
     pub const fn contains(self, bit: u16) -> bool {

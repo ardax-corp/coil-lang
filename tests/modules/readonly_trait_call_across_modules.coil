@@ -1,0 +1,141 @@
+// A trait method whose impl mutates nothing takes a `readonly` receiver, in
+// both call spellings (`x.m()`, `Trait::m(x)`), wherever the trait, the
+// class, the impl and the caller are: the impl the call runs says what it
+// mutates, not the names of the trait and the class (#2468).
+use tests::assert;
+use ro_trait_gauge::Gauge;
+use ro_trait_cell::Cell;
+use ro_trait_store::{Tally, Crate, Peek, store_peeks};
+use ro_trait_dial::{Dial, dial_reads};
+use ro_trait_dial_writer::writer_reads;
+use ro_trait_probe::{Probe, probe_scans};
+
+class Here {
+    pub n: int,
+}
+
+impl Gauge for Here {
+    pub fn level(Here x, int v) -> int {
+        return x.n + 100 * v;
+    }
+
+    pub fn wind(Here x, int v) -> int {
+        x.n = x.n + v;
+        return x.n;
+    }
+}
+
+trait Mine<T> {
+    fn mine(T x) -> int {}
+    fn dig(T x) -> int {}
+}
+
+impl Mine for Here {
+    pub fn mine(Here x) -> int {
+        return x.n;
+    }
+
+    pub fn dig(Here x) -> int {
+        x.n = x.n - 1;
+        return x.n;
+    }
+}
+
+impl Mine for Cell {
+    pub fn mine(Cell x) -> int {
+        return x.n + 1;
+    }
+
+    pub fn dig(Cell x) -> int {
+        x.n = x.n - 1;
+        return x.n;
+    }
+}
+
+class Shelf<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Gauge for Shelf<T> {
+    pub fn level(Shelf<T> x, int v) -> int {
+        return x.n + v;
+    }
+
+    pub fn wind(Shelf<T> x, int v) -> int {
+        x.n = x.n + v;
+        return x.n;
+    }
+}
+
+test("trait, class and impl in this module") {
+    let h = readonly new Here(4);
+    assert!(Mine::mine(h) == 4);
+    assert!(h.mine() == 4);
+}
+
+test("trait, class and impl in one other module") {
+    let t = readonly new Tally(40);
+    assert!(Peek::peek(t, 2) == 42);
+    assert!(t.peek(2) == 42);
+}
+
+test("the trait in one module, the class and its impl in another") {
+    let d = readonly new Dial(4);
+    assert!(Gauge::level(d, 2) == 8);
+    assert!(d.level(2) == 8);
+}
+
+test("the trait in another module, the class and its impl here") {
+    let h = readonly new Here(4);
+    assert!(Gauge::level(h, 2) == 204);
+    assert!(h.level(2) == 204);
+}
+
+test("the class in one module, the trait and its impl in another") {
+    let c = readonly new Cell(4);
+    assert!(Probe::scan(c, 2) == 2);
+    assert!(c.scan(2) == 2);
+}
+
+test("the class in another module, the trait and its impl here") {
+    let c = readonly new Cell(4);
+    assert!(Mine::mine(c) == 5);
+    assert!(c.mine() == 5);
+}
+
+test("the caller in the module of the impl") {
+    assert!(store_peeks() == 7);
+    assert!(dial_reads() == 10);
+    assert!(probe_scans() == 15);
+}
+
+test("an impl for a generic class, here and in another module") {
+    let s = readonly new Shelf("a", 3);
+    assert!(Gauge::level(s, 1) == 4);
+    assert!(s.level(1) == 4);
+    let c = readonly new Crate(1.5, 5);
+    assert!(Peek::peek(c, 1) == 6);
+    assert!(c.peek(1) == 6);
+}
+
+test("a same-named class of another module with a writing impl") {
+    // `ro_trait_dial_writer::Dial`'s `level` writes; this `Dial`'s does not.
+    let d = readonly new Dial(1);
+    assert!(Gauge::level(d, 5) == 5);
+    assert!(d.level(5) == 5);
+    assert!(writer_reads() == 11);
+}
+
+test("the writing methods still run on a value that is not readonly") {
+    let t = new Tally(1);
+    assert!(Peek::poke(t, 2) == 3);
+    assert!(t.poke(2) == 5);
+    let d = new Dial(1);
+    assert!(Gauge::wind(d, 1) == 2);
+    assert!(d.wind(1) == 3);
+    let c = new Cell(1);
+    assert!(Probe::fill(c, 7) == 7);
+    assert!(c.fill(8) == 8);
+    assert!(Mine::dig(c) == 7);
+}

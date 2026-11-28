@@ -1,0 +1,177 @@
+// Lookup loops over a map object shaped like the stdlib `HashMap`, where
+// the reads of `self.ix`, `self.keys` and `self.vals` may move out of the
+// loop (the lookup natives write nothing a load reads) or merge with an
+// earlier read, and the loops that must read them again: one that adds
+// keys (the table grows), one that puts new vectors in the fields, one
+// that writes the values, and one that writes a copy of the map.
+use tests::assert;
+use key_index::{map_table, map_find, map_upsert, map_len};
+
+// `key_index` compares `string` keys by their bytes in this mode.
+const STRING_KEYS: int = 2;
+
+class Map<V> {
+    pub ix: Vec<int>,
+    pub keys: Vec<string>,
+    pub vals: Vec<V>,
+}
+
+impl Map<V> {
+    pub static fn new() -> Map<V> {
+        let keys: Vec<string> = Vec::new();
+        let vals: Vec<V> = Vec::new();
+        return new Map(map_table(0), keys, vals);
+    }
+
+    pub fn len() -> int {
+        return map_len(self.ix);
+    }
+
+    pub fn find(string k) -> int {
+        return map_find(self.ix, self.keys, k.hash(), k, STRING_KEYS);
+    }
+
+    pub fn insert(string k, V v) -> bool {
+        let r = map_upsert(self.ix, self.keys, k.hash(), k, STRING_KEYS);
+        if r >= 0 {
+            self.vals[r] = v;
+            return false;
+        }
+        self.keys.push(k);
+        self.vals.push(v);
+        return true;
+    }
+
+    pub fn get_or(string k, V d) -> V {
+        let s = self.find(k);
+        if s >= 0 {
+            return self.vals[s];
+        }
+        return d;
+    }
+}
+
+fn names(int n) -> Vec<string> {
+    let out: Vec<string> = Vec::new();
+    let i = 0;
+    while i < n {
+        out.push("k" + i.show());
+        i += 1;
+    }
+    return out;
+}
+
+test("a lookup loop reads the same table every time") {
+    let m: Map<int> = Map::new();
+    let ks = names(500);
+    let i = 0;
+    while i < ks.len() {
+        m.insert(ks[i], i * 3);
+        i += 1;
+    }
+    let total = 0;
+    let miss = 0;
+    i = 0;
+    while i < 2000 {
+        let v = m.get_or(ks[i % 500], -1);
+        if v < 0 {
+            miss += 1;
+        }
+        total += v;
+        i += 1;
+    }
+    assert!(miss == 0);
+    assert!(total == 4 * 3 * (499 * 500 / 2));
+    assert!(m.get_or("nope", -7) == -7);
+}
+
+test("a loop that adds keys finds each one in the grown table") {
+    let m: Map<int> = Map::new();
+    let ks = names(3000);
+    let i = 0;
+    let found = 0;
+    while i < ks.len() {
+        if m.get_or(ks[i], -1) >= 0 {
+            found += 1;
+        }
+        assert!(m.insert(ks[i], i));
+        if m.get_or(ks[i], -1) == i {
+            found += 1;
+        }
+        if i > 0 && m.get_or(ks[i / 2], -1) == i / 2 {
+            found += 1;
+        }
+        i += 1;
+    }
+    assert!(found == 2 * 3000 - 1);
+    assert!(m.len() == 3000);
+}
+
+test("a loop that puts new vectors in the map's fields reads the new ones") {
+    let m: Map<int> = Map::new();
+    let ks = names(64);
+    let i = 0;
+    while i < ks.len() {
+        m.insert(ks[i], i);
+        i += 1;
+    }
+    let seen: Vec<int> = Vec::new();
+    let round = 0;
+    while round < 4 {
+        seen.push(m.get_or("k5", -1));
+        // Fresh fields: an empty table, then keys added again.
+        let fresh: Map<int> = Map::new();
+        m.ix = fresh.ix;
+        m.keys = fresh.keys;
+        m.vals = fresh.vals;
+        seen.push(m.get_or("k5", -1));
+        m.insert("k5", 100 + round);
+        round += 1;
+    }
+    let want: Vec<int> = [5, -1, 100, -1, 101, -1, 102, -1];
+    assert!(seen == want);
+}
+
+test("a value vector written in the loop is read again for each lookup") {
+    let m: Map<int> = Map::new();
+    let ks = names(16);
+    let i = 0;
+    while i < ks.len() {
+        m.insert(ks[i], 0);
+        i += 1;
+    }
+    i = 0;
+    while i < 1600 {
+        let k = ks[i % 16];
+        m.insert(k, m.get_or(k, 0) + 1);
+        i += 1;
+    }
+    i = 0;
+    while i < ks.len() {
+        assert!(m.get_or(ks[i], -1) == 100);
+        i += 1;
+    }
+}
+
+test("a copy of the map keeps its own values after the loop writes the other") {
+    let a: Map<int> = Map::new();
+    let ks = names(32);
+    let i = 0;
+    while i < ks.len() {
+        a.insert(ks[i], i);
+        i += 1;
+    }
+    let b = a;
+    i = 0;
+    while i < 320 {
+        let k = ks[i % 32];
+        b.insert(k, b.get_or(k, 0) + 1);
+        i += 1;
+    }
+    i = 0;
+    while i < ks.len() {
+        assert!(a.get_or(ks[i], -1) == i);
+        assert!(b.get_or(ks[i], -1) == i + 10);
+        i += 1;
+    }
+}

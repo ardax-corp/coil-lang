@@ -1,0 +1,108 @@
+// A trait method called through a bare-trait existential takes further
+// arguments of a closed enum, `()` or a two-word type: each goes as the
+// one word the slot's `$dict` adapter takes, its niche word or its object
+// (a two-word value boxed), a `()` as the empty tuple object
+// (coil-lang#2718).
+use tests::assert;
+
+enum Duo {
+    L(int),
+    R(string),
+}
+
+trait Take<S> {
+    fn opt(S s, Option<int> v) -> int {}
+    fn name(S s, Option<string> v) -> int {}
+    fn res(S s, Result<int, string> v) -> int {}
+    fn duo(S s, Duo d) -> int {}
+    fn pair(S s, (int, int) p) -> int {}
+    fn unit(S s, () u) -> int {}
+    fn both(S s, Option<int> a, (int, int) b) -> int {}
+}
+
+class A {
+    pub n: int,
+}
+
+impl Take for A {
+    pub fn opt(A a, Option<int> v) -> int {
+        return a.n + (v ?? 100);
+    }
+
+    pub fn name(A a, Option<string> v) -> int {
+        return a.n + (v ?? "none").len();
+    }
+
+    pub fn res(A a, Result<int, string> v) -> int {
+        return match v {
+            Result::Ok(k) => a.n + k,
+            Result::Err(s) => -s.len(),
+        };
+    }
+
+    pub fn duo(A a, Duo d) -> int {
+        return match d {
+            Duo::L(k) => a.n * k,
+            Duo::R(s) => s.len(),
+        };
+    }
+
+    pub fn pair(A a, (int, int) p) -> int {
+        return a.n + p[0] * 10 + p[1];
+    }
+
+    pub fn unit(A a, () u) -> int {
+        return a.n;
+    }
+
+    pub fn both(A a, Option<int> x, (int, int) y) -> int {
+        return (x ?? 0) + y[0] + y[1];
+    }
+}
+
+fn through(Take t) -> int {
+    return t.opt(Option::Some(4)) + t.pair((1, 2));
+}
+
+test("enum arguments through an existential") {
+    let t: Take = new A(3);
+    assert!(t.opt(Option::Some(4)) == 7);
+    assert!(t.opt(Option::None) == 103);
+    assert!(t.name(Option::Some("ab")) == 5);
+    assert!(t.name(Option::None) == 7);
+    assert!(t.res(Result::Ok(2)) == 5);
+    assert!(t.res(Result::Err("bad")) == -3);
+    assert!(t.duo(Duo::L(5)) == 15);
+    assert!(t.duo(Duo::R("xyz")) == 3);
+}
+
+test("two-word and unit arguments through an existential") {
+    let t: Take = new A(3);
+    assert!(t.pair((1, 2)) == 15);
+    let p = (4, 5);
+    assert!(t.pair(p) == 48);
+    assert!(t.unit(()) == 3);
+    assert!(t.both(Option::Some(1), (2, 3)) == 6);
+    assert!(through(t) == 7 + 15);
+}
+
+test("existentials in a Vec") {
+    let ts: Vec<Take> = Vec::new();
+    ts.push(new A(1));
+    ts.push(new A(2));
+    let total = 0;
+    for t in ts {
+        total = total + t.opt(Option::Some(1)) + t.duo(Duo::L(2));
+    }
+    assert!(total == 2 + 2 + 3 + 4);
+}
+
+// The same arguments through a bound: the shared body past the clone
+// budget calls the dictionary's slot as the existential does.
+fn via<T: Take>(T t) -> int {
+    return t.opt(Option::Some(1)) + t.pair((2, 3)) + t.res(Result::Ok(4)) + t.unit(());
+}
+
+test("enum and two-word arguments through a bound") {
+    assert!(via(new A(3)) == 4 + 26 + 7 + 3);
+}

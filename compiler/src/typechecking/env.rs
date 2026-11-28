@@ -46,8 +46,13 @@ impl TyVarCounter {
 pub struct Frame {
     /// Name, scheme, and whether the binding is a `const`.
     bindings: Vec<(String, Scheme, bool)>,
-    /// Name to the index of its latest binding in `bindings`.
-    latest: HashMap<String, usize>,
+    /// Name to the index of its latest binding in `bindings`. A name no scope
+    /// binds probes every frame, one per module: a fast hash is worth having.
+    latest: rustc_hash::FxHashMap<String, usize>,
+    /// Per binding, the index of the binding of its name it shadows (the
+    /// name's latest when it was bound): what [`Self::drop_since`] falls
+    /// back to without a walk of the frame.
+    shadowed: Vec<Option<usize>>,
 }
 
 impl Frame {
@@ -57,10 +62,11 @@ impl Frame {
 
     /// Bind `name` to `scheme` in this frame. Later bindings with the same
     /// name shadow earlier ones within the same frame.
-    pub fn insert(&mut self, name: impl Into<String>, scheme: Scheme) {
+    fn insert(&mut self, name: impl Into<String>, scheme: Scheme) {
         let name = name.into();
-        self.latest.insert(name.clone(), self.bindings.len());
+        let shadowed = self.latest.insert(name.clone(), self.bindings.len());
         self.bindings.push((name, scheme, false));
+        self.shadowed.push(shadowed);
     }
 
     /// Mark the latest binding of `name` in this frame as a `const`.
@@ -81,25 +87,42 @@ impl Frame {
 
     /// Drop bindings of `name` inserted at or after index `mark` (see
     /// [`Self::len`]), exposing whatever `name` was bound to before.
+    ///
+    /// Touches only the bindings from `mark` on: a module frame holds every
+    /// top-level name, and a walk of it per dropped name made checking
+    /// quadratic in the number of impls (#2352).
     pub fn drop_since(&mut self, name: &str, mark: usize) {
-        if self.latest.get(name).is_none_or(|&i| i < mark) {
+        let Some(&latest) = self.latest.get(name).filter(|&&i| i >= mark) else {
             return;
+        };
+        // `name` falls back to its binding before `mark`.
+        let mut before = Some(latest);
+        while let Some(i) = before.filter(|&i| i >= mark) {
+            before = self.shadowed[i];
         }
-        let mut i = 0;
-        self.bindings.retain(|(n, ..)| {
-            let keep = i < mark || n != name;
-            i += 1;
-            keep
-        });
-        // `name` falls back to its binding before `mark`, and the bindings
-        // after `mark` moved down: index those again.
-        match self.bindings[..mark.min(self.bindings.len())].iter().rposition(|(n, ..)| n == name) {
+        // The bindings after `mark` but `name`'s move down: index those
+        // again, and what they shadow inside that tail.
+        let tail = self.bindings.split_off(mark);
+        let tail_shadowed = self.shadowed.split_off(mark);
+        let mut moved: Vec<Option<usize>> = vec![None; tail.len()];
+        for (k, (binding, shadowed)) in tail.into_iter().zip(tail_shadowed).enumerate() {
+            if binding.0 == name {
+                continue;
+            }
+            let shadowed = match shadowed {
+                Some(i) if i >= mark => moved[i - mark],
+                other => other,
+            };
+            let at = self.bindings.len();
+            moved[k] = Some(at);
+            self.latest.insert(binding.0.clone(), at);
+            self.bindings.push(binding);
+            self.shadowed.push(shadowed);
+        }
+        match before {
             Some(i) => self.latest.insert(name.to_string(), i),
             None => self.latest.remove(name),
         };
-        for i in mark..self.bindings.len() {
-            self.latest.insert(self.bindings[i].0.clone(), i);
-        }
     }
 
     /// Look up `name` in this frame only (no parent walk).
@@ -126,6 +149,10 @@ impl Frame {
 #[derive(Debug, Default, Clone)]
 pub struct Env {
     frames: Vec<Frame>,
+    /// Every name ever bound here. Most lookups in lowering are of names no
+    /// scope binds (`int`, an enum's name): one probe answers those, where a
+    /// walk probes a frame per module.
+    ever_bound: rustc_hash::FxHashSet<String>,
 }
 
 impl Env {
@@ -196,12 +223,19 @@ impl Env {
             .frames
             .last_mut()
             .expect("Env::insert_top called with no frames on the stack");
+        let name = name.into();
+        if !self.ever_bound.contains(&name) {
+            self.ever_bound.insert(name.clone());
+        }
         frame.insert(name, scheme);
     }
 
     /// Look up a name, walking from the innermost frame to the outermost.
     /// Returns the scheme of the most-recently-bound matching name.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
+        if !self.ever_bound.contains(name) {
+            return None;
+        }
         for frame in self.frames.iter().rev() {
             if let Some(s) = frame.lookup(name) {
                 return Some(s);
@@ -320,105 +354,13 @@ pub fn instantiate_with_kinds(
                 .collect(),
         })
         .collect();
-    let _assoc_projections = scheme
-        .assoc_projections
-        .iter()
-        .map(|p| super::ty::AssocProjection {
-            var: mapping.get(&p.var).copied().unwrap_or(p.var),
-            name: p.name.clone(),
-            args: p
-                .args
-                .iter()
-                .map(|a| substitute_vars(a, &mapping))
-                .collect(),
-        })
-        .collect::<Vec<_>>();
     (ty, constraints, fresh_kinds)
 }
 
-/// Walk `ty`, replacing every variable in `mapping` with its mapped
+/// Walk `ty`, replacing every free variable in `mapping` with its mapped
 /// value. Variables not in the mapping are left alone.
 pub(crate) fn substitute_vars(ty: &Ty, mapping: &HashMap<TyVarId, TyVarId>) -> Ty {
-    match ty {
-        Ty::Var(v) => match mapping.get(v) {
-            Some(&new) => Ty::Var(new),
-            None => Ty::Var(*v),
-        },
-        Ty::Con(_) | Ty::Existential { .. } | Ty::Never => ty.clone(),
-        Ty::Fun(a, b) => Ty::Fun(
-            Box::new(substitute_vars(a, mapping)),
-            Box::new(substitute_vars(b, mapping)),
-        ),
-        Ty::App(c, args) => Ty::App(
-            Box::new(substitute_vars(c, mapping)),
-            args.iter().map(|t| substitute_vars(t, mapping)).collect(),
-        ),
-        Ty::Sum { name, variants } => Ty::Sum {
-            name: name.clone(),
-            variants: variants
-                .iter()
-                .map(|(n, payload)| {
-                    let new_payload = match payload {
-                        crate::typechecking::ty::EnumVariantPayloadTy::Unit => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Unit
-                        }
-                        crate::typechecking::ty::EnumVariantPayloadTy::Tuple(tys) => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Tuple(
-                                tys.iter().map(|t| substitute_vars(t, mapping)).collect(),
-                            )
-                        }
-                        crate::typechecking::ty::EnumVariantPayloadTy::Record(fields) => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Record(
-                                fields
-                                    .iter()
-                                    .map(|(n, t)| (n.clone(), substitute_vars(t, mapping)))
-                                    .collect(),
-                            )
-                        }
-                    };
-                    (n.clone(), new_payload)
-                })
-                .collect(),
-        },
-        Ty::Constructor { owner, tag, arity } => Ty::Constructor {
-            owner: Box::new(substitute_vars(owner, mapping)),
-            tag: *tag,
-            arity: *arity,
-        },
-        Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| substitute_vars(t, mapping)).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(substitute_vars(element, mapping)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields
-                .iter()
-                .map(|(n, t)| (n.clone(), substitute_vars(t, mapping)))
-                .collect(),
-        },
-        Ty::Forall {
-            bounds,
-            constraints,
-            body,
-        } => {
-            let mut inner = mapping.clone();
-            for bound in bounds {
-                inner.remove(bound);
-            }
-            Ty::Forall {
-                bounds: bounds.clone(),
-                constraints: constraints
-                    .iter()
-                    .map(|c| super::ty::Constraint {
-                        class: c.class.clone(),
-                        args: c.args.iter().map(|a| substitute_vars(a, &inner)).collect(),
-                    })
-                    .collect(),
-                body: Box::new(substitute_vars(body, &inner)),
-            }
-        }
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(substitute_vars(inner, mapping))),
-    }
+    ty.subst_vars(&|v| mapping.get(&v).map(|&new| Ty::Var(new)))
 }
 
 #[cfg(test)]
@@ -454,6 +396,41 @@ mod tests {
         let env = Env::new();
         assert_eq!(env.depth(), 0);
         assert!(env.lookup("anything").is_none());
+    }
+
+    /// `drop_since` drops only the name's bindings from the mark on, falls
+    /// back to its binding before the mark (or none), and keeps the other
+    /// names' bindings after the mark, shadowing included.
+    #[test]
+    fn drop_since_restores_the_binding_before_the_mark() {
+        let mut f = Frame::new();
+        let ty = |i: u32| Scheme::mono(v(i));
+        f.insert("x", ty(1));
+        f.insert("y", ty(2));
+        f.insert("x", ty(3));
+        let mark = f.len();
+        f.insert("x", ty(4));
+        f.insert("y", ty(5));
+        f.insert("x", ty(6));
+        f.insert("y", ty(7));
+        f.insert("z", ty(8));
+        f.drop_since("x", mark);
+        assert_eq!(f.lookup("x").map(|s| &s.ty), Some(&v(3)));
+        assert_eq!(f.lookup("y").map(|s| &s.ty), Some(&v(7)));
+        assert_eq!(f.len(), mark + 3);
+        // `y`'s bindings after the mark still shadow in order.
+        f.drop_since("y", mark + 1);
+        assert_eq!(f.lookup("y").map(|s| &s.ty), Some(&v(5)));
+        f.drop_since("y", mark);
+        assert_eq!(f.lookup("y").map(|s| &s.ty), Some(&v(2)));
+        assert_eq!(f.lookup("z").map(|s| &s.ty), Some(&v(8)));
+        // A name first bound after the mark is gone.
+        f.drop_since("z", mark);
+        assert!(f.lookup("z").is_none());
+        assert_eq!(f.len(), mark);
+        // A name with no binding from the mark on is left alone.
+        f.drop_since("x", mark);
+        assert_eq!(f.lookup("x").map(|s| &s.ty), Some(&v(3)));
     }
 
     #[test]

@@ -162,7 +162,7 @@ fn collect_traits(ast: &Output<'_>, module: &str, out: &mut TraitContracts) {
 fn file_imports(ast: &Output<'_>) -> HashMap<String, (String, String)> {
     fn walk(node: &Output<'_>, out: &mut HashMap<String, (String, String)>) {
         match node.1.as_ref() {
-            Expression::Use { path, name, alias } => {
+            Expression::Use { path, name, alias, .. } => {
                 let local = alias.clone().unwrap_or_else(|| name.clone());
                 out.insert(local, (path.join("::"), name.clone()));
             }

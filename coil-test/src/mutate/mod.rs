@@ -27,7 +27,7 @@ use reporting::{ErrorCode, ReportConfig};
 use crate::coverage::CoverageOptions;
 use crate::events::{self, Event};
 use crate::runner::{
-    CaseOutcome, Compiled, Report, SuiteResult, TestOptions, canonical, compile_test_file,
+    CaseOutcome, Compiled, Engine, Report, SuiteResult, TestOptions, canonical, compile_test_file,
     print_failures, run_test_suite, writer_for,
 };
 use job::{Isolation, MutantJob, Verdict, run_in_child, run_job};
@@ -184,6 +184,12 @@ struct Planned {
 /// Run the baseline, then every mutant. `Err` for a harness error or a red
 /// baseline.
 pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<MutateReport, String> {
+    // Only the interpreter charges steps. On native code the baseline counts
+    // none and a mutant that loops forever never runs out of budget.
+    let options = &MutateOptions {
+        test: TestOptions { engine: Engine::Mir, ..options.test.clone() },
+        ..options.clone()
+    };
     let cwd = canonical(&options.project_root);
     let mut baseline_options = options.test.clone();
     baseline_options.fail_fast = false;
@@ -229,12 +235,12 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
         }
     }
 
-    let test_root = canonical(&options.test.root);
+    let test_roots: Vec<PathBuf> = options.test.root_dirs().iter().map(|r| canonical(r)).collect();
     let mut targets = Vec::new();
     let mut planned = Vec::new();
     for (abs, display, lines) in coverage.files() {
         let selected = if options.files.is_empty() {
-            !abs.starts_with(&test_root)
+            !test_roots.iter().any(|r| abs.starts_with(r))
         } else {
             options.files.iter().any(|g| glob_match(g, display))
         };

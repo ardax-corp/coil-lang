@@ -207,10 +207,6 @@ pub fn builtin_primitive_type_spelling(name: &str) -> Option<&'static str> {
 /// matmul via `Mul`, not element-wise zip.
 pub const BUILTIN_MATRIX_TYPE: &str = "Matrix";
 
-pub fn is_builtin_matrix_type(name: &str) -> bool {
-    name == BUILTIN_MATRIX_TYPE
-}
-
 /// Explicit GC keep-alive handle (`Root<T>` from virtual `gc`).
 pub const BUILTIN_ROOT_TYPE: &str = "Root";
 
@@ -219,18 +215,6 @@ pub const BUILTIN_WEAK_TYPE: &str = "Weak";
 
 /// Growable heap vector (`Vec<T>`) — replaces dynamic `[T]` arrays.
 pub const BUILTIN_VEC_TYPE: &str = "Vec";
-
-pub fn is_builtin_root_type(name: &str) -> bool {
-    name == BUILTIN_ROOT_TYPE
-}
-
-pub fn is_builtin_weak_type(name: &str) -> bool {
-    name == BUILTIN_WEAK_TYPE
-}
-
-pub fn is_builtin_vec_type(name: &str) -> bool {
-    name == BUILTIN_VEC_TYPE
-}
 
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
 pub const RANGE_HEAP_TYPE_ID: u32 = 0xFFFE;
@@ -247,7 +231,7 @@ pub const FS_METADATA_TYPE_ID: u32 = 0xFFFC;
 pub const FFI_STRUCT_TYPE_ID: u32 = 0xFFFB;
 
 /// First `InitTyped` id of a structural record type. Records take ids
-/// from their own range, so the VM tells a record (`==` compares its
+/// from their own range, so the runtime tells a record (`==` compares its
 /// slots) from a class instance (`==` is identity) by its id alone.
 pub const RECORD_TYPE_ID_BASE: u32 = 0x8000;
 
@@ -263,7 +247,7 @@ pub fn is_record_type_id(type_id: u32) -> bool {
         || type_id == FFI_STRUCT_TYPE_ID
 }
 
-/// Index of `type_id`'s row in the VM's dense field word kinds table:
+/// Index of `type_id`'s row in the runtime's dense field word kinds table:
 /// class ids on even rows, record ids (from [`RECORD_TYPE_ID_BASE`]) on
 /// odd rows, so neither range leaves a gap.
 pub fn type_kinds_index(type_id: u32) -> usize {

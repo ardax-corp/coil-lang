@@ -1,0 +1,38 @@
+// CPU: copy-on-write after a walk (#2821). `for p in m` stores `m` in its
+// iterator, which shares it; the iterator dies with the loop, so the next
+// insert has nothing to copy for. Before #2821 each insert after a walk
+// copied the whole map, and walking and growing a map was quadratic.
+use io::sync::print;
+use string::format;
+use collections::map::HashMap;
+
+fn total(HashMap<int, int> m) -> int {
+    let n = 0;
+    for p in m {
+        n += p.value;
+    }
+    return n;
+}
+
+fn main() {
+    // The walk in a callee: the caller's next insert.
+    let m: HashMap<int, int> = HashMap::new();
+    let s = 0;
+    let i = 0;
+    while i < 3000 {
+        let _ = m.insert(i, i);
+        s += total(m);
+        i += 1;
+    }
+    // The walk in the growing body itself.
+    let g: HashMap<int, int> = HashMap::new();
+    i = 0;
+    while i < 3000 {
+        let _ = g.insert(i, 1);
+        for p in g {
+            s += p.value;
+        }
+        i += 1;
+    }
+    let _ = print(format("%i %i %i\n", m.len(), g.len(), s));
+}

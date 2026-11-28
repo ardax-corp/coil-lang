@@ -1,0 +1,147 @@
+// A generic generator past the clone budget: the value nobody produced (an
+// unsent binding `yield`, a completion with no value) is decided by the type
+// the generator runs at, as at default flags (coil-lang#2738, #2717). A
+// shared body could not tell it from a word of its bare `T`, nor make the
+// type's zero, so every ground call of such a generator, and of a generic
+// function calling one, takes its per-type clone.
+// @flags --clone-budget 0
+use tests::assert;
+use string::format;
+use text::Searchable;
+use task::{scope, Scope, TaskError};
+
+#[derive(Show)]
+class Pt {
+    pub a: int,
+}
+
+#[derive(Show)]
+enum Level {
+    Low = 0,
+    High = 2,
+}
+
+gen fn echo<T>(T x) -> coroutine<T, T> {
+    let r = yield x;
+    yield r;
+}
+
+gen fn one<T>(T x) {
+    yield x;
+}
+
+fn drain<T: Show>(T x) -> string {
+    let out = "";
+    for v in echo(x) {
+        out = out + format("[%v]", v);
+    }
+    return out;
+}
+
+fn drain_outer<T: Show>(T x) -> string {
+    return drain(x);
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("a for over a generic receiving generator gives the binding yield the zero") {
+    let out = "";
+    for v in echo("e") {
+        out = out + format("[%v]", v);
+    }
+    assert!(out == "[e][]", out);
+    let out = "";
+    for v in echo(Option::Some(3)) {
+        out = out + format("[%v]", v);
+    }
+    assert!(out == "[Some(3)][None]", out);
+    let out = "";
+    for v in echo((3, 4)) {
+        out = out + format("[%v]", v);
+    }
+    assert!(out == "[(3, 4)][(0, 0)]", out);
+    let out = "";
+    for v in echo(("s", 1)) {
+        out = out + format("[%v]", v);
+    }
+    assert!(out == "[(s, 1)][(, 0)]", out);
+    let out = "";
+    for v in echo(7) {
+        out = out + format("[%v]", v);
+    }
+    assert!(out == "[7][0]", out);
+}
+
+test("a generic function creating the generator takes its clone too") {
+    assert!(drain("d") == "[d][]", drain("d"));
+    assert!(drain(Option::Some(1)) == "[Some(1)][None]", drain(Option::Some(1)));
+    assert!(drain_outer("o") == "[o][]", drain_outer("o"));
+}
+
+test("a sent value is the binding yield's") {
+    let h = echo("a");
+    assert!((resume h) == "a");
+    assert!((resume h with "b") == "b");
+}
+
+fn send_none_pt() -> int {
+    let n = 0;
+    for v in echo(new Pt(1)) {
+        n = n + v.a;
+    }
+    return n;
+}
+
+fn read_res_unit() -> int {
+    let h = one(Result::Ok(()));
+    let _ = resume h;
+    let v: Result<(), string> = resume h;
+    return if v.is_ok() {
+        1
+    } else {
+        2
+    };
+}
+
+fn read_level() -> int {
+    let h = one(Level::High);
+    let _ = resume h;
+    let v = resume h;
+    return show(v).len();
+}
+
+test("a type with no zero panics where the value is read") {
+    let m = outcome(fn () => send_none_pt());
+    assert!(m.contains("resumed without a value of Pt"), m);
+    let m = outcome(fn () => read_res_unit());
+    assert!(m.contains("the generator finished without a value of Result<"), m);
+    let m = outcome(fn () => read_level());
+    assert!(m.contains("the generator finished without a value of Level"), m);
+}
+
+test("a completion with no value at a type with a zero is that zero") {
+    let h = one("z");
+    let _ = resume h;
+    assert!((resume h) == "");
+    let k = one(Option::Some(5));
+    let _ = resume k;
+    assert!(show(resume k) == "None");
+}

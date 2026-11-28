@@ -72,8 +72,11 @@ The panic message is `contract violated: <keyword> <text> ("<message>") in
 <function>`. An `ensures` panic is reported at its clause. A `requires`
 panic blames the caller. Its `Builtin::Panic` carries a second argument, and
 `emit_hir` turns that into `contract_fail` (HostInvoke **159**,
-`HostOp::Task`, archive minor 35). The VM handler adds `, called from
+`HostOp::Task`, archive minor 35). The driver adds `, called from
 <file:line:col>` from the frame below and prints no location of its own.
+A call through a bound's dictionary reaches the method through the
+instance's `$dict` adapter, a compiler-made body with no source location:
+the caller is the first frame below that has one (#2503).
 Calls of a function with a `requires` are not tiny-inlined
 (`Compiler::caller_blame_fns`), and the HIR inliner refuses any body with a
 `Builtin`, so the caller always has its own frame.
@@ -96,6 +99,11 @@ the previous value in a temp: `d` must be non-negative and lower than last
 time, or the panic says `(went negative)` / `(did not decrease)`. A `for`
 loop takes no `decreases`: it ends when its items do. Loop clauses are typed
 in the scope around the loop, so a `for` binding is not visible in them.
+
+A loop whose clause reads a local the loop writes runs sequentially: auto-par
+(`Scan::checks_follow_the_loop` in `hir/par/loop_par.rs`) does not chunk it,
+since a chunk worker has only its own partial of the accumulator. A clause
+over values the loop leaves alone is checked in every chunk.
 
 ## Class invariants
 
@@ -217,7 +225,7 @@ Random arguments must not delete files or open sockets. Codegen asks the
 HIR effect summary of the target (`Compiler::contract_case_allowed`) when it
 emits a generated case: anything visible besides `read` and `mutate` (or a
 call through a function parameter) and the case is dropped from the
-runnable cases in `finalize_bytecode`. Its body is still emitted and listed
+runnable cases in `finalize_bodies`. Its body is still emitted and listed
 until then, so labels and node ids stay in step.
 
 ### Project sources

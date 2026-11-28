@@ -1,0 +1,77 @@
+// An iterator whose items are flat generic class instances: its trait
+// instance's `next` (an `Option` of the item) runs as its per-type clone
+// at the flat instance, from for-in, a direct trait call and a bound's
+// dictionary alike. `HashMap`'s `Pair<K, V>` is one at `V = Option<int>`.
+use collections::map::HashMap;
+use tests::assert;
+
+class Cell<V> {
+    pub v: V,
+}
+
+class Cells<V> {
+    pub xs: Vec<V>,
+    pub at: int,
+}
+
+impl Iterator for Cells<V> {
+    type Item = Cell<V>;
+
+    fn next(Cells<V> it) -> Option<Cell<V>> {
+        if it.at >= it.xs.len() {
+            return None;
+        }
+        it.at += 1;
+        return Some(new Cell(it.xs[it.at - 1]));
+    }
+}
+
+fn count<I: Iterator>(I it) -> int {
+    let n = 0;
+    for _ in it {
+        n += 1;
+    }
+    return n;
+}
+
+fn weight(Option<int> o) -> int {
+    return match o {
+        Some(x) => x,
+        None => 100,
+    };
+}
+
+test("for-in over a map of two-word values") {
+    let m: HashMap<int, Option<int>> = HashMap::new();
+    m.insert(1, Some(5));
+    m.insert(2, None);
+    let s = 0;
+    for e in m {
+        s += e.key * weight(e.value);
+    }
+    assert!(s == 5 + 200);
+    assert!(count(m.iter()) == 2);
+}
+
+test("a user iterator of flat instances") {
+    let it: Cells<Option<int>> = new Cells([Some(1), None, Some(3)], 0);
+    let s = 0;
+    for c in it {
+        s += weight(c.v);
+    }
+    assert!(s == 104);
+    let again: Cells<Option<int>> = new Cells([Some(7)], 0);
+    let first = match Iterator::next(again) {
+        Some(c) => c.v,
+        None => None,
+    };
+    assert!(first == Some(7));
+    let t: Cells<(int, int, int)> = new Cells([(1, 2, 3)], 0);
+    assert!(count(t) == 1);
+    let i: Cells<int> = new Cells([1, 2], 0);
+    let n = 0;
+    for c in i {
+        n += c.v;
+    }
+    assert!(n == 3);
+}

@@ -1,0 +1,84 @@
+// A class field of three or four immediates (`(int, int, int)`,
+// `(float, float, float, int)`) is stored flat in the object, its first
+// item in the field's slot and the others in tail slots after the
+// declared fields. Reads, writes, `new` and the whole tuple read back.
+use tests::assert;
+
+class Body {
+    pub pos: (float, float, float),
+    pub id: int,
+    pub span: (int, int),
+    pub box4: (int, int, bool, int),
+}
+
+class Counter {
+    pub t: (int, int, int),
+}
+
+impl Counter {
+    pub fn step(int k) {
+        let (a, b, c) = self.t;
+        self.t = (b, c, a + k);
+    }
+
+    pub fn get() -> (int, int, int) {
+        return self.t;
+    }
+}
+
+#[inline(never)]
+fn bump(Body b, float d) {
+    let (x, y, z) = b.pos;
+    b.pos = (x + d, y - d, z * 2.0);
+}
+
+#[inline(never)]
+fn make_pos(float x) -> (float, float, float) {
+    return (x, x + 1.0, x + 2.0);
+}
+
+test("new, read and write") {
+    let b = new Body((1.0, 2.0, 3.0), 7, (4, 5), (1, 2, true, 3));
+    let (x, y, z) = b.pos;
+    assert!(x == 1.0 && y == 2.0 && z == 3.0);
+    assert!(b.id == 7);
+    let (s0, s1) = b.span;
+    assert!(s0 == 4 && s1 == 5);
+    let (q0, q1, q2, q3) = b.box4;
+    assert!(q0 == 1 && q1 == 2 && q2 && q3 == 3);
+    bump(b, 0.5);
+    let (x2, y2, z2) = b.pos;
+    assert!(x2 == 1.5 && y2 == 1.5 && z2 == 6.0);
+    b.box4 = (9, 8, false, 7);
+    let (r0, r1, r2, r3) = b.box4;
+    assert!(r0 == 9 && r1 == 8 && !r2 && r3 == 7);
+    assert!(b.id == 7);
+}
+
+test("from a tuple value and back") {
+    let p = make_pos(10.0);
+    let b = new Body(p, 1, (0, 0), (0, 0, false, 0));
+    let whole = b.pos;
+    let (x, y, z) = whole;
+    assert!(x == 10.0 && y == 11.0 && z == 12.0);
+    b.pos = make_pos(20.0);
+    let kept: Vec<(float, float, float)> = Vec::new();
+    kept.push(b.pos);
+    b.pos = (0.0, 0.0, 0.0);
+    let (k0, k1, k2) = kept[0];
+    assert!(k0 == 20.0 && k1 == 21.0 && k2 == 22.0);
+    assert!(b.pos == (0.0, 0.0, 0.0));
+}
+
+test("methods on a flat wide field") {
+    let c = new Counter((0, 1, 2));
+    let i = 0;
+    while i < 100 {
+        c.step(i);
+        i += 1;
+    }
+    let (a, b, d) = c.get();
+    let (e, f, g) = c.t;
+    assert!(a == e && b == f && d == g);
+    assert!(a + b + d == 4950 + 3);
+}

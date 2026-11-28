@@ -27,19 +27,6 @@ impl Checker {
         &self.host_grants
     }
 
-    /// `stream.attach(…)` (the method form) without `--allow-attach`.
-    pub(super) fn gate_stream_attach(&mut self, range: Range<usize>) {
-        if self.host_grants.allow_attach {
-            return;
-        }
-        let _ = self.error_with_help(
-            ErrorCode::HostAttachDenied,
-            "`Stream.attach` requires `--allow-attach`".to_string(),
-            range,
-            Some("pass `--allow-attach` (or `Pipeline::grant_attach`)".to_string()),
-        );
-    }
-
     pub(super) fn gate_ffi_exec_symbol(
         &mut self,
         symbol: &str,
@@ -144,33 +131,38 @@ mod tests {
     }
 
     #[test]
-    fn dload_ungranted_const_is_error() {
+    fn extern_ungranted_stem_is_error() {
         let src = r#"
-use ffi::{dload};
-fn main() { let _ = dload("notalist"); }
+extern "notalist" {
+    fn f() -> int;
+}
+fn main() { let _ = f(); }
 "#;
         let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
         assert!(codes.contains(&ErrorCode::HostDloadDenied), "{codes:?}");
     }
 
     #[test]
-    fn dload_granted_const_typechecks() {
+    fn extern_granted_stem_typechecks() {
         let src = r#"
-use ffi::{dload};
-fn main() { let _ = dload("plugin"); }
+extern "plugin" {
+    fn f() -> int;
+}
+fn main() { let _ = f(); }
 "#;
         let mut g = crate::HostGrants::deny_all();
         g.grant_dload_allow("plugin");
         let codes = check_codes(src, g, &[]);
         assert!(!codes.contains(&ErrorCode::HostDloadDenied), "{codes:?}");
-        assert!(!codes.contains(&ErrorCode::HostDloadNonConst), "{codes:?}");
     }
 
     #[test]
-    fn dload_libc_denied_even_when_flagged() {
+    fn extern_libc_denied_even_when_flagged() {
         let src = r#"
-use ffi::{dload};
-fn main() { let _ = dload("c"); }
+extern "c" {
+    fn abs(int x) -> int;
+}
+fn main() { let _ = abs(1); }
 "#;
         let mut g = crate::HostGrants::deny_all();
         g.grant_dload_allow("c");
@@ -179,47 +171,29 @@ fn main() { let _ = dload("c"); }
     }
 
     #[test]
-    fn dload_nonconst_is_error() {
+    fn extern_execve_call_without_ffi_exec_is_error() {
         let src = r#"
-use ffi::{dload};
-fn main() { let name = "plugin"; let _ = dload(name); }
+extern "plugin" {
+    fn execve(ptr path, ptr argv, ptr envp) -> int;
+}
+fn main() { let _ = execve(0 as ptr, 0 as ptr, 0 as ptr); }
 "#;
         let mut g = crate::HostGrants::deny_all();
         g.grant_dload_allow("plugin");
         let codes = check_codes(src, g, &[]);
-        assert!(codes.contains(&ErrorCode::HostDloadNonConst), "{codes:?}");
-    }
-
-    #[test]
-    fn declare_system_without_ffi_exec_is_error() {
-        let src = r#"
-use ffi::{declare};
-use ffi::types::{Int, Ptr};
-fn main() { let _ = declare(0, "system", (Ptr,), Int); }
-"#;
-        let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
         assert!(codes.contains(&ErrorCode::HostFfiExecDenied), "{codes:?}");
     }
 
     #[test]
-    fn declare_execve_without_ffi_exec_is_error() {
+    fn extern_system_call_with_ffi_exec_typechecks() {
         let src = r#"
-use ffi::{declare};
-use ffi::types::{Int, Ptr};
-fn main() { let _ = declare(0, "execve", (Ptr, Ptr, Ptr), Int); }
-"#;
-        let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
-        assert!(codes.contains(&ErrorCode::HostFfiExecDenied), "{codes:?}");
-    }
-
-    #[test]
-    fn declare_system_with_ffi_exec_typechecks() {
-        let src = r#"
-use ffi::{declare};
-use ffi::types::{Int, Ptr};
-fn main() { let _ = declare(0, "system", (Ptr,), Int); }
+extern "plugin" {
+    fn system() -> int;
+}
+fn main() { let _ = system(); }
 "#;
         let mut g = crate::HostGrants::deny_all();
+        g.grant_dload_allow("plugin");
         g.allow_ffi_exec = true;
         let codes = check_codes(src, g, &[]);
         assert!(!codes.contains(&ErrorCode::HostFfiExecDenied), "{codes:?}");
@@ -241,10 +215,12 @@ fn main() { let _ = system(); }
     }
 
     #[test]
-    fn extra_host_stem_allows_const_dload() {
+    fn extra_host_stem_allows_extern_block() {
         let src = r#"
-use ffi::{dload};
-fn main() { let _ = dload("plugin"); }
+extern "plugin" {
+    fn f() -> int;
+}
+fn main() { let _ = f(); }
 "#;
         let codes = check_codes(src, crate::HostGrants::deny_all(), &["plugin"]);
         assert!(!codes.contains(&ErrorCode::HostDloadDenied), "{codes:?}");

@@ -30,7 +30,7 @@ fn g<T: Add + Neg>(T x, T y) -> T {
 }
 
 fn spread<A: Num + Show, B: Show>(A lo, A hi, B tag) -> string {
-    return show(tag) + show(hi - lo);
+    return tag.show() + (hi - lo).show();
 }
 
 fn main() {

@@ -1,21 +1,18 @@
 //! Host capability grants and `dload` integrity inputs, from CLI flags only.
 //!
-//! Capabilities are checked at typecheck and the VM does not
+//! Capabilities are checked at typecheck and the runtime does not
 //! re-apply them (the compiled artifact is the grant). Native pins and
 //! trusted stems feed the run-time `dload` gate.
 
 use std::path::PathBuf;
 
-/// Deny-by-default host capabilities (`dload`, attach, running programs,
-/// env exit, and
-/// read / write / net / env).
+/// Deny-by-default host capabilities (`dload`, running programs, env exit,
+/// and read / write / net / env).
 ///
 /// The default denies everything. `dload("c")` /
 /// libc aliases stay denied even when listed in [`Self::allow_dload`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostGrants {
-    /// `Stream.attach` at typecheck (`--allow-attach`).
-    pub allow_attach: bool,
     /// Running a program (`process`).
     pub allow_exec: bool,
     /// `env::exit`.
@@ -160,7 +157,7 @@ impl ComptimeGrants {
 /// ([`Self::SILENT_CALL_STEPS`]) and gives up quietly instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComptimeLimits {
-    /// Loop back-edges + calls (see `Machine::set_step_budget`).
+    /// Loop back-edges + calls (see `machine::Isolate::set_step_budget`).
     pub steps: u64,
     /// Heap bytes of live objects after a full collection.
     pub heap_bytes: u64,
@@ -217,7 +214,6 @@ impl HostGrants {
 
     /// Every capability except `dload` (`--allow-all`).
     pub fn grant_all(&mut self) {
-        self.allow_attach = true;
         self.allow_exec = true;
         self.allow_exit = true;
         self.allow_ffi_exec = true;
@@ -237,7 +233,6 @@ impl HostGrants {
             "env" => &mut self.allow_env,
             "exec" => &mut self.allow_exec,
             "exit" => &mut self.allow_exit,
-            "attach" => &mut self.allow_attach,
             "ffi-exec" => &mut self.allow_ffi_exec,
             _ => return false,
         };
@@ -255,7 +250,6 @@ impl HostGrants {
             (self.allow_env, Caps::ENV),
             (self.allow_exec, Caps::EXEC),
             (self.allow_exit, Caps::EXIT),
-            (self.allow_attach, Caps::ATTACH),
         ]
         .into_iter()
         .filter(|(on, _)| *on)

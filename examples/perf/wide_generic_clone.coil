@@ -1,0 +1,31 @@
+// CPU: mono clones of generic functions at (int, int, int): a bare `T`
+// passed in and returned, and a tuple item read, go as three words in and
+// out of the clone, no tuple built per call.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn pick<T>(bool c, T a, T b) -> T {
+    if c {
+        return a;
+    }
+    return b;
+}
+
+#[inline(never)]
+fn first<A, B, C>((A, B, C) t) -> A {
+    return t[0];
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        let t = pick(i % 3 == 0, (i, 1, 2), (s & 7, i & 3, 5));
+        s += t[0] + t[1] * t[2];
+        s += first((i & 15, s, 3));
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}

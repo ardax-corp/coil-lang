@@ -1,0 +1,79 @@
+// A trait declared here with foreign supertraits (`io::Read`, `Write`,
+// `Close`): its trait value takes impls of those traits in this file, as
+// any type declared here does, and passes where they are bounds.
+// @flags --allow-read --allow-write
+use tests::assert;
+use io::IoError;
+use io::Stream;
+use io::Read;
+use io::Write;
+use io::Close;
+use io::open;
+use io::fs::remove_file;
+use string::{to_bytes, from_bytes};
+
+trait Conn<S: Read + Write + Close> {
+}
+
+impl Conn for Stream {
+}
+
+impl Read for Conn {
+    fn read(Conn c, Vec<byte> buf) -> Result<Option<int>, IoError> {
+        return c.read(buf);
+    }
+    fn wait_readable(Conn c) -> Result<unit, IoError> {
+        return c.wait_readable();
+    }
+}
+
+impl Write for Conn {
+    fn write(Conn c, Vec<byte> buf) -> Result<int, IoError> {
+        return c.write(buf);
+    }
+    fn wait_writable(Conn c) -> Result<unit, IoError> {
+        return c.wait_writable();
+    }
+    fn write_from(Conn c, Vec<byte> buf, int offset) -> Result<int, IoError> {
+        return c.write_from(buf, offset);
+    }
+    fn flush(Conn c) -> Result<unit, IoError> {
+        return c.flush();
+    }
+}
+
+impl Close for Conn {
+    fn close(Conn c) -> Result<unit, IoError> {
+        return c.close();
+    }
+}
+
+fn put(Conn c, string t) -> Result<int, IoError> {
+    let n = c.write(to_bytes(t))?;
+    c.close()?;
+    return n;
+}
+
+class Holder {
+    pub c: Option<Conn>,
+}
+
+test("a Stream held as a local trait value reads and writes through it") {
+    let p = "coil_traits_foreign_supertrait_value.txt";
+    let s = open(p, "w")?;
+    let w: Conn = s;
+    let h = new Holder(Some(w));
+    match h.c {
+        Some(c) => {
+            assert!(put(c, "hi")? == 2);
+        },
+        None => {},
+    }
+    let f = open(p, "r")?;
+    let r: Conn = f;
+    let buf = to_bytes("....");
+    assert!(r.read(buf)? == Some(2));
+    assert!(from_bytes(buf)? == "hi..");
+    r.close()?;
+    remove_file(p)?;
+}

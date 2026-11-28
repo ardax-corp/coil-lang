@@ -1,0 +1,35 @@
+// A `defer` body binding an `Option<int>` keeps its two words: no
+// `Option` is boxed per call.
+use io::sync::print;
+use string::format;
+
+static let ACC: int = 0;
+
+fn half(int n) -> Option<int> {
+    return if n % 3 == 0 {
+        None
+    } else {
+        Some(n / 2)
+    };
+}
+
+fn step(int i) -> int {
+    defer use (i) {
+        let h = half(i);
+        ACC += match h {
+            Some(v) => v,
+            None => 1,
+        };
+    }
+    return i & 7;
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        s += step(i);
+        i += 1;
+    }
+    let _ = print(format("%i %i\n", s, ACC));
+}

@@ -1,0 +1,62 @@
+// A generator's parameter is its own value (#2662): what the body writes
+// through it on `resume` never reaches the caller's value, which the call
+// left as it was. The caller's later writes do not reach the generator.
+use tests::assert;
+use gc::collect;
+
+class Block {
+    pub insts: Vec<int>,
+}
+
+class Func {
+    pub blocks: Vec<Block>,
+}
+
+gen fn first(Vec<int> xs) {
+    xs[0] = 4;
+    yield xs[0];
+}
+
+gen fn fill(Func f, int v) {
+    let i = 0;
+    while i < f.blocks[0].insts.len() {
+        f.blocks[0].insts[i] = v;
+        yield f.blocks[0].insts[0] + f.blocks[0].insts[1] + f.blocks[0].insts[2];
+        i = i + 1;
+    }
+}
+
+gen fn grow(Vec<int> xs) {
+    xs.push(9);
+    yield xs.len();
+    xs.push(10);
+    yield xs.len();
+}
+
+test("a write through a generator's parameter stays in the generator") {
+    let h = Vec::from([0, 1, 2]);
+    let k = first(h);
+    let a = resume k;
+    assert!(a == 4 && h == Vec::from([0, 1, 2]));
+}
+
+test("writes on each resume stay in the generator") {
+    let f = new Func(Vec::from([new Block(Vec::from([0, 1, 2]))]));
+    let g = fill(f, 4);
+    let a = resume g;
+    f.blocks[0].insts[2] = 100;
+    collect();
+    let b = resume g;
+    let c = resume g;
+    assert!(a == 7 && b == 10 && c == 12);
+    assert!(f.blocks[0].insts == Vec::from([0, 1, 100]));
+}
+
+test("a generator's parameter grown in the body") {
+    let xs = Vec::from([1]);
+    let g = grow(xs);
+    let a = resume g;
+    xs.push(2);
+    let b = resume g;
+    assert!(a == 2 && b == 3 && xs == Vec::from([1, 2]));
+}

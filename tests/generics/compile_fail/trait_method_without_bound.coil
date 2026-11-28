@@ -10,7 +10,7 @@ impl Size for int {
 }
 
 fn total<T>(T a) -> int {
-    return size(a);
+    return a.size();
 }
 
 fn main() {

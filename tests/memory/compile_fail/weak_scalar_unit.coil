@@ -1,0 +1,6 @@
+// @expected E0119 — `weak(())` is refused: a `()` has no object of its own to observe.
+use gc::{weak, Weak};
+
+fn main() {
+    let w: Weak<unit> = weak(());
+}

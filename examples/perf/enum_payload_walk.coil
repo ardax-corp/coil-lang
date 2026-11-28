@@ -1,0 +1,72 @@
+// A tree-walking evaluator: each node of a boxed enum binds two or three
+// payload words in one match arm. Builds a few thousand expression trees
+// once, then evaluates them many times. Prints the checksum.
+use io::sync::println;
+use string::format;
+
+enum Expr {
+    Num(int),
+    Var(int),
+    Bin(int, Expr, Expr),
+    If(Expr, Expr, Expr),
+}
+
+fn build(int depth, int seed) -> Expr {
+    if depth == 0 {
+        return if seed % 3 == 0 {
+            Expr::Var(seed % 2)
+        } else {
+            Expr::Num(seed % 10)
+        };
+    }
+    let s = (seed * 48271) % 2147483647;
+    if s % 7 == 0 {
+        return Expr::If(build(depth - 1, s + 1), build(depth - 1, s + 2), build(depth - 1, s + 3));
+    }
+    return Expr::Bin(s % 3, build(depth - 1, s + 1), build(depth - 1, s + 2));
+}
+
+fn eval(Expr e, int x, int y) -> int {
+    return match e {
+        Expr::Num(n) => n,
+        Expr::Var(v) => if v == 0 {
+            x
+        } else {
+            y
+        },
+        Expr::Bin(op, l, r) => {
+            let a = eval(l, x, y);
+            let b = eval(r, x, y);
+            if op == 0 {
+                (a + b) % 1000003
+            } else if op == 1 {
+                (a - b) % 1000003
+            } else {
+                (a * b) % 1000003
+            }
+        },
+        Expr::If(c, t, f) => if eval(c, x, y) % 2 == 0 {
+            eval(t, x, y)
+        } else {
+            eval(f, x, y)
+        },
+    };
+}
+
+fn main() {
+    let trees: Vec<Expr> = Vec::new();
+    let i = 0;
+    while i < 64 {
+        trees.push(build(10, i + 1));
+        i = i + 1;
+    }
+    let sum = 0;
+    let round = 0;
+    while round < 200 {
+        for t in trees {
+            sum = (sum + eval(t, round, round + 1)) % 1000003;
+        }
+        round = round + 1;
+    }
+    let _ = println(format("%i", sum));
+}

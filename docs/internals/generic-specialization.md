@@ -9,22 +9,49 @@ its type arguments boxed; now they cross in their own word (layout.md,
 that meant a box per argument and a fresh dictionary tuple on every call.
 Three changes take the dictionary cost away for ground calls.
 
+An element-wise operator whose element is a type parameter (`[T; N] + [T; N]`,
+`-Vec<T>`, `(T, T) * T`, #2398) follows the same split. A clone names the
+element's word and lowers primitive ops or the packed kernel
+(`query::aggregate_info`); at a user type it calls the type's instance
+method once per element (`Lower::inst_elem`, #2414). An element is its
+boxed word, as an array holds it: where the instance's entry does not take
+and return that (a two-word class's result is two words), the clone calls
+the method's `$dict` adapter, the entry a dictionary holds, directly
+(#2418). The shared body calls the bound's dictionary
+method once per element (`Lower::bound_elem`), whatever the length: the
+packed kernels take primitive words only, so `emit_hir_mir` plans one only
+for a ground `int` / `float` / `byte` element.
+
+A bound met at the aggregate itself (`add<T: Num>(T a, T b)` called at
+`(int, int)` or `[float; 3]`) is the aggregate's structural instance
+(`Checker::ensure_structural_arith`, #2513): `Add` .. `Pow` and `Neg`
+(with `Num`, all seven) at a ground homogeneous tuple or array whose
+element has them, each method a thunk that runs the element-wise
+operator at that type (`emit_structural_thunks`). A clone still lowers
+the operator in place; a shared body gets the tuple's `Num` dictionary.
+A nested aggregate (`((int, int), (int, int))`, `[[float; 2]; 2]`) has
+the instance when its element has (#2544): the element's structural
+instance comes first, and the operator calls its thunk once per element
+(the element is one word, a pair boxed), as at a user type. A `Vec` (or
+`[T]`) has `Neg` only, its thunk the dynamic loop ground `-v` runs
+(`aggregate_dynamic`): ground `v + v` does not zip two dynamic lengths
+(E0119), so neither `Num` nor `Add` .. `Pow` is met at a `Vec`, and
+`add<T: Num>(v, v)` is the checker's "No instance for `Num<Vec<int>>`"
+(#2564).
+
 ## Ground dictionaries once (#1417)
 
 A dictionary made only of method pointers (and such dictionaries) is built
 once, on first use, into a synthetic static `__dict$N` (one per distinct
 dictionary) and loaded after that: load, compare with 0, build and store.
-It is built lazily because worker VMs start with zeroed statics.
+It is built lazily because a worker can start with zeroed statics
+(`machine/src/worker.rs`).
 
-- MIR bodies: `intern_dict_ops` (`codegen/emit_hir_mir.rs`) replaces each
-  maximal ground `Tuple` subtree with `HirDictOp::Interned`.
-- IL thunks: `append_dicts_interned` emits the same pattern from the
-  dictionary plan into a fragment `CodeBuf` and `append`s it, so its
-  `CodePtr`s are rewritten to entries; a reserved entry is emitted as a
-  root entry, which `append` keeps.
-- These statics need no setup, so `prologue_jmp_target` does not count them.
+`intern_dict_ops` (`codegen/emit_hir_mir.rs`) replaces each maximal ground
+`Tuple` subtree with `HirDictOp::Interned`, and `interned_dict`
+(`mir/from_hir.rs`) lowers that to the load, compare and store.
 
-Test: `perf_metrics::ground_dictionary_is_built_once`.
+Bench: `examples/perf/dict_once.coil`.
 
 ## Clones call their siblings' clones (#1419)
 
@@ -61,7 +88,7 @@ their own layout and bounds resolve statically.
   module's bodies are lowered. A clone that plans keeps its HIR body in
   `hir_resolved_clones` (`hir_resolved_clone_body`: names qualified, types
   closed, its calls turned into `Callee::Resolved`, whose plans live in
-  `resolved_plans`). `hir_inline_replan` then splices a kept body like a
+  `resolved_plans`). `hir_inline_round` then splices a kept body like a
   same-module callee when the call needs no boxing, keeps the clone's ABI
   and fits `max_cross_module_inline_cost` (100: every node 1, a call 25)
   (`examples/perf/foreign_clone_hot.coil`).
@@ -71,13 +98,69 @@ their own layout and bounds resolve statically.
   a clone use the clone, so `sort`'s call to `merge_range` is cloned too.
 - **Gates.** A clone falls back to the shared body (through a boxing thunk)
   when its types mean something else to the old module (`knows_tys`: a
-  class declared later is not in its checker), or when the generic body has
-  an enum over its type parameters (`layout_safe`: `Option<T>` in a shared
-  field would be stored in the clone's layout and read in the shared one,
-  as `task::Channel` did).
+  class or enum declared later, or a tuple or array, is not in its
+  checker's terms). Otherwise it is compiled
+  from the body, whatever open enums the body holds (`layout_safe`). One
+  at the top, the result of `HashMap::get -> Option<V>` or a local, is the
+  clone's own value, and a field holds one in its declared layout in either
+  body (`hir_field_rep`; #2958). One below the top, a local
+  `Result<Result<T, E>, E>` in `task::timeout` or a `Vec<Option<T>>`, is
+  the clone's own too: such a value reaches another body only through a
+  signature that holds it, and every such signature is clone-only
+  (`fn_sig_split`; a class holding one is a nested open enum wherever it
+  is named), so the body that receives it is a ground clone reading the
+  same layout, as in this module's own mono clones
+  ([layout.md](layout.md), "Open enums", #2547). A generic whose signature
+  or instance head reaches a generic class instance holding a field flat
+  at the call's types (`Cell<Option<int>>`, `fn_flat_split`; layout.md,
+  "Flat instances") is cloned too. A class whose module does not know the
+  types has no flat instance there, so its shared bodies agree with the
+  instance's one-word field.
+- **Cloning in the caller's module.** A clone whose types the old module
+  does not know (a user class of the entry module passed to
+  `num::min`, `KeyIndex<Shape>`, `Result<T, task::TaskError>` seen from
+  `core`) is still a thunk. Compiling it in the caller's module, which
+  knows the types, needs the generic's body in a form that does not depend
+  on the old module's checker: the HIR body is lowered against that
+  checker's type, trait-impl and field tables, and the old module's private
+  names resolve only there. Either the HIR would carry its types and
+  resolved impls in a module-independent form, or the later module's
+  class, enum and impl facts would be ported into the old checker before
+  the clone lowers. Neither is done yet. A tuple or array over known types
+  would mean the same in the old module, but a clone there at one does not
+  lower natively yet: a bound's operator (`<` in `insertion_range` at
+  `(int, int)`, E0801 `operator`) and a bound method call on the class's
+  parameter (`k.hash()` in `HashMap<(int, int), V>::insert`, E0801
+  `callee-trait`) are refused, though the MIR interpreter runs both.
 
-Tests: `perf_metrics::foreign_method_clone_is_specialized`,
-`perf_metrics::foreign_fn_clone_is_specialized`.
+Tests: `namespace::foreign_option_result_method_clone_compiles_from_its_body`,
+`namespace::foreign_for_in_next_takes_its_clone`,
+`namespace::foreign_clone_holding_a_nested_open_enum_compiles_from_its_body`; benches
+`examples/perf/map_get_hot.coil`, `examples/perf/map_walk_hot.coil`.
+
+## A `for` loop's `next` with an open enum in the trait's signature
+
+A generic instance's `next` has a boundary signature: the trait spells
+its result `Option<Item>`, open over the class parameter. A `for` loop
+over a ground iterator calls `next`'s clone (`hir_next_clone`,
+`instance_clone_own_layout`) and reads its result in the clone's own
+layout, so `for p in m` over a `HashMap<int, int>` runs
+`HashMapIter::next`'s clone, not the shared body through the `Iterator`
+dictionary (#2909). A plain ground call of such a method (`xs.first()`
+through `VecOps`, `xs.min()` through `VecOrd`) does the same: the call
+site asks `Compiler::own_layout_clone`, and when the clone is compiled
+from its body it calls the clone and reads the result in the clone's
+layout (`ground_instance_clone`, `own_layout`). Not at an instance whose
+head is an open enum (`impl Wrap for Option<T>`): its call site boxes the
+receiver as the shared entry takes it. A dictionary slot still
+holds the shared entry (`Compiler::boundary_clone`), and so does every
+caller where the clone would be a thunk around the shared entry (another
+module that does not know the types, `knows_tys`), which returns the
+trait's layout. A flat instance's method is cloned for every caller, as
+before.
+
+Tests: `namespace::foreign_boundary_trait_method_call_takes_its_clone`,
+`tests/traits/assoc_option_result_direct_call.coil`.
 
 ## How many clones
 
@@ -87,9 +170,11 @@ take the shared body instead (warning E0804):
 - **Polymorphic recursion.** Each clone carries the functions on its
   chain of clones (the clone whose body asked for it, that clone's, …). A
   call to one of them at new types (`f<T>` calling `g<(T, int)>` calling
-  `f<((T, int), int)>`, or `Nest<T>::depth` calling
-  `Nest<Nest<T>>::depth`) would grow without end, so it keeps the shared
-  body. Chains are no longer than the number of generic functions, so
+  `f<((T, int), int)>`, `f<T>` calling `f<Box<T>>`, or `Nest<T>::depth`
+  calling `Nest<Nest<T>>::depth`) would grow without end, so it keeps the
+  shared body. A free function with a declared signature calls itself at
+  that scheme, as any later caller does, so its body may call itself at
+  another type (#2540). Chains are no longer than the number of generic functions, so
   planning terminates. Free functions: `collect_transitive`
   (`monomorphize.rs`); instance and foreign clones: `InstClone::chain`,
   `Compiler::inst_clone_recursive`. A recursive call at types another
@@ -98,7 +183,9 @@ take the shared body instead (warning E0804):
   `monomorphize::MAX_TOTAL_SPECIALIZATIONS`) bounds one module's plan and,
   separately, a program's instance and foreign clones, against fan-out
   through many functions at distinct types. Tests that need the shared
-  body set it low (`// @flags --clone-budget 8`).
+  body set it low (`// @flags --clone-budget 8`). A clone-only generic
+  (a nested open enum, a function in a field, a flat instance) is cloned
+  past it.
 
 Until 2026-10 these were counts (8 clones per function or method, 64 per
 module, 256 instance clones per program), which real code did not reach
@@ -111,7 +198,8 @@ took 1.7 s and 346 MB to compile (without the counts, forever).
 
 ## Measurements
 
-2026-10-17, one run each, `--auto-par off`, `vm_profile` builds (counting
+2026-10-17, on the bytecode VM (since deleted), one run each,
+`--auto-par off`, `vm_profile` builds (counting
 allocations slows both): `d1688ee` (before #1416) vs the branch with all of
 the above. Managed allocations from `machine::alloc_count`.
 

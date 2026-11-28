@@ -12,12 +12,12 @@ trait Wrap<A, B> {
 
 impl Wrap<string> for int {
     fn wrap(int x, int b) -> string {
-        return "<" + show(x + b) + ">";
+        return "<" + (x + b).show() + ">";
     }
 }
 
 fn wrapped<T>(T s, int b) -> string where Wrap<T, string> {
-    return wrap(s, b);
+    return s.wrap(b);
 }
 
 fn wrapped_method<T>(T s, int b) -> string where Wrap<T, string> {

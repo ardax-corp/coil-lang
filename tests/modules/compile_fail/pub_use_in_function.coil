@@ -1,0 +1,5 @@
+// @expected E0001 — `pub use` re-exports a name from a module, so it is
+// allowed only at the top level; in a function body it does not parse (#2864).
+fn main() {
+    pub use reexport_defs::bump;
+}

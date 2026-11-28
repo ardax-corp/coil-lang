@@ -1,0 +1,8 @@
+// @expected E0119 — `.show()` of a record holding an unbounded `T` needs `T: Show`, as a tuple's does (#2631).
+fn bad<T>(T x) -> string {
+    return { a: x }.show();
+}
+
+fn main() {
+    let _ = bad(1);
+}

@@ -1,0 +1,68 @@
+// A function value records its captures' and filled arguments' word kinds
+// (from their types, and in a shared body a type parameter's from its
+// `kinds` word): collections in between keep every captured object and
+// leave every captured number alone.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+class Node {
+    pub v: int,
+}
+
+fn add(int a, Node n, int b) -> int {
+    return a + n.v + b;
+}
+
+fn hold<T>(T x, int k) -> unit -> (T, int) {
+    return fn () use (x, k) => (x, k);
+}
+
+test("closures keep their captured objects and numbers") {
+    let fs: Vec<unit -> int> = Vec::new();
+    let i = 0;
+    while i < 200 {
+        let n = new Node(i);
+        let k = i * 2;
+        let pair: Option<int> = Option::Some(i);
+        fs.push(fn () use (n, k, pair) => n.v + k + pair.unwrap_or(0));
+        i += 1;
+    }
+    collect();
+    let total = 0;
+    for f in fs {
+        total += f();
+    }
+    assert!(total == 4 * (199 * 200 / 2));
+}
+
+test("partial applications keep their filled arguments") {
+    let fs: Vec<int -> int> = Vec::new();
+    let i = 0;
+    while i < 100 {
+        fs.push(add(i, new Node(i)));
+        i += 1;
+    }
+    collect();
+    let total = 0;
+    for f in fs {
+        total += f(1);
+    }
+    assert!(total == 2 * (99 * 100 / 2) + 100);
+}
+
+test("closures made in a shared body keep their captures") {
+    let fs: Vec<unit -> (Node, int)> = Vec::new();
+    let i = 0;
+    while i < 100 {
+        fs.push(hold(new Node(i), i));
+        i += 1;
+    }
+    collect();
+    let total = 0;
+    for f in fs {
+        let (n, k) = f();
+        total += n.v + k;
+    }
+    assert!(total == 99 * 100);
+}

@@ -1,0 +1,47 @@
+// `for (a, b) in gen`: a tuple pattern binds each part of the tuple a
+// generator yields, as over a `Vec` of tuples (#2317).
+use string::format;
+use tests::assert;
+
+gen fn pairs(int n) {
+    let i = 0;
+    while i < n {
+        yield (i, i * 2);
+        i += 1;
+    }
+}
+
+gen fn triples(int n) {
+    let i = 0;
+    while i < n {
+        yield (i, format("s%i", i), (i, i + 1));
+        i += 1;
+    }
+}
+
+test("a pair pattern binds both words") {
+    let s = 0;
+    for (a, b) in pairs(3) {
+        s += a + b;
+    }
+    assert!(s == 9, format("%i", s));
+}
+
+test("a wildcard part is skipped") {
+    let s = 0;
+    for (a, _) in pairs(4) {
+        s += a;
+    }
+    assert!(s == 6, format("%i", s));
+}
+
+test("nested and heap parts, left early") {
+    let s = 0;
+    for (a, t, (c, d)) in triples(3) {
+        s += a + t.len() + c * d;
+        if a == 1 {
+            break;
+        }
+    }
+    assert!(s == 7, format("%i", s));
+}

@@ -1,0 +1,10 @@
+// @expected E0107 — a compound assignment through a tuple element changes the
+// tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let t = (new C(1), 0);
+    t[0].x += 9;
+}

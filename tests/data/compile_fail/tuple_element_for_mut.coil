@@ -1,0 +1,14 @@
+// @expected E0107 — `for mut` over a tuple element writes each item in place,
+// which changes the tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let xs: Vec<C> = Vec::new();
+    xs.push(new C(1));
+    let t = (xs, 0);
+    for mut c in t[0] {
+        c.x += 100;
+    }
+}

@@ -1,0 +1,137 @@
+// A nested tuple flattens to its leaf words by one rule at any depth, so
+// `((int, int), int)`, `(((int, int), int), int)` and a tuple of an
+// `Option` of a tuple cross a direct call as their words when they fit in
+// four. Wider nests keep their inner tuples as heap words.
+use tests::assert;
+use gc::collect;
+use string::format;
+
+static let drops: int = 0;
+
+class Handle {
+    pub fd: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+#[inline(never)]
+fn mk(int a) -> ((int, int), int) {
+    return ((a, a + 1), a + 2);
+}
+
+#[inline(never)]
+fn weigh(((int, int), int) t) -> int {
+    return t[0][0] + t[0][1] * 10 + t[1] * 100;
+}
+
+#[inline(never)]
+fn deep(int a) -> (((int, int), int), int) {
+    return (((a, 1), 2), a + 3);
+}
+
+#[inline(never)]
+fn wdeep((((int, int), int), int) t) -> int {
+    return t[0][0][0] + t[0][0][1] * 10 + t[0][1] * 100 + t[1] * 1000;
+}
+
+#[inline(never)]
+fn inner_first(((int, int), int) t) -> (int, int) {
+    return t[0];
+}
+
+#[inline(never)]
+fn left((int, (int, (int, int))) t) -> int {
+    let (a, rest) = t;
+    let (b, (c, d)) = rest;
+    return a * 1000 + b * 100 + c * 10 + d;
+}
+
+#[inline(never)]
+fn named(((string, int), Handle) t) -> int {
+    return t[0][0].len() * 100 + t[0][1] * 10 + t[1].fd;
+}
+
+#[inline(never)]
+fn opt_nested(Option<((int, int), string)> o) -> int {
+    return match o {
+        Some(t) => t[0][0] + t[0][1] * 10 + t[1].len() * 100,
+        None => -1,
+    };
+}
+
+#[inline(never)]
+fn five(((int, int, int), (int, int)) t) -> int {
+    return t[0][0] + t[0][1] + t[0][2] + t[1][0] * 10 + t[1][1] * 100;
+}
+
+#[inline(never)]
+fn mk_five(int a) -> ((int, int, int), (int, int)) {
+    return ((a, a, a), (a + 1, a + 2));
+}
+
+#[inline(never)]
+fn keep(((int, int), int) t) -> Vec<((int, int), int)> {
+    let v: Vec<((int, int), int)> = [];
+    v.push(t);
+    return v;
+}
+
+test("two and three levels of nesting go as words") {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += weigh(mk(i));
+        s += weigh(((i, 2), 3));
+        s += wdeep(deep(i));
+        i += 1;
+    }
+    let expect = 0;
+    let j = 0;
+    while j < 10 {
+        expect += j + (j + 1) * 10 + (j + 2) * 100;
+        expect += j + 20 + 300;
+        expect += j + 10 + 200 + (j + 3) * 1000;
+        j += 1;
+    }
+    assert!(s == expect);
+}
+
+test("nesting on the right and an inner tuple handed back") {
+    assert!(left((1, (2, (3, 4)))) == 1234);
+    let p = inner_first(mk(5));
+    assert!(p[0] == 5 && p[1] == 6);
+}
+
+test("heap words nested in a tuple") {
+    drops = 0;
+    let s = 0;
+    let i = 0;
+    while i < 4 {
+        s += named(((format("k%i", i), i), new Handle(i)));
+        i += 1;
+    }
+    collect();
+    assert!(drops == 4);
+    assert!(s == 200 * 4 + 0 + 10 + 20 + 30 + 0 + 1 + 2 + 3);
+}
+
+test("an Option of a nested tuple with a string") {
+    assert!(opt_nested(Some(((1, 2), "abc"))) == 321);
+    assert!(opt_nested(None) == -1);
+}
+
+test("a nest wider than four words keeps inner tuples as heap words") {
+    assert!(five(mk_five(2)) == 6 + 30 + 400);
+    assert!(five(((1, 2, 3), (4, 5))) == 6 + 40 + 500);
+}
+
+test("a callee that keeps a nested tuple gets the object") {
+    let v = keep(mk(1));
+    assert!(v[0][0][0] == 1 && v[0][0][1] == 2 && v[0][1] == 3);
+    let w = keep(((7, 8), 9));
+    assert!(weigh(w[0]) == 987);
+}

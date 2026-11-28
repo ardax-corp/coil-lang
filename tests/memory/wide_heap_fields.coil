@@ -1,0 +1,168 @@
+// A class field of a tuple whose leaves are numbers or heap words, nested
+// at any depth (`(string, int, int)`, `((Handle, int), int)`), keeps each
+// leaf in its own slot: its first in the field's slot, the others in tail
+// slots, each with its word kind, so the counts and the collector see the
+// heap words there. Reading it builds the tuple again, writing it takes
+// the value apart.
+use tests::assert;
+use gc::collect;
+
+static let drops: int = 0;
+
+class Handle {
+    pub id: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+class Named {
+    pub tag: (string, int, int),
+    pub n: int,
+}
+
+class Owner {
+    pub held: ((Handle, int), int),
+    pub list: (Vec<int>, (string, float)),
+}
+
+class Holder<T> {
+    pub item: T,
+    pub n: int,
+}
+
+// A class of its own type in a leaf: a cycle through a tail slot.
+class Node {
+    pub link: (int, Option<Node>, int),
+    pub next: (int, int, Vec<Node>),
+}
+
+readonly class Frozen {
+    pub f: (string, (int, int)),
+}
+
+#[inline(never)]
+fn label((string, int, int) t) -> string {
+    return t[0] + ":" + (t[1] + t[2]).show();
+}
+
+#[inline(never)]
+fn named(string s, int a) -> Named {
+    return new Named((s, a, a + 1), a);
+}
+
+test("a string leaf reads and writes its word") {
+    let x = named("a" + "b", 1);
+    assert!(x.tag[0] == "ab");
+    assert!(label(x.tag) == "ab:3");
+    x.tag = ("c" + "d", 5, 6);
+    assert!(label(x.tag) == "cd:11");
+    let s = "e" + "f";
+    x.tag = (s, 1, 1);
+    assert!(label(x.tag) == "ef:2");
+    let whole = x.tag;
+    x.tag = ("g", 0, 0);
+    assert!(whole[0] == "ef" && x.tag[0] == "g");
+    assert!(x.n == 1);
+}
+
+#[inline(never)]
+fn owner() -> Owner {
+    let xs: Vec<int> = [1, 2, 3];
+    let o = new Owner(((new Handle(1), 2), 3), (xs, ("v", 1.5)));
+    o.held = ((new Handle(o.held[0][0].id + o.held[0][1] + o.held[1]), 5), 6);
+    return o;
+}
+
+#[inline(never)]
+fn swapped() -> int {
+    let o = owner();
+    let kept = o.held[0][0];
+    o.held = ((new Handle(7), 8), 9);
+    return kept.id + o.held[0][0].id;
+}
+
+#[inline(never)]
+fn owned() -> bool {
+    let o = owner();
+    return o.held[0][0].id == 6 &&
+           o.held[0][1] + o.held[1] == 11 &&
+           o.list[0].len() == 3 &&
+           o.list[1][0] == "v" &&
+           o.list[1][1] == 1.5;
+}
+
+// Counted after the frames that held them are gone: a collection may
+// still see a word a live frame left behind.
+test("a leaf of a class with a drop is released with its field") {
+    drops = 0;
+    assert!(owned());
+    collect();
+    assert!(drops == 2);
+}
+
+test("a heap leaf read out of its field outlives the write over it") {
+    drops = 0;
+    assert!(swapped() == 13);
+    collect();
+    assert!(drops == 3);
+}
+
+#[inline(never)]
+fn generic() -> int {
+    let g = new Holder(((new Handle(1), 1), new Handle(2)), 0);
+    let before = g.item[0][0].id + g.item[1].id;
+    g.item = ((new Handle(3), 1), new Handle(4));
+    return before * 10 + g.item[0][0].id + g.item[1].id;
+}
+
+test("a generic instance's heap leaves") {
+    let h = new Holder(("x" + "y", 2, 3), 4);
+    assert!(label(h.item) == "xy:5");
+    h.item = ("z", 7, 8);
+    assert!(label(h.item) == "z:15" && h.n == 4);
+    drops = 0;
+    assert!(generic() == 37);
+    collect();
+    assert!(drops == 4);
+}
+
+test("a cycle through a tail slot is collected") {
+    let i = 0;
+    while i < 50 {
+        let none: Vec<Node> = [];
+        let a = new Node((1, Option::None, 2), (0, 0, none));
+        let one: Vec<Node> = [a];
+        let b = new Node((3, Option::Some(a), 4), (0, 0, one));
+        a.link = (5, Option::Some(b), 6);
+        let two: Vec<Node> = [b, a];
+        a.next = (1, 2, two);
+        assert!(a.next[2].len() == 2);
+        i += 1;
+    }
+    collect();
+}
+
+test("a Vec of instances with heap leaves") {
+    let v: Vec<Named> = [];
+    let i = 0;
+    while i < 8 {
+        v.push(named("n" + i.show(), i));
+        i += 1;
+    }
+    let total = "";
+    for x in v {
+        total = total + label(x.tag) + ",";
+    }
+    assert!(total == "n0:1,n1:3,n2:5,n3:7,n4:9,n5:11,n6:13,n7:15,");
+}
+
+test("a readonly class's heap leaf compares by value") {
+    let f = new Frozen(("a" + "b", (1, 2)));
+    assert!(f.f[0] == "ab" && f.f[1][1] == 2);
+    assert!(f == new Frozen(("ab", (1, 2))));
+    assert!(f != new Frozen(("ab", (1, 3))));
+}

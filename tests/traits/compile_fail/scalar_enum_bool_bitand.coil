@@ -1,0 +1,11 @@
+// @expected E0102 — a `bool`-backed enum takes the operators a `bool` does:
+// `&` is none of them (#2463).
+#[repr(bool)]
+enum Sw {
+    Off = false,
+    On = true,
+}
+
+fn main() {
+    let z = Sw::On & Sw::Off;
+}

@@ -1,0 +1,53 @@
+// A local bound from a generic function with a bound, stored in a `Vec`,
+// an array or a tuple by a generic body at `int` (coil-lang#2658; the
+// others are in polyfn_local_escape.coil). Such a generic is clone-only,
+// so a ground call takes its clone past the clone budget too
+// (coil-lang#2664).
+use tests::assert;
+
+trait Bump<T> {
+    fn bump(T x) {}
+    fn val(T x) -> int {}
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+
+    fn val(int x) -> int {
+        return x;
+    }
+}
+
+fn peek<U: Bump>(U x) -> int {
+    let y = x;
+    y.bump();
+    return x.val() * 100 + y.val();
+}
+
+fn in_vec_at<T: Bump>(T x) -> Vec<T -> int> {
+    let f = peek;
+    let v: Vec<T -> int> = Vec::new();
+    v.push(f);
+    return v;
+}
+
+fn in_array_at<T: Bump>(T x) -> [T -> int; 1] {
+    let f = peek;
+    return [f];
+}
+
+fn in_tuple_at<T: Bump>(T x) -> (T -> int, int) {
+    let f = peek;
+    return (f, 1);
+}
+
+test("stored in a Vec, an array and a tuple at int") {
+    let v = in_vec_at(7);
+    let g = v[0];
+    assert!(g(7) == 707);
+    let a = in_array_at(7);
+    let h = a[0];
+    assert!(h(7) == 707);
+    let (k, _) = in_tuple_at(7);
+    assert!(k(7) == 707);
+}

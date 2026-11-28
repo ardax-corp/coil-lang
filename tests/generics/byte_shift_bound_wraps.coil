@@ -1,0 +1,36 @@
+// `<<` on a `byte` keeps the low 8 bits through a `T: Shl` bound too: the
+// builtin `Shl` instance of `byte` wraps as the operator on a `byte` local
+// does, in a per-type clone and in the shared body (#2778).
+use tests::assert;
+
+fn shl<T: Shl>(T a, int n) -> T {
+    return a << n;
+}
+
+fn shl_all<T: Shl>(Vec<T> xs, int n) -> Vec<T> {
+    let out: Vec<T> = Vec::new();
+    for x in xs {
+        out.push(x << n);
+    }
+    return out;
+}
+
+test("a byte shifted through a bound wraps") {
+    let one: byte = 1;
+    let top: byte = 255;
+    assert!(shl(one, 8) == 0);
+    assert!(shl(top, 1) == 254);
+    assert!(shl(top, 4) == 240);
+    assert!(shl(one, 7) == 128);
+}
+
+test("each item of a byte vector wraps") {
+    let xs: Vec<byte> = [1, 3, 200, 255];
+    let ys = shl_all(xs, 7);
+    assert!(ys[0] == 128 && ys[1] == 128 && ys[2] == 0 && ys[3] == 128);
+}
+
+test("an int through the same bound keeps every bit") {
+    assert!(shl(1, 8) == 256);
+    assert!(shl(255, 4) == 4080);
+}

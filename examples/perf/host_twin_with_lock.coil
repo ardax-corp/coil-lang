@@ -1,0 +1,21 @@
+// `with_lock` / `with_read` / `with_write` in Coil (thread_locks.coil over
+// the cell primitives), once runtime natives calling back into Coil.
+// ITERS=2000000. Checksum 4000000000000.
+use thread::{mutex, rwlock, with_lock, with_read, with_write};
+use io::sync::print;
+use string::format;
+
+fn main() {
+    let iters = 2000000;
+    let m = mutex(0)?;
+    let rw = rwlock(0)?;
+    let acc = 0;
+    let i = 0;
+    while i < iters {
+        acc = acc + with_lock(m, fn (int x) => (x + 1, x))?;
+        let _ = with_write(rw, fn (int x) => (x + 1, 0))?;
+        acc = acc + with_read(rw, fn (int x) => x)?;
+        i = i + 1;
+    }
+    let _ = print(format("%i", acc));
+}

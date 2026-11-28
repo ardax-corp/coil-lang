@@ -1,0 +1,12 @@
+// Helper module for tests/traits/instance_heads_imported_and_generic.coil
+// (#2480): a class and a generic class that another module implements its own
+// trait for.
+
+class Cell {
+    pub n: int,
+}
+
+class Wrap<T> {
+    pub item: T,
+    pub n: int,
+}

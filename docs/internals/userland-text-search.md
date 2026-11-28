@@ -4,10 +4,10 @@
 coil-stdlib's `text` module (`Searchable` default methods over a
 `Pattern`). The goal (2026-10-22) is to keep them there and make the
 compiler good enough that they run close to host natives. They should not
-move into the VM. No ISA-specific SIMD is used.
+move into the runtime. No ISA-specific SIMD is used.
 
-The work happens on the feature branch `feature/userland-loop`, one PR per
-step.
+The work happened on the feature branch `feature/userland-loop`, one PR per
+step. The measurements here were taken on the bytecode VM, since deleted.
 
 ## Where the time went
 
@@ -28,7 +28,7 @@ was per-match overhead:
 |------|----|--------|----------------------------|
 | — | main `d1d741d` | baseline | 1.299G |
 | 1 | (reverted) | Let loops without arithmetic into dense | 1.304G (no gain) |
-| 2 | #1925 | Per-type clones of trait defaults at their own bounds' types: `Searchable__default__split$inst$string_string` is dense and inlines `find_in` | 1.017G (−22%) |
+| 2 | #1925 | Per-type clones of trait defaults at their own bounds' types: `Searchable__default__split$inst$string_string` inlines `find_in` | 1.017G (−22%) |
 | 3 | #1927 | MIR `phi_sroa`: thread the niche `None` test through its φ, then split a φ of fresh objects read only field by field into per-field φs. The `Span` per match goes. | 0.772G (−24%, −41% total) |
 | 5 | this step | Heap-pointer probe (`Slab::contains_slot`, behind every `find_object_by_addr`): an 8-entry recent-chunk cache keyed by the 64 KiB window replaces the one-entry `last`, and the slot test multiplies by a precomputed `ceil(2^64 / size)` instead of dividing | 0.721G |
 
@@ -55,8 +55,6 @@ Step 5 helps every op that classifies a heap word, not only host
 arguments, so typed host arguments were not special-cased. Callgrind
 counts a `div` as one instruction, so the instruction numbers understate
 what removing the divide saves.
-`replace_all` also pays a `LOAD`/`STORE` copy per FORMAT for the
-barrier's token register, and two `CONST 0; STORE` slot clears per match.
 
 ## Notes
 
@@ -65,5 +63,4 @@ barrier's token register, and two `CONST 0; STORE` slot clears per match.
   still boxed its payload. The MIR pass covers the mutable class
   instead, as long as the object neither escapes nor is written after
   the join.
-- `phi_sroa` runs last among the dense passes, after LICM and CSE have
-  shaped the join. It does not run in a debugger build (`debug_keep`).
+- `phi_sroa` runs after LICM and CSE have shaped the join. It does not run in a debugger build (`debug_keep`).

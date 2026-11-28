@@ -32,3 +32,43 @@ test("aggregates without floats compare as before") {
     assert!((1, "a") != (1, "b"));
     assert!([1.5, 2.5] == [1.5, 2.5]);
 }
+
+test("records and Vecs of tuples compare their floats by IEEE") {
+    let n = nan();
+    assert!({ x: 1.0, y: n } != { x: 1.0, y: n });
+    assert!({ x: 0.0, y: 2.0 } == { x: -0.0, y: 2.0 });
+    let v: Vec<(int, float)> = Vec::new();
+    v.push((1, 0.0));
+    let w: Vec<(int, float)> = Vec::new();
+    w.push((1, -0.0));
+    assert!(v == w);
+    w.push((2, n));
+    v.push((2, n));
+    assert!(v != w);
+}
+
+fn same<T: Eq>(Vec<(T, float)> a, Vec<(T, float)> b) -> bool {
+    return a == b;
+}
+
+test("a generic body compares its float leaves by IEEE") {
+    let v: Vec<(string, float)> = Vec::new();
+    v.push(("a", 0.0));
+    let w: Vec<(string, float)> = Vec::new();
+    w.push(("a", -0.0));
+    assert!(same(v, w));
+    v.push(("b", nan()));
+    w.push(("b", nan()));
+    assert!(!same(v, w));
+}
+
+test("a two-word (int, float) compares its float word by IEEE") {
+    let n = nan();
+    let t = (1, n);
+    assert!(!(t == t));
+    let v: Vec<(int, float)> = Vec::new();
+    v.push((1, n));
+    v.push((1, -0.0));
+    assert!(!(v[0] == t));
+    assert!(v[1] == (1, 0.0));
+}

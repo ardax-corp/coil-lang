@@ -1,6 +1,6 @@
-//! `--early-free on|off|check` and `--nursery on|off` (feature/escape-memory):
-//! early frees follow the opt level (none at `-O0` / `-Og`) unless the flag
-//! says otherwise, and both flags reject other values.
+//! `--early-free on|off|check` (feature/escape-memory): early frees follow
+//! the opt level (none at `-O0` / `-Og`) unless the flag says otherwise,
+//! and the flag rejects other values.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -49,7 +49,7 @@ fn frees(flags: &[&str]) -> usize {
     let out = coil(&args, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "dissect {flags:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    stdout.lines().filter(|l| l.contains("FreeEarly")).count()
+    stdout.lines().filter(|l| l.contains(" = free")).count()
 }
 
 #[test]
@@ -70,10 +70,10 @@ fn early_free_flag_overrides_the_level() {
 }
 
 #[test]
-fn check_and_nursery_off_run_to_the_same_result() {
+fn check_and_o0_run_to_the_same_result() {
     let plain = coil(&[], &["--", "10"]);
     assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
-    for flags in [&["--early-free", "check"][..], &["--nursery", "off"], &["--nursery", "on", "-O0"]] {
+    for flags in [&["--early-free", "check"][..], &["-O0"]] {
         let out = coil(flags, &["--", "10"]);
         assert!(out.status.success(), "{flags:?}: {}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(out.stdout, plain.stdout, "{flags:?}");
@@ -81,11 +81,9 @@ fn check_and_nursery_off_run_to_the_same_result() {
 }
 
 #[test]
-fn memory_flags_reject_other_values() {
-    for (flag, value) in [("--early-free", "1"), ("--nursery", "check")] {
-        let out = coil(&[flag, value], &[]);
-        assert!(!out.status.success(), "{flag} {value} must fail");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains(flag), "stderr={err}");
-    }
+fn early_free_rejects_other_values() {
+    let out = coil(&["--early-free", "1"], &[]);
+    assert!(!out.status.success(), "--early-free 1 must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--early-free"), "stderr={err}");
 }

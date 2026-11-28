@@ -1,4 +1,4 @@
-// C2b / Q6 rung 4: coro for-in as ResumeCoro / DoneCoro (MIR dense or LIR).
+// C2b / Q6 rung 4: coro for-in as ResumeCoro / DoneCoro.
 // Helper sums yields. `main` stays format. Completion value is skipped.
 use io::sync::print;
 use string::format;

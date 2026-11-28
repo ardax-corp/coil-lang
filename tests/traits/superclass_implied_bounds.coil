@@ -45,14 +45,14 @@ impl Ordered for Ver {
 
 // Uses the superclass method under the subclass bound only.
 fn le_val<T: Ordered>(T a, T b) -> bool {
-    return lt_val(a, b) || eq_val(a, b);
+    return a.lt_val(b) || a.eq_val(b);
 }
 
 fn cmp<T: Ordered>(T a, T b) -> int {
-    if eq_val(a, b) {
+    if a.eq_val(b) {
         return 0;
     }
-    if lt_val(a, b) {
+    if a.lt_val(b) {
         return 0 - 1;
     }
     return 1;

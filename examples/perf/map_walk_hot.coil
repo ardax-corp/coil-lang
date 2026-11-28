@@ -1,0 +1,30 @@
+// CPU: `for p in m` over a ground `HashMap<int, int>` (#2909). The loop
+// calls the per-type clone of `HashMapIter::next`, whose `Pair` words are
+// known numbers, not the shared body through the `Iterator` dictionary.
+use io::sync::println;
+use string::format;
+use collections::map::HashMap;
+
+fn total(HashMap<int, int> m) -> int {
+    let n = 0;
+    for p in m {
+        n += p.key + p.value;
+    }
+    return n;
+}
+
+fn main() {
+    let m: HashMap<int, int> = HashMap::new();
+    let i = 0;
+    while i < 1000 {
+        let _ = m.insert(i, i * 3);
+        i += 1;
+    }
+    let s = 0;
+    let r = 0;
+    while r < 3000 {
+        s += total(m);
+        r += 1;
+    }
+    let _ = println(format("%i", s));
+}

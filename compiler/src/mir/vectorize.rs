@@ -131,7 +131,7 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
     if !is_invariant(func, n, &lp.blocks) {
         return None;
     }
-    if let Some(k) = as_const_i64(func, n)
+    if let Some(k) = func.const_i64(n)
         && k < LANES {
             return None;
         }
@@ -250,7 +250,7 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
         return None;
     }
     let n = loop_bound(func, *cond, iv)?;
-    if !is_invariant(func, n, &lp.blocks) || as_const_i64(func, n).is_some_and(|k| k < LANES) {
+    if !is_invariant(func, n, &lp.blocks) || func.const_i64(n).is_some_and(|k| k < LANES) {
         return None;
     }
     if region_has_barrier(func, &[header, body, latch]) || region_has_barrier(func, &arms) {
@@ -450,7 +450,7 @@ pub(super) fn match_push_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Optio
         return None;
     }
     let n = loop_bound(func, *cond, iv)?;
-    if !is_invariant(func, n, &lp.blocks) || as_const_i64(func, n).is_some_and(|k| k < LANES) {
+    if !is_invariant(func, n, &lp.blocks) || func.const_i64(n).is_some_and(|k| k < LANES) {
         return None;
     }
     let pure = |inst: &MirInst| {
@@ -572,10 +572,10 @@ fn int_range(func: &MirFunc, v: ValueId, depth: u8) -> Option<(i64, i64)> {
     if depth == 0 {
         return None;
     }
-    match def(func, v)? {
+    match func.def_inst(v)? {
         MirInst::Const { c: MirConst::I64(k), .. } => Some((*k, *k)),
         MirInst::Bin { op: MirBinOp::BitAnd, ty: MirTy::I64, lhs, rhs, .. } => {
-            let mask = |x: ValueId| as_const_i64(func, x).filter(|&k| k >= 0);
+            let mask = |x: ValueId| func.const_i64(x).filter(|&k| k >= 0);
             mask(*rhs).or_else(|| mask(*lhs)).map(|k| (0, k))
         }
         MirInst::Bin { op: op @ (MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul), ty: MirTy::I64, lhs, rhs, .. } => {
@@ -678,12 +678,12 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
     if !is_invariant(func, n, &lp.blocks) {
         return None;
     }
-    if let Some(k) = as_const_i64(func, n)
+    if let Some(k) = func.const_i64(n)
         && k < LANES {
             return None;
         }
 
-    let bin = def(func, acc_next)?;
+    let bin = func.def_inst(acc_next)?;
     let MirInst::Bin {
         op,
         ty,
@@ -759,7 +759,7 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
 }
 
 /// A map-and-fold body runs, lane by lane, each store's value then the
-/// store, then the fold (`emit::vec_loop_body`); the VM replays a block
+/// store, then the fold (`emit::vec_loop_body`); the runtime replays a block
 /// that traps in that order. That matches the scalar loop when every
 /// instruction of `body` that can trap is first computed, in that order,
 /// after as many stores as precede it in `body`, and the fold itself
@@ -801,7 +801,7 @@ fn traps_in_store_order(func: &MirFunc, body: BlockId, term: ValueId, acc_next: 
 
 /// Int arithmetic that can overflow or divide by zero. Element reads are
 /// in range under the vector loop's guard; floats and bit ops never trap.
-fn may_trap(func: &MirFunc, inst: &MirInst) -> bool {
+pub(super) fn may_trap(func: &MirFunc, inst: &MirInst) -> bool {
     match inst {
         MirInst::Bin { op, ty: MirTy::I64, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
         MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
@@ -820,7 +820,7 @@ fn split_fma(func: &MirFunc, lhs: ValueId, rhs: ValueId) -> Option<(ValueId, Val
 }
 
 fn as_mul(func: &MirFunc, v: ValueId) -> Option<(ValueId, ValueId)> {
-    match def(func, v)? {
+    match func.def_inst(v)? {
         MirInst::Bin {
             op: MirBinOp::Mul,
             ty: MirTy::I64 | MirTy::F64,
@@ -873,7 +873,7 @@ fn classify_with(
         let ty = store_ty(func, v)?;
         return Some(VOp::Splat { v, ty });
     }
-    match def(func, v)? {
+    match func.def_inst(v)? {
         MirInst::Index { array, index, .. } => {
             let off = index_offset(func, *index, iv, loop_blocks)?;
             if !is_invariant(func, *array, loop_blocks) {
@@ -1079,7 +1079,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
         return None;
     }
     let n = loop_bound(func, *cond, iv)?;
-    if !is_invariant(func, n, &lp.blocks) || as_const_i64(func, n).is_some_and(|k| k < LANES) {
+    if !is_invariant(func, n, &lp.blocks) || func.const_i64(n).is_some_and(|k| k < LANES) {
         return None;
     }
     // The latch: the accumulator's join, the step, constants.
@@ -1115,7 +1115,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
     if region_has_barrier(func, &[header, body, arm_t, arm_f, latch]) {
         return None;
     }
-    let Some(MirInst::Cmp { op, ty: cmp_ty, lhs, rhs, .. }) = def(func, *c) else {
+    let Some(MirInst::Cmp { op, ty: cmp_ty, lhs, rhs, .. }) = func.def_inst(*c) else {
         return None;
     };
     let ty = store_ty(func, acc)?;
@@ -1173,7 +1173,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
     if acc_ty != MirTy::I64 {
         return None;
     }
-    let Some(MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs: a, rhs: b, .. }) = def(func, from_then) else {
+    let Some(MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs: a, rhs: b, .. }) = func.def_inst(from_then) else {
         return None;
     };
     let t = if *a == acc { *b } else if *b == acc { *a } else { return None };
@@ -1188,7 +1188,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
         rhs: Box::new(classify(func, *rhs, iv, &lp.blocks)?),
     };
     let term = match t {
-        VOp::Splat { v, .. } if as_const_i64(func, v) == Some(1) => mask,
+        VOp::Splat { v, .. } if func.const_i64(v) == Some(1) => mask,
         t => VOp::Bin { kind: simd::IMUL64, lhs: Box::new(mask), rhs: Box::new(t) },
     };
     Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_ADD, stores: Vec::new() })
@@ -1205,7 +1205,7 @@ fn same_value(func: &MirFunc, a: ValueId, b: ValueId, depth: u8) -> bool {
         return false;
     }
     let same = |x: ValueId, y: ValueId| same_value(func, x, y, depth - 1);
-    match (def(func, a), def(func, b)) {
+    match (func.def_inst(a), func.def_inst(b)) {
         (Some(MirInst::Index { array: x, index: i, .. }), Some(MirInst::Index { array: y, index: j, .. })) => x == y && same(*i, *j),
         (Some(MirInst::Bin { op: o1, ty: t1, lhs: l1, rhs: r1, .. }), Some(MirInst::Bin { op: o2, ty: t2, lhs: l2, rhs: r2, .. })) => {
             o1 == o2 && t1 == t2 && same(*l1, *l2) && same(*r1, *r2)
@@ -1225,34 +1225,10 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
 }
 
 /// An op no vector loop body may hold: an allocation or GC edge, a call,
-/// a field or static access, an effect.
+/// a field or static access, an effect ([`super::effects::OpProps`]).
 fn region_has_barrier_inst(_func: &MirFunc, inst: &MirInst) -> bool {
-    inst.is_gc_edge()
-        || inst.is_deopt_edge()
-        || matches!(
-            inst,
-            MirInst::Call { .. }
-                | MirInst::CallIndirect { .. }
-                | MirInst::HostInvoke { .. }
-                | MirInst::Ffi { .. }
-                | MirInst::MatchPayload { .. }
-                | MirInst::HeapFieldLoad { .. }
-                | MirInst::HeapFieldStore { .. }
-                | MirInst::String { .. }
-                | MirInst::CodePtr { .. }
-                | MirInst::LoadStatic { .. }
-                | MirInst::StoreStatic { .. }
-                | MirInst::HomeLoad { .. }
-                | MirInst::HomeStore { .. }
-                | MirInst::ClearWord { .. }
-                | MirInst::KeepAlive { .. }
-                | MirInst::Print { .. }
-                | MirInst::FreeEarly { .. }
-                | MirInst::Panic { .. }
-                | MirInst::Format { .. }
-                | MirInst::Stringify { .. }
-                | MirInst::Cow { .. }
-        )
+    let p = inst.props();
+    p.gc_edge || p.vector_barrier
 }
 
 /// The `string_byte_at` host id, the read of `s[i]` on a `string`.
@@ -1288,7 +1264,7 @@ fn string_reads(func: &MirFunc, from: BlockId, loop_blocks: &std::collections::H
                     byte = Some(*dest);
                 }
                 MirInst::Cmp { dest, op: MirCmpOp::Lt, ty: MirTy::I64, lhs, rhs }
-                    if *dest == cond && Some(*lhs) == byte && is_const_i64(func, *rhs, 0) =>
+                    if *dest == cond && Some(*lhs) == byte && func.const_i64(*rhs) == Some(0) =>
                 {
                     test = true;
                 }
@@ -1337,7 +1313,7 @@ fn reads_covered<'a>(
             VOp::Fma { a, b, c, .. } => has(a, s, at) || has(b, s, at) || has(c, s, at),
         }
     }
-    reads.iter().all(|&(_, v)| match def(func, v) {
+    reads.iter().all(|&(_, v)| match func.def_inst(v) {
         Some(MirInst::HostInvoke { args, .. }) => match index_offset(func, args[1], iv, loop_blocks) {
             Some(at) => ops.clone().any(|op| has(op, args[0], at)),
             None => false,
@@ -1346,31 +1322,10 @@ fn reads_covered<'a>(
     })
 }
 
-fn def(func: &MirFunc, v: ValueId) -> Option<&MirInst> {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter())
-        .find(|i| i.dest() == v)
-}
-
 fn phi_from(args: &[(BlockId, ValueId)], latch: BlockId, from_latch: bool) -> Option<ValueId> {
     args.iter()
         .find(|(b, _)| (*b == latch) == from_latch)
         .map(|(_, v)| *v)
-}
-
-fn as_const_i64(func: &MirFunc, v: ValueId) -> Option<i64> {
-    match def(func, v)? {
-        MirInst::Const {
-            c: MirConst::I64(n),
-            ..
-        } => Some(*n),
-        _ => None,
-    }
-}
-
-fn is_const_i64(func: &MirFunc, v: ValueId, want: i64) -> bool {
-    as_const_i64(func, v) == Some(want)
 }
 
 fn is_iadd_k(func: &MirFunc, v: ValueId, iv: ValueId, k: i64) -> bool {
@@ -1380,15 +1335,15 @@ fn is_iadd_k(func: &MirFunc, v: ValueId, iv: ValueId, k: i64) -> bool {
         lhs,
         rhs,
         ..
-    }) = def(func, v)
+    }) = func.def_inst(v)
     else {
         return false;
     };
-    (*lhs == iv && is_const_i64(func, *rhs, k)) || (*rhs == iv && is_const_i64(func, *lhs, k))
+    (*lhs == iv && func.const_i64(*rhs) == Some(k)) || (*rhs == iv && func.const_i64(*lhs) == Some(k))
 }
 
 fn loop_bound(func: &MirFunc, cond: ValueId, iv: ValueId) -> Option<ValueId> {
-    match def(func, cond)? {
+    match func.def_inst(cond)? {
         MirInst::Cmp {
             op: MirCmpOp::Lt,
             lhs,
@@ -1420,7 +1375,7 @@ fn index_offset(
         lhs,
         rhs,
         ..
-    }) = def(func, index)
+    }) = func.def_inst(index)
     {
         let other = if *lhs == iv {
             *rhs
@@ -1429,7 +1384,7 @@ fn index_offset(
         } else {
             return None;
         };
-        if let Some(k) = as_const_i64(func, other) {
+        if let Some(k) = func.const_i64(other) {
             return Some(Off::K(k));
         }
         if func.ty(other) == MirTy::I64 && is_invariant(func, other, loop_blocks) {
@@ -1459,7 +1414,7 @@ fn is_invariant(
         Some(b) if !loop_blocks.contains(&b) => true,
         // `v.len() - 1` is often left in the header. It does not depend on
         // `i` when `v` does not (`xs[i].len()` does, #973).
-        Some(_) => match def(func, v) {
+        Some(_) => match func.def_inst(v) {
             Some(MirInst::Const { .. }) => true,
             Some(MirInst::ArrayLen { array, .. }) => is_invariant(func, *array, loop_blocks),
             Some(MirInst::Bin { lhs, rhs, .. }) => {

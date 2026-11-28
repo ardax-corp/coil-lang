@@ -42,19 +42,19 @@ impl Collect for Words {
 }
 
 fn take_head<C: Collect>(C xs) -> C::Elem {
-    let e: C::Elem = head(xs);
+    let e: C::Elem = xs.head();
     return e;
 }
 
 fn or_head<C: Collect>(C xs, C::Elem fallback) -> C::Elem {
-    if count(xs) == 0 {
+    if xs.count() == 0 {
         return fallback;
     }
-    return head(xs);
+    return xs.head();
 }
 
 fn heads<C: Collect, D: Collect>(C a, D b) -> (C::Elem, D::Elem) {
-    return (head(a), head(b));
+    return (a.head(), b.head());
 }
 
 test("a projection meets itself inside a generic body") {

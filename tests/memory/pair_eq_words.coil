@@ -1,0 +1,91 @@
+// `==` / `!=` on two-word values (`Option<int>`, `Result<int, string>`,
+// `(int, float)`) compare their words: an enum's tags, then the variant's
+// payload; a product's two words. No box is made for either side.
+use tests::assert;
+use collections::map::HashMap;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+#[inline(never)]
+fn checked(int x) -> Result<int, string> {
+    if x < 0 {
+        return Err("neg");
+    }
+    return Ok(x);
+}
+
+#[inline(never)]
+fn point(int x) -> (int, float) {
+    return (x, 0.5);
+}
+
+#[inline(never)]
+fn ratio(float x) -> Option<float> {
+    if x == 0.0 {
+        return None;
+    }
+    return Some(1.0 / x);
+}
+
+test("option of int") {
+    assert!(half(6) == Some(3));
+    assert!(half(6) != Some(4));
+    assert!(half(5) == None);
+    assert!(half(5) != half(4));
+    assert!(half(0) == Some(0));
+    assert!(half(0) != None);
+}
+
+test("result of int or string") {
+    assert!(checked(4) == Ok(4));
+    assert!(checked(-1) == Err("neg"));
+    assert!(checked(-1) != Err("pos"));
+    assert!(checked(4) != checked(5));
+    assert!(checked(0) != checked(-1));
+}
+
+test("tuple of int and float") {
+    assert!(point(2) == (2, 0.5));
+    assert!(point(2) != (3, 0.5));
+    assert!(point(2) != (2, 0.25));
+}
+
+// A float payload compares by IEEE, as a bare float and a tuple's do (#2321).
+test("option of float compares by IEEE") {
+    assert!(ratio(2.0) == Some(0.5));
+    assert!(ratio(0.0) == None);
+    assert!(ratio(4.0) != Some(0.5));
+    let nan = 0.0 / 0.0;
+    assert!(Some(nan) != Some(nan));
+}
+
+#[inline(never)]
+fn settled(int x) -> Result<(), int> {
+    if x < 0 {
+        return Err(x);
+    }
+    return Ok(());
+}
+
+// A `()` payload is equal whatever word carries it: a literal's, a call
+// result's, or one read out of its box in an array or a map.
+test("result of unit compares by tag") {
+    let r: Result<(), int> = Ok(());
+    assert!(r == Ok(()));
+    assert!(settled(1) == Ok(()));
+    assert!(settled(-2) == Err(-2));
+    let us: Vec<Result<(), int>> = [Ok(()), Err(3)];
+    assert!(us[0] == Ok(()));
+    let x = us[0];
+    assert!(x == r);
+    assert!(us[1] != Ok(()));
+    let m: HashMap<int, Result<(), int>> = HashMap::new();
+    m.insert(1, settled(5));
+    assert!(m.values()[0] == Ok(()));
+}

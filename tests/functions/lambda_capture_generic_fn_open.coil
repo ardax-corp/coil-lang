@@ -1,0 +1,175 @@
+// A lambda that captures a generic function's value made at the enclosing
+// body's own type parameter, whose signature holds an open `Option` /
+// `Result` (`fn(T) -> Option<T>`, `fn(Option<T>) -> T`, `fn((T, int)) ->
+// Result<T, string>`), and calls it: returned, called in the body, one
+// lambda level down, in a free generic and in methods, at heap,
+// immediate, unit and two-word types (coil-lang#2770). A method whose
+// body binds such a value to a `let` has its per-type clone.
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn take<T>(Option<T> x) -> T {
+    return match x {
+        Option::Some(v) => v,
+        Option::None => panic "absent",
+    };
+}
+
+fn first<T>((T, int) x) -> Result<T, string> {
+    return Result::Ok(x[0]);
+}
+
+fn lift<T>() -> fn(T) -> Option<T> {
+    let f = wrap;
+    return fn (T x) use (f) => f(x);
+}
+
+fn lift_ann<T>() -> fn(Option<T>) -> T {
+    let f: fn(Option<T>) -> T = take;
+    return fn (Option<T> x) use (f) => f(x);
+}
+
+fn inner<T>(T v) -> Option<T> {
+    let f = wrap;
+    let g = fn (T x) use (f) => f(x);
+    return g(v);
+}
+
+fn inner_res<T>(T v) -> Result<T, string> {
+    let f = first;
+    let g = fn ((T, int) x) use (f) => f(x);
+    return g((v, 1));
+}
+
+fn deep<T>(T v) -> Option<T> {
+    let f = wrap;
+    let g = fn (T x) use (f) {
+        let h = fn (T y) use (f) => f(y);
+        return h(x);
+    };
+    return g(v);
+}
+
+fn through<T>(fn(T) -> Option<T> p, T v) -> Option<T> {
+    let g = fn (T x) use (p) => p(x);
+    return g(v);
+}
+
+fn lam_of_lam<T>(T v) -> Option<T> {
+    let w = fn (T x) => Option::Some(x);
+    let g = fn (T x) use (w) => w(x);
+    return g(v);
+}
+
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub static fn lift<T>() -> fn(T) -> Option<T> {
+        let f = wrap;
+        return fn (T x) use (f) => f(x);
+    }
+
+    pub static fn bare<T>() -> fn(T) -> Option<T> {
+        let f = wrap;
+        return f;
+    }
+
+    pub fn inner<T>(T v) -> Result<T, string> {
+        let f: fn((T, int)) -> Result<T, string> = first;
+        let g = fn ((T, int) x) use (f) => f(x);
+        return g((v, self.k));
+    }
+}
+
+class G<T> {
+    pub k: int,
+}
+
+impl G<T> {
+    pub fn lift() -> fn(Option<T>) -> T {
+        let f = take;
+        return fn (Option<T> x) use (f) => f(x);
+    }
+
+    pub fn own<U>(U u) -> Option<U> {
+        let f = wrap;
+        let g = fn (U x) use (f) => f(x);
+        return g(u);
+    }
+}
+
+test("a returned lambda calling the captured value") {
+    let s: fn(string) -> Option<string> = lift();
+    assert!(s("s") == Option::Some("s"));
+    let p: fn(Pt) -> Option<Pt> = lift();
+    assert!(p(new Pt(3)) == Option::Some(new Pt(3)));
+    let i: fn(int) -> Option<int> = lift();
+    assert!(i(4) == Option::Some(4));
+    let o: fn(Option<int>) -> Option<Option<int>> = lift();
+    assert!(format("%v", o(Option::Some(5))) == "Some(Some(5))");
+    let u: fn(()) -> Option<()> = lift();
+    assert!(format("%v", u(())) == "Some(())");
+    let t: fn((int, int)) -> Option<(int, int)> = lift();
+    assert!(t((1, 2)) == Option::Some((1, 2)));
+    let a: fn(Option<string>) -> string = lift_ann();
+    assert!(a(Option::Some("a")) == "a");
+    let ai: fn(Option<(int, int)>) -> (int, int) = lift_ann();
+    assert!(ai(Option::Some((3, 4))) == (3, 4));
+}
+
+test("a lambda called in the body") {
+    assert!(inner("s") == Option::Some("s"));
+    assert!(inner(new Pt(2)) == Option::Some(new Pt(2)));
+    assert!(inner(7) == Option::Some(7));
+    assert!(format("%v", inner(Option::Some(1))) == "Some(Some(1))");
+    assert!(format("%v", inner(())) == "Some(())");
+    assert!(inner((5, 6)) == Option::Some((5, 6)));
+    assert!(inner_res("r") == Result::Ok("r"));
+    assert!(inner_res((1, 2)) == Result::Ok((1, 2)));
+    let n: Option<int> = Option::None;
+    assert!(format("%v", inner_res(n)) == "Ok(None)");
+}
+
+test("two lambda levels, a captured parameter, a captured lambda") {
+    assert!(deep("d") == Option::Some("d"));
+    assert!(deep(8) == Option::Some(8));
+    assert!(deep((1, 2)) == Option::Some((1, 2)));
+    assert!(through(wrap, "w") == Option::Some("w"));
+    assert!(through(wrap, 9) == Option::Some(9));
+    assert!(lam_of_lam("l") == Option::Some("l"));
+    assert!(lam_of_lam(new Pt(4)) == Option::Some(new Pt(4)));
+    assert!(format("%v", lam_of_lam(())) == "Some(())");
+}
+
+test("methods") {
+    let s: fn(string) -> Option<string> = M::lift();
+    assert!(s("s") == Option::Some("s"));
+    let t: fn((int, int)) -> Option<(int, int)> = M::lift();
+    assert!(t((1, 2)) == Option::Some((1, 2)));
+    let b: fn(string) -> Option<string> = M::bare();
+    assert!(b("b") == Option::Some("b"));
+    let bp: fn(Pt) -> Option<Pt> = M::bare();
+    assert!(bp(new Pt(5)) == Option::Some(new Pt(5)));
+    let m = new M(3);
+    assert!(m.inner("i") == Result::Ok("i"));
+    assert!(m.inner(new Pt(1)) == Result::Ok(new Pt(1)));
+    let g: G<Pt> = new G(1);
+    let l = g.lift();
+    assert!(l(Option::Some(new Pt(6))).a == 6);
+    let gi: G<int> = new G(1);
+    let li = gi.lift();
+    assert!(li(Option::Some(2)) == 2);
+    assert!(gi.own("o") == Option::Some("o"));
+    assert!(format("%v", gi.own(Option::Some(3))) == "Some(Some(3))");
+}
