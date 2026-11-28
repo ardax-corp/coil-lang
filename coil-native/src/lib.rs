@@ -6698,9 +6698,10 @@ impl<'a> Lower<'a> {
                 self.view_of(f, *dest);
             }
             // An element's copy test: the element read as `Index` reads it
-            // (its bounds checked there), then the unique test on it; only a
-            // shared class instance or array calls the helper, which copies
-            // it and stores the copy back.
+            // (its bounds checked there), then the shared flag of an object
+            // it names; only a shared one calls the helper, which copies a
+            // class instance or an array, stores the copy back and hands it
+            // back. Dest is the element after the test.
             MirInst::CowIndex { dest, array, index } => {
                 let a = self.get(f, *array);
                 let a = self.coerce(a, types::I64);
@@ -6718,29 +6719,25 @@ impl<'a> Lower<'a> {
                 let elem = self.b.block_params(join)[0];
                 let t = MemFlagsData::trusted();
                 let (call_b, done) = (self.b.create_block(), self.b.create_block());
+                self.b.append_block_param(done, types::I64);
                 let (object, plain) = self.maybe_object(elem);
                 self.b.switch_to_block(plain);
-                self.b.ins().jump(done, &[]);
+                self.b.ins().jump(done, &[elem.into()]);
                 self.b.switch_to_block(object);
                 let o = self.b.ins().band_imm_u(elem, !1i64);
-                let k = self.b.ins().uload8(types::I64, t, o, machine::HEADER_KIND_OFFSET);
-                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
-                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
-                let either = self.b.ins().bor(inst, arr);
-                let flag_b = self.b.create_block();
-                self.b.ins().brif(either, flag_b, &[], done, &[]);
-                self.b.switch_to_block(flag_b);
                 let bits = self.b.ins().uload8(types::I64, t, o, machine::HEADER_FLAGS_OFFSET);
                 let shared = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_SHARED));
-                self.b.ins().brif(shared, call_b, &[], done, &[]);
+                self.b.ins().brif(shared, call_b, &[], done, &[elem.into()]);
                 self.b.set_cold_block(call_b);
                 self.b.switch_to_block(call_b);
                 let i = self.coerce(i, types::I64);
-                self.b.ins().call(self.cow_index, &[self.ctx, a, i]);
+                let call = self.b.ins().call(self.cow_index, &[self.ctx, a, i]);
+                let w = self.b.inst_results(call)[0];
                 self.bail_on_helper();
-                self.b.ins().jump(done, &[]);
+                self.b.ins().jump(done, &[w.into()]);
                 self.b.switch_to_block(done);
-                self.set_word(f, *dest, a);
+                let elem = self.b.block_params(done)[0];
+                self.set_word(f, *dest, elem);
                 self.view_of(f, *dest);
             }
             MirInst::Cow { dest, src, unique, field } => {

@@ -390,16 +390,22 @@ Lowering takes each such statement whole: a field of any place is one
 objects is one `CowIndex { array, index }`. Each writes the slot back only
 when it copied, so the unshared case is a load and a header test, with no
 count changes, no homes and no store back. Neither takes nor drops an owner
-of what it reads; `CowIndex` ends the borrows of loads from its array, as a
-store does, so a word the frame still reads holds its own count across it.
+of what it reads, nor ends a borrow (a copy replaces only a shared object,
+whose other owner keeps it). `CowIndex`'s dest is the element after the
+check, which the count insertion treats as an `Index` load from the array.
 `for mut row in g` and `let w = mut g[i]` reach the same statements.
 
 Two MIR passes then drop checks (`mir/cow_motion.rs`): a block checks a
 slot once while nothing in between may share an object again or put another
-in a slot (a share, a pin, another unique check, a store of a word that may
-be an object, a call), and a loop with none of those checks the slots it
-does not change once, ahead of it behind a copy of its test (`g[i][j] =
-g[i][j] + j` checks `g[i]` once per row). Hit benches:
+in a slot (a share, a pin, a store of a word that may be an object, a call),
+and reads the element there as the check's dest instead of loading it
+again; and a loop with none of those checks the slots it does not change
+once, ahead of it behind a copy of its test (`g[i][j] = g[i][j] + j` checks
+`g[i]` once per row). Another place's check does not end what a block has
+checked: a copy marks only the children of what it copied shared, and an
+object a check made unique is a child of its holder alone, which the path
+made unique first, so `ps[i].tags.push(a); ps[i].tags.push(b)` checks `ps`,
+`ps[i]` and `ps[i].tags` once. Hit benches:
 `examples/perf/elem_push_hot.coil`, `elem_field_write_hot.coil`,
 `for_mut_push_hot.coil`, `elem_grid_hot.coil`.
 

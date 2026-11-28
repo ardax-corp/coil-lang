@@ -396,6 +396,20 @@ fn computed_with(func: &MirFunc, v: ValueId) -> bool {
     })
 }
 
+/// Every value some instruction, terminator or debug slot reads.
+fn used_values(func: &MirFunc) -> HashSet<ValueId> {
+    let mut used: HashSet<ValueId> = func.debug_slots.values().copied().collect();
+    for b in &func.blocks {
+        for i in &b.insts {
+            used.extend(i.operands());
+        }
+        if let Some(t) = &b.term {
+            used.extend(t.uses().chain(t.binds().iter().copied()));
+        }
+    }
+    used
+}
+
 /// Whether an instruction may write a word into an object, or run code
 /// that may: what ends a load's borrow of its holder ([`Pass::new`]).
 fn may_write_words(inst: &MirInst, pure: &HashSet<ValueId>) -> bool {
@@ -418,13 +432,14 @@ fn may_write_words(inst: &MirInst, pure: &HashSet<ValueId>) -> bool {
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. }
         | MirInst::GcBarrier { .. } => false,
-        // A number stored, a word appended, a field made unique: none drops
-        // an owner's last count (a copy is made only of a shared object,
-        // whose other owner keeps it).
+        // A number stored, a word appended, a field or an element made
+        // unique: none drops an owner's last count (a copy is made only of
+        // a shared object, whose other owner keeps it).
         MirInst::HeapFieldStore { scalar: true, .. }
         | MirInst::StoreIndex { scalar: true, .. }
         | MirInst::ArrayPush { .. }
-        | MirInst::Cow { field: Some(_), .. } => false,
+        | MirInst::Cow { field: Some(_), .. }
+        | MirInst::CowIndex { .. } => false,
         MirInst::HostInvoke { native_id, .. } if common::host_writes_only_numbers(u64::from(*native_id)) => false,
         MirInst::HostInvoke { native_id, .. } => {
             use common::EffectFlags as E;
@@ -942,6 +957,7 @@ impl Pass {
         // A load from a borrowed holder that the frame only reads through,
         // within its block and before anything may write a word into an
         // object, is borrowed too: the holder keeps it that long.
+        let used = used_values(func);
         let mut changed = !borrowed.is_empty();
         while changed {
             changed = false;
@@ -949,13 +965,14 @@ impl Pass {
                 for (ii, inst) in block.insts.iter().enumerate() {
                     let (dest, holder) = match inst {
                         MirInst::ProductLoad { dest, object, .. } => (*dest, *object),
-                        MirInst::Index { dest, array, .. } => (*dest, *array),
+                        MirInst::Index { dest, array, .. } | MirInst::CowIndex { dest, array, .. } => (*dest, *array),
                         _ => continue,
                     };
                     if base.get(&dest) != Some(&dest) || borrowed.contains(&dest) || !base.get(&holder).is_some_and(|r| borrowed.contains(r)) {
                         continue;
                     }
-                    if base.iter().any(|(k, r)| *r == dest && *k != dest) {
+                    // An alias nothing reads (a check's barrier) keeps no copy.
+                    if base.iter().any(|(k, r)| *r == dest && *k != dest && used.contains(k)) {
                         continue;
                     }
                     let elsewhere = func.blocks.iter().enumerate().any(|(bj, b)| {
@@ -1000,6 +1017,7 @@ impl Pass {
     /// it that long (as a borrowed holder's caller does, in [`Self::new`]).
     fn borrow_loads_of_live_holders(&mut self, func: &MirFunc, quiet: &HashSet<ValueId>) {
         let live_in = self.live_in(func);
+        let used = used_values(func);
         let mut changed = true;
         while changed {
             changed = false;
@@ -1021,14 +1039,14 @@ impl Pass {
                 for (ii, inst) in block.insts.iter().enumerate() {
                     let (dest, holder) = match inst {
                         MirInst::ProductLoad { dest, object, .. } => (*dest, *object),
-                        MirInst::Index { dest, array, .. } => (*dest, *array),
+                        MirInst::Index { dest, array, .. } | MirInst::CowIndex { dest, array, .. } => (*dest, *array),
                         _ => continue,
                     };
                     if self.base.get(&dest) != Some(&dest) || self.borrowed.contains(&dest) {
                         continue;
                     }
                     let Some(h) = self.root(holder) else { continue };
-                    if self.base.iter().any(|(k, r)| *r == dest && *k != dest) {
+                    if self.base.iter().any(|(k, r)| *r == dest && *k != dest && used.contains(k)) {
                         continue;
                     }
                     let elsewhere = func.blocks.iter().enumerate().any(|(bj, b)| {
