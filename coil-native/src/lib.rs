@@ -6720,9 +6720,15 @@ impl<'a> Lower<'a> {
                 let t = MemFlagsData::trusted();
                 let (call_b, done) = (self.b.create_block(), self.b.create_block());
                 self.b.append_block_param(done, types::I64);
-                let (object, plain) = self.maybe_object(elem);
-                self.b.switch_to_block(plain);
-                self.b.ins().jump(done, &[elem.into()]);
+                // The element's static type is a class or an array, so a word
+                // there is `0` or an object: an immediate's tag bits or `0`
+                // skip the test, and no heap range check is needed (a word
+                // out of the heap names an object the helper leaves alone).
+                let (aligned, object) = (self.b.create_block(), self.b.create_block());
+                let tagged = self.b.ins().band_imm_u(elem, 6);
+                self.b.ins().brif(tagged, done, &[elem.into()], aligned, &[]);
+                self.b.switch_to_block(aligned);
+                self.b.ins().brif(elem, object, &[], done, &[elem.into()]);
                 self.b.switch_to_block(object);
                 let o = self.b.ins().band_imm_u(elem, !1i64);
                 let bits = self.b.ins().uload8(types::I64, t, o, machine::HEADER_FLAGS_OFFSET);

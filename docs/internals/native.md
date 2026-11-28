@@ -129,7 +129,9 @@ AOT code built for another protocol is refused.
 field or not, and `CowIndex`) tests the word inline first: the element is read
 as `Index` reads it, and only an object whose header has the shared flag calls
 the helper, on a cold path. `CowIndex` leaves the kind to the helper, which
-copies only a class instance or an array and hands back the element. More ops follow the same pattern:
+copies only a class instance or an array and hands back the element, and
+skips the heap range test: an element of a class or array type is `0` or an
+object. More ops follow the same pattern:
 
 | MIR | Helper | Note |
 |---|---|---|
