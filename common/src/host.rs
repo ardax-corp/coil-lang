@@ -260,7 +260,7 @@ host_natives! {
     /// First byte-offset `string` native (`string_byte_at`); the block runs
     /// through [`STRING_MATCH_AT_ID`] (archive minor 31).
     139 "string_byte_at" (2) TEXT_R, NO_CAP => STRING_BYTE_AT_ID;
-    140 "string_slice_bytes" (3) TEXT_R, NO_CAP;
+    140 "string_slice_bytes" (3) TEXT_R, NO_CAP => STRING_SLICE_BYTES_ID;
     141 "string_find_from" (3) TEXT_R, NO_CAP;
     142 "string_rfind" (2) TEXT_R, NO_CAP;
     /// Last byte-offset `string` native (`string_match_at`).
@@ -440,7 +440,7 @@ host_natives! {
     224 "map_remove" (2) HEAP_R, NO_CAP => MAP_REMOVE_ID, MAP_REMOVE_NATIVE;
     225 "map_compact" (1) HEAP_R, NO_CAP => MAP_COMPACT_ID, MAP_COMPACT_NATIVE;
     226 "map_clear" (1) HEAP_R, NO_CAP => MAP_CLEAR_ID, MAP_CLEAR_NATIVE;
-    /// The map object natives (archive 8.18): `map_put` takes a map object,
+    /// The map object natives (archive 8.19): `map_put` takes a map object,
     /// a class instance whose fields 0, 1 and 2 are its table, its keys and
     /// its values, and finds or adds a key and stores its value in one call,
     /// making each field it writes unique itself. `map_word_mode` is a

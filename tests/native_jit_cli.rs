@@ -1450,6 +1450,17 @@ fn a_panic_in_a_variadic_copy_names_its_line() {
     }
 }
 
+/// A body that takes a tuple as its words runs as a `$words` twin, which
+/// has no entry of its own: a panic in it names its line in the function.
+#[test]
+fn a_panic_in_a_words_twin_names_its_line() {
+    let src = format!("{HEADER}fn first((int, string, int) t) -> int {{\n    panic \"boom\";\n}}\nfn main() {{\n    let _ = println(format(\"%i\", first((1, \"a\", 2))));\n}}\n");
+    for native in [true, false] {
+        let err = program_stderr(&run("words_twin_panic", &src, native));
+        assert!(err.contains("words_twin_panic.coil:4:4"), "native={native}: {err}");
+    }
+}
+
 /// The capability check finds a gated call in the MIR by its location: one
 /// in a variadic copy is still found, and shown where it was written.
 #[test]

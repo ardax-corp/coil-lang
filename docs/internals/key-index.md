@@ -65,7 +65,7 @@ and each clone keeps only one side. Floats, tuples, enums and classes stay on mo
 
 ## Map tables
 
-`key_index::map_*` (HostInvoke 217–226, archive 8.16; 227–228, archive 8.18, see "Map objects") is a second layout of the
+`key_index::map_*` (HostInvoke 217–226, archive 8.16; 227–228, archive 8.19, see "Map objects") is a second layout of the
 same index, for collections that look keys up on every operation
 (`collections::index::KeyIndex`, and through it `HashMap` / `HashSet`). One
 plain `Vec<int>` per index holds everything the natives keep; the caller still
@@ -122,7 +122,7 @@ calls the natives.
 ## Map objects
 
 `key_index::map_put(m, h, k, v, mode, vmode, replace)` (HostInvoke 227,
-archive 8.18) inserts through the map object itself: `m` is an instance
+archive 8.19) inserts through the map object itself: `m` is an instance
 whose fields 0, 1 and 2 are the table, the keys `Vec` and the values `Vec`
 (`collections::map::HashMap` is one). It finds `k` (hash `h`, key mode
 `mode` from `eq_mode`). When `k` is there it returns its slot `s`, and

@@ -35,7 +35,7 @@ const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// takes this format only: older sections' `kinds` words have one bit per
 /// type parameter. The older formats remain for tests of what their
 /// sections hold.
-const FORMAT: u8 = common::MIR_SECTION_COW_INDEX_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_COW_ELEM_FORMAT;
 /// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
 /// signatures carry struct layouts from it on.
 const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
@@ -1462,7 +1462,7 @@ mod tests {
     #[test]
     fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT, common::MIR_SECTION_WIDE_LANES_FORMAT, common::MIR_SECTION_MAYBE_OBJ_FORMAT] {
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT, common::MIR_SECTION_WIDE_LANES_FORMAT, common::MIR_SECTION_MAYBE_OBJ_FORMAT, common::MIR_SECTION_COW_INDEX_FORMAT] {
             let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
             assert!(decode(&old).is_err(), "format {format}");
         }

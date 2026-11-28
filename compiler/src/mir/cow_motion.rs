@@ -6,17 +6,20 @@
 //! again or put another object in the slot. So:
 //!
 //! - [`dedup_cow_checks`] drops a check a block already made on the same
-//!   array and index (or object and field) when nothing in between may do
-//!   that (`ps[i].x = ..; ps[i].tags.push(r)` checks `ps[i]` once);
+//!   array and index (or object and field, or a word's own unique of a
+//!   word a unique made) when nothing in between may do that
+//!   (`ps[i].x = ..; ps[i].tags.push(r)` checks `ps` and `ps[i]` once);
 //! - [`hoist_cow_checks`] moves a loop's checks whose operands the loop does
 //!   not define ahead of it, behind a copy of its test, when nothing in the
 //!   loop may do that and every iteration makes them (`g[i][j] = ..` in a
 //!   `j` loop checks `g[i]` once per row).
 //!
 //! What may share an object again or replace one in a slot: a share or a
-//! pin, a unique check of another place (a copy marks the children it
-//! copied shared), a store of a word that may be an object, a count
-//! increment, and any call, native or coroutine step.
+//! pin, a store of a word that may be an object, a count increment, and
+//! any call, native or coroutine step. A check of another place is not
+//! one: a copy marks the children of what it copied shared, and an object
+//! a check made unique is a child of its holder only, which the write path
+//! made unique before it, so no copy reaches it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,12 +33,23 @@ use super::licm::{LoopInfo, ensure_preheader, every_iteration, guard_hoisted, gu
 enum Slot {
     Elem(ValueId, ValueId),
     Field(ValueId, u32),
+    /// A word's own unique (`Cow` with no field): its dest names an object
+    /// nothing else shares.
+    Word(ValueId),
 }
 
 fn check_slot(inst: &MirInst) -> Option<Slot> {
     match *inst {
         MirInst::CowIndex { array, index, .. } => Some(Slot::Elem(array, index)),
         MirInst::Cow { src, unique: true, field: Some(f), .. } => Some(Slot::Field(src, f)),
+        _ => None,
+    }
+}
+
+/// A word's unique: `Cow` with no field.
+fn word_unique(inst: &MirInst) -> Option<ValueId> {
+    match *inst {
+        MirInst::Cow { src, unique: true, field: None, .. } => Some(src),
         _ => None,
     }
 }
@@ -78,28 +92,35 @@ fn may_reshare(inst: &MirInst) -> bool {
 }
 
 /// Drop a check of a slot the same block already checked with nothing in
-/// between that [`may_reshare`]. Its dest and its barrier's are the word
-/// it checked in, as the kept check's are. Returns how many went.
+/// between that [`may_reshare`], and read an element a check made unique
+/// (`index` of its array and index after it) as the check's dest. A dropped
+/// check's dest and its barrier's read as the kept check's: the element,
+/// or the object a field check checked in, or the word a unique made.
+/// Returns how many went.
 pub fn dedup_cow_checks(func: &mut MirFunc) -> usize {
     let mut rename: HashMap<ValueId, ValueId> = HashMap::new();
     let mut dropped = 0;
     for block in &mut func.blocks {
-        let mut seen: HashSet<Slot> = HashSet::new();
+        // Each slot checked, and what its check's dest reads as.
+        let mut seen: HashMap<Slot, ValueId> = HashMap::new();
         let mut keep = vec![true; block.insts.len()];
         let mut i = 0;
         while i < block.insts.len() {
             let inst = &block.insts[i];
-            match check_slot(inst) {
-                Some(slot) => {
-                    let slot = match slot {
-                        Slot::Elem(a, x) => Slot::Elem(*rename.get(&a).unwrap_or(&a), *rename.get(&x).unwrap_or(&x)),
-                        Slot::Field(o, f) => Slot::Field(*rename.get(&o).unwrap_or(&o), f),
-                    };
-                    let word = match slot {
-                        Slot::Elem(a, _) => a,
-                        Slot::Field(o, _) => o,
-                    };
-                    if seen.contains(&slot) {
+            let r = |v: ValueId| *rename.get(&v).unwrap_or(&v);
+            // What the check makes unique, and what `seen` holds once it ran.
+            let found = match (check_slot(inst), word_unique(inst)) {
+                // The element is read as the check's own dest, which the
+                // count insertion borrows from the array as an `Index` load.
+                (Some(Slot::Elem(a, x)), _) => Some((Slot::Elem(r(a), r(x)), Slot::Elem(r(a), r(x)), inst.dest())),
+                (Some(Slot::Field(o, f)), _) => Some((Slot::Field(r(o), f), Slot::Field(r(o), f), r(o))),
+                // A unique of a word a unique made: the same object.
+                (_, Some(w)) => Some((Slot::Word(r(w)), Slot::Word(inst.dest()), inst.dest())),
+                _ => None,
+            };
+            match (found, inst) {
+                (Some((slot, ran, out)), _) => {
+                    if let Some(&word) = seen.get(&slot) {
                         keep[i] = false;
                         rename.insert(inst.dest(), word);
                         if let Some(MirInst::GcBarrier { dest, object, .. }) = block.insts.get(i + 1)
@@ -111,13 +132,21 @@ pub fn dedup_cow_checks(func: &mut MirFunc) -> usize {
                         }
                         dropped += 1;
                     } else {
-                        // A copy marks what it copied's children shared.
-                        seen.clear();
-                        seen.insert(slot);
+                        // A copy marks the children of what it copied
+                        // shared, and what an earlier check made unique is
+                        // no child of anything but its holder, which a
+                        // write path made unique first: no copy reaches it.
+                        seen.insert(ran, out);
                     }
                 }
-                None if may_reshare(inst) || matches!(inst, MirInst::Cow { unique: true, .. }) => seen.clear(),
-                None => {}
+                // The element a check left in the slot.
+                (None, MirInst::Index { dest, array, index, .. }) if seen.contains_key(&Slot::Elem(r(*array), r(*index))) => {
+                    keep[i] = false;
+                    rename.insert(*dest, seen[&Slot::Elem(r(*array), r(*index))]);
+                    dropped += 1;
+                }
+                (None, _) if may_reshare(inst) || matches!(inst, MirInst::Cow { .. }) => seen.clear(),
+                (None, _) => {}
             }
             i += 1;
         }
@@ -206,8 +235,9 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
             return 0;
         }
     }
-    // Each check and its barrier, in block order; what read their dests
-    // reads the word they checked in.
+    // Each check and its barrier, in block order; what read a field
+    // check's dests reads the object it checked in. An element check's
+    // dest is the element, which the moved code defines.
     let mut rename: HashMap<ValueId, ValueId> = HashMap::new();
     let mut moved: Vec<MirInst> = Vec::new();
     {
@@ -221,17 +251,21 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 continue;
             };
             let word = match slot {
-                Slot::Elem(a, _) => a,
-                Slot::Field(o, _) => o,
+                Slot::Field(o, _) => Some(o),
+                Slot::Elem(..) | Slot::Word(_) => None,
             };
-            rename.insert(inst.dest(), word);
             let dest = inst.dest();
+            if let Some(word) = word {
+                rename.insert(dest, word);
+            }
             moved.push(inst);
             if let Some(MirInst::GcBarrier { object, .. }) = insts.peek()
                 && *object == dest
             {
                 let barrier = insts.next().expect("peeked");
-                rename.insert(barrier.dest(), word);
+                if let Some(word) = word {
+                    rename.insert(barrier.dest(), word);
+                }
                 moved.push(barrier);
             }
         }
@@ -331,13 +365,45 @@ bb3:
         let mut f = looped(
             "    v11 = cow.unique_index v0, v4\n    v12 = gcbarrier.safepoint v11\n    v13 = index.u v0, v4\n    v14 = storeindex.num v13, v4, v4\n    v15 = cow.unique_index v0, v4\n    v16 = gcbarrier.safepoint v15",
         );
-        assert_eq!(dedup_cow_checks(&mut f), 1);
+        // The second check, and the element's load: it reads as the check.
+        assert_eq!(dedup_cow_checks(&mut f), 2);
         f.verify().unwrap();
         assert_eq!(checks_in(&f, BlockId(2)), 1);
-        // A share in between: both stay.
+        let loads = |f: &MirFunc| f.block(BlockId(2)).insts.iter().filter(|i| matches!(i, MirInst::Index { .. })).count();
+        assert_eq!(loads(&f), 0, "{f}");
+        // A share in between: the second check stays, and so does a load
+        // after it.
         let mut f = looped(
             "    v11 = cow.unique_index v0, v4\n    v12 = gcbarrier.safepoint v11\n    v13 = index.u v0, v4\n    v14 = cow.share v13\n    v15 = cow.unique_index v0, v4\n    v16 = gcbarrier.safepoint v15",
         );
+        assert_eq!(dedup_cow_checks(&mut f), 1);
+        assert_eq!(checks_in(&f, BlockId(2)), 2);
+        // A store of an object word in between: the load reads the slot.
+        let mut f = looped(
+            "    v11 = cow.unique_index v0, v4\n    v12 = gcbarrier.safepoint v11\n    v14 = storeindex v0, v4, v0\n    v13 = index.u v0, v4",
+        );
+        assert_eq!(dedup_cow_checks(&mut f), 0);
+        assert_eq!(loads(&f), 1);
+    }
+
+    /// `ps[i].tags.push(a); ps[i].tags.push(b)`: a check of another place,
+    /// or the root's own unique again, in between keeps the first check.
+    #[test]
+    fn a_check_outlives_another_place_s_check() {
+        let mut f = looped(
+            "    v11 = cow.unique_index v0, v4\n    v12 = gcbarrier.safepoint v11\n    v15 = cow.unique_index v0, v10\n    v16 = gcbarrier.safepoint v15\n    v17 = cow.unique_index v0, v4\n    v18 = gcbarrier.safepoint v17",
+        );
+        assert_eq!(dedup_cow_checks(&mut f), 1);
+        f.verify().unwrap();
+        assert_eq!(checks_in(&f, BlockId(2)), 2);
+        let mut f = looped(
+            "    v11 = cow.unique v0\n    v12 = gcbarrier.safepoint v11\n    v15 = cow.unique_index v11, v4\n    v16 = gcbarrier.safepoint v15\n    v17 = cow.unique v11\n    v18 = gcbarrier.safepoint v17\n    v19 = cow.unique_index v17, v4\n    v20 = gcbarrier.safepoint v19",
+        );
+        assert_eq!(dedup_cow_checks(&mut f), 2, "{f}");
+        f.verify().unwrap();
+        assert_eq!(checks_in(&f, BlockId(2)), 1, "{f}");
+        // The root's unique of a word no unique made stays.
+        let mut f = looped("    v11 = cow.unique v0\n    v12 = gcbarrier.safepoint v11\n    v17 = cow.unique v0\n    v18 = gcbarrier.safepoint v17");
         assert_eq!(dedup_cow_checks(&mut f), 0);
     }
 }

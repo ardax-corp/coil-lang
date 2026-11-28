@@ -1,0 +1,116 @@
+// Short slices that native code makes itself, without the host call: every
+// range of inline, owned and shared sources, ends on and off character
+// boundaries, out-of-range ends the host clamps, and the longest result
+// held inline beside the first one that is not. Each slice is checked
+// against its source's bytes.
+use tests::assert;
+use string::{format, slice_bytes};
+
+fn sliced(string s, int start, int end) -> string {
+    return match slice_bytes(s, start, end) {
+        Result::Ok(x) => x,
+        Result::Err(_) => "<err>",
+    };
+}
+
+// Whether `r` holds the bytes `s[a..e]`, compared one at a time.
+fn same_bytes(string r, string s, int a, int e) -> bool {
+    if r.len() != e - a {
+        return false;
+    }
+    let k = 0;
+    while k < r.len() {
+        if r[k] != s[a + k] {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+// Every slice of `s` up to `width` bytes long matches its bytes.
+fn every_slice(string s, int width) -> int {
+    let n = s.len();
+    let checked = 0;
+    let a = 0;
+    while a <= n {
+        let e = a;
+        while e <= n && e - a <= width {
+            if !same_bytes(sliced(s, a, e), s, a, e) {
+                return -1;
+            }
+            checked = checked + 1;
+            e = e + 1;
+        }
+        a = a + 1;
+    }
+    return checked;
+}
+
+// The words of `s` between spaces, as `split` makes them.
+fn words(string s) -> int {
+    let n = s.len();
+    let total = 0;
+    let piece = 0;
+    let i = 0;
+    while i <= n {
+        if i == n || s[i] == 32 {
+            total = total + sliced(s, piece, i).len();
+            piece = i + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+test("every short slice of an inline string") {
+    assert!(every_slice("abcdefghij", 10) == 66);
+}
+
+test("short slices of a long owned string and of a shared one") {
+    let owned = "the quick brown fox jumps over the lazy dog, twice over";
+    assert!(every_slice(owned, 31) > 0);
+    let shared = owned + " and a shared tail";
+    assert!(every_slice(shared, 31) > 0);
+}
+
+test("ends inside a character are reported, at boundaries they slice") {
+    let s = "aé€x";
+    assert!(sliced(s, 0, 1) == "a");
+    assert!(sliced(s, 1, 3) == "é");
+    assert!(sliced(s, 3, 6) == "€");
+    assert!(sliced(s, 1, 2) == "<err>");
+    assert!(sliced(s, 2, 3) == "<err>");
+    assert!(sliced(s, 4, 7) == "<err>");
+    assert!(sliced(s, 6, 7) == "x");
+}
+
+test("out-of-range ends are clamped as before") {
+    assert!(sliced("hello", 0 - 2, 99) == "hello");
+    assert!(sliced("hello", 4, 2) == "");
+    assert!(sliced("hello", 5, 5) == "");
+    assert!(sliced("", 0, 0) == "");
+}
+
+test("the longest inline slice and the first longer one") {
+    let s = "0123456789012345678901234567890123456789";
+    let thirty = sliced(s, 0, 30);
+    let more = sliced(s, 0, 31);
+    assert!(thirty.len() == 30);
+    assert!(more.len() == 31);
+    assert!(same_bytes(thirty, s, 0, 30));
+    assert!(same_bytes(more, s, 0, 31));
+}
+
+test("many slices made and dropped reuse their slots") {
+    let text = "";
+    let i = 0;
+    while i < 400 {
+        text = text + format("w%i ", i % 37);
+        i = i + 1;
+    }
+    let a = words(text);
+    let b = words(text);
+    assert!(a == b);
+    assert!(a > 400);
+}

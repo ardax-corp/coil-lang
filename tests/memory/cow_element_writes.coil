@@ -212,3 +212,59 @@ test("an element passed to a parameter the callee writes") {
     add_to(g[0], 1);
     assert!(h[0].len() == 1 && g[0].len() == 2);
 }
+
+test("two writes through one element field") {
+    let ps = points(3);
+    ps[1].tags.push(5);
+    ps[1].tags.push(6);
+    assert!(ps[1].tags.len() == 3 && ps[1].tags[2] == 6);
+    let qs = ps;
+    ps[1].tags.push(7);
+    ps[1].tags.push(8);
+    assert!(qs[1].tags.len() == 3 && ps[1].tags.len() == 5);
+    let p = ps[2];
+    ps[2].tags.push(1);
+    ps[2].tags.push(2);
+    assert!(p.tags.len() == 1 && ps[2].tags.len() == 3);
+    // A share in between: the second write copies again.
+    ps[0].tags.push(1);
+    let t = ps[0].tags;
+    ps[0].tags.push(2);
+    assert!(t.len() == 2 && ps[0].tags.len() == 3);
+    // Another element's write in between.
+    let rs = ps;
+    ps[0].tags.push(3);
+    ps[1].x = 9;
+    ps[0].tags.push(4);
+    assert!(rs[0].tags.len() == 3 && rs[1].x == 1);
+    assert!(ps[0].tags.len() == 5 && ps[1].x == 9 && ps[0].tags[4] == 4);
+    let i = 0;
+    while i < ps.len() {
+        ps[i].tags.push(i);
+        ps[i].tags.push(i + 1);
+        i += 1;
+    }
+    assert!(rs[2].tags.len() == 3 && ps[2].tags.len() == 5 && ps[2].tags[4] == 3);
+}
+
+test("writes through an element the path replaces in between") {
+    let g = grid(3, 1);
+    let other: Vec<int> = Vec::from([5]);
+    g[0].push(1);
+    g[0] = other;
+    g[0].push(2);
+    assert!(other.len() == 1 && g[0].len() == 2 && g[0][1] == 2);
+    let i = 0;
+    while i < 3 {
+        g[i].push(7);
+        let kept = g[i];
+        g[i].push(8);
+        assert!(kept.len() + 1 == g[i].len() && kept[kept.len() - 1] == 7);
+        i += 1;
+    }
+    let ps = points(2);
+    ps[0].tags.push(1);
+    ps[0] = new P(9, Vec::new());
+    ps[0].tags.push(2);
+    assert!(ps[0].x == 9 && ps[0].tags.len() == 1 && ps[0].tags[0] == 2);
+}

@@ -507,7 +507,7 @@ pub fn host_map_word_mode(_heap: &mut Heap, _args: &[Value]) -> Value {
     Value::from(common::WORD_MODE_OTHER)
 }
 
-/// HostInvoke wiring for `key_index::map_*` (archive 8.16 and 8.18), after
+/// HostInvoke wiring for `key_index::map_*` (archive 8.16 and 8.19), after
 /// `thread_par_room`.
 pub const MAP_TABLE_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     (common::MAP_TABLE_NATIVE, 1, host_map_table),

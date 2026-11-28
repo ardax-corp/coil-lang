@@ -1,0 +1,114 @@
+// An `Option` of a tuple crosses a direct call as its words (the tuple's
+// words and a `Some` flag) as a parameter as well as a result, when the
+// caller knows which it is (a `Some` of a fresh tuple, a `None`, another
+// call's result) and the callee only matches on it or passes it on.
+use tests::assert;
+use gc::collect;
+
+static let drops: int = 0;
+
+class Handle {
+    pub fd: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+#[inline(never)]
+fn find(int a) -> Option<(int, int, int)> {
+    if a % 3 == 0 {
+        return None;
+    }
+    return Some((a, a + 1, a + 2));
+}
+
+#[inline(never)]
+fn total(Option<(int, int, int)> o) -> int {
+    return match o {
+        Some(t) => t[0] + t[1] * 10 + t[2] * 100,
+        None => -1,
+    };
+}
+
+#[inline(never)]
+fn relay(Option<(int, int, int)> o, int k) -> int {
+    if k == 0 {
+        return total(o);
+    }
+    return relay(o, k - 1) + 1;
+}
+
+#[inline(never)]
+fn pass(Option<(int, int, int)> o) -> Option<(int, int, int)> {
+    return o;
+}
+
+#[inline(never)]
+fn fds(Option<(Handle, int, Handle)> o) -> int {
+    return match o {
+        Some(t) => t[0].fd * 10 + t[1] + t[2].fd,
+        None => 0,
+    };
+}
+
+#[inline(never)]
+fn kept(Option<(int, int, int)> o) -> Vec<Option<(int, int, int)>> {
+    let v: Vec<Option<(int, int, int)>> = [];
+    v.push(o);
+    return v;
+}
+
+test("a Some, a None and a call's Option go to a call as words") {
+    let s = 0;
+    let i = 0;
+    while i < 9 {
+        s += total(find(i));
+        s += total(Some((i, 1, 2)));
+        s += total(None);
+        i += 1;
+    }
+    let expect = 0;
+    let j = 0;
+    while j < 9 {
+        expect += if j % 3 == 0 {
+            -1
+        } else {
+            j + (j + 1) * 10 + (j + 2) * 100
+        };
+        expect += j + 10 + 200 - 1;
+        j += 1;
+    }
+    assert!(s == expect);
+}
+
+test("an Option parameter passed on and returned") {
+    assert!(relay(Some((1, 2, 3)), 3) == 321 + 3);
+    assert!(relay(None, 2) == 1);
+    assert!(total(pass(Some((4, 5, 6)))) == 654);
+    assert!(total(pass(None)) == -1);
+    assert!(total(pass(find(4))) == 4 + 50 + 600);
+}
+
+test("an Option of heap words is counted") {
+    drops = 0;
+    let s = 0;
+    let i = 0;
+    while i < 5 {
+        s += fds(Some((new Handle(i), i, new Handle(1))));
+        s += fds(None);
+        i += 1;
+    }
+    collect();
+    assert!(drops == 10);
+    assert!(s == 0 + 10 + 20 + 30 + 40 + 0 + 1 + 2 + 3 + 4 + 5);
+}
+
+test("a callee that keeps the Option gets the object") {
+    let v = kept(Some((7, 8, 9)));
+    assert!(total(v[0]) == 987);
+    let w = kept(None);
+    assert!(total(w[0]) == -1);
+}

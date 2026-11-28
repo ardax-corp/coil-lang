@@ -176,7 +176,7 @@ pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_f
 pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 
 pub use crate::memory::{FNV_BASIS, FNV_PRIME};
-pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, StringSlots, array_slots, inline_object, product_slots, layout_fingerprint, string_slots};
+pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, StringAlloc, StringFree, StringSlots, array_slots, inline_object, product_slots, layout_fingerprint, string_alloc, string_free, string_slots};
 
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
@@ -1863,7 +1863,8 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
 /// `CowIndex`: element `index` of the array `addr` made unique in place,
 /// `a[i] = unique(a[i])`, writing the element back only when it copied
 /// (the copy gains the array as an owner, the shared original loses it).
-/// Out of bounds it traps, as [`coil_native_index`] does. Returns `addr`.
+/// Out of bounds it traps, as [`coil_native_index`] does. Returns the
+/// element after it: the copy, or the element as it was.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
@@ -1887,8 +1888,9 @@ pub unsafe extern "C" fn coil_native_cow_index(ctx: *mut NativeCtx, addr: u64, i
             heap.rc_dec_word(old, kind);
         }
         unsafe { note_alloc(ctx, heap) };
+        return copy.bits();
     }
-    addr
+    old.bits()
 }
 
 // ---------------------------------------------------------------------------

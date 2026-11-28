@@ -127,8 +127,11 @@ AOT code built for another protocol is refused.
 `Cow`, `CowIndex`, `Alloc` and `ArrayPush` call `coil_native_cow`, `_cow_field`,
 `_cow_index`, `_alloc` and `_array_push`. A unique check (`Cow` unique, with a
 field or not, and `CowIndex`) tests the word inline first: the element is read
-as `Index` reads it, and only a class instance or an array whose header has
-the shared flag calls the helper, on a cold path. More ops follow the same pattern:
+as `Index` reads it, and only an object whose header has the shared flag calls
+the helper, on a cold path. `CowIndex` leaves the kind to the helper, which
+copies only a class instance or an array and hands back the element, and
+skips the heap range test: an element of a class or array type is `0` or an
+object. More ops follow the same pattern:
 
 | MIR | Helper | Note |
 |---|---|---|
@@ -519,6 +522,16 @@ image with the payload words in place, and adds the object to `alloc_bytes` and
 `live_count`. A full chunk, a closed gate or a `drop` type falls back to the helper,
 which refills the chunk and sets `gc_due` when the cycle collector is due, so it still
 runs at a safepoint on time. A free pushes the slot on its class's free list inline.
+The last owner of a young string (inline, or a view of a buffer another string still
+holds) is freed in place the same way, by `coil_rc_last`, a function each module defines
+once and every decrement site calls ([memory.md](memory.md), "The allocator").
+
+`string_slice_bytes` of a string whose bytes are in view (`str_views`) makes a result of
+up to 30 bytes in place (`slice_in_place`, `machine::native::string_alloc`): when
+`0 <= a <= e <= len` and both ends are on character boundaries, it bumps or pops a
+string-class slot, writes a young empty inline string's image, the length byte and the
+bytes, and counts it. Anything else (an end the host clamps or reports, a longer result,
+a closed gate, a spent chunk) takes the host call.
 
 The images come from `machine::memory::inline_object`, probed from real objects:
 `ObjEnum`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so
