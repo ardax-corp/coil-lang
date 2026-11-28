@@ -1662,6 +1662,27 @@ impl Compiler {
             && !self.fn_flat_split(fqn, lookup)
     }
 
+    /// Whether a ground call of trait instance method `fqn` at `lookup`
+    /// takes its clone and reads the result in the clone's own layout, as
+    /// at a flat instance: the method's signature reaches a flat instance
+    /// there, or it is a [`Self::boundary_clone`] whose clone compiles from
+    /// its body (a thunk around the shared entry returns the trait's
+    /// layout). Not an instance whose head is an open enum (`impl Wrap for
+    /// Option<T>`): its call site boxes the receiver as the shared entry
+    /// takes it, and the clone reads the ground layout.
+    pub(super) fn own_layout_clone(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        self.fn_flat_split(fqn, lookup)
+            || (self.boundary_clone(fqn, lookup) && !self.head_over_enum(fqn) && self.inst_clone_has_body(fqn, lookup))
+    }
+
+    /// Whether clone source `fqn`'s instance head names a generic enum
+    /// (`impl Wrap for Option<T>`).
+    fn head_over_enum(&self, fqn: &str) -> bool {
+        self.inst_clone_srcs.get(fqn).is_some_and(|src| {
+            src.head.iter().any(|t| matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if self.checker.enum_variants(n).is_some())))
+        })
+    }
+
     /// [`Self::instance_clone`]; `needed` when the caller has no use for
     /// the shared entry (a dictionary slot it cannot fill with it), so the
     /// clone is made past `--clone-budget` too; `own_layout` when it reads
