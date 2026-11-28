@@ -16,7 +16,7 @@ Plan for `HashMap`, `HashSet`, `List`, and `TreeMap` in the standard library.
 
 **Do not add** map/set/list MIR ops or a heap `Object::HashMap`. That would be benchmark-shaped surface area.
 
-The one native piece is the **key index** ([key-index.md](key-index.md), `key_index::*`, HostInvoke 191–199): probing over plain `Vec<int>`s, no new object kind, usable by any collection keyed by a `Hash + Eq` type. Keys and payloads stay in userland `Vec`s.
+The one native piece is the **key index** ([key-index.md](key-index.md), `key_index::*`, HostInvoke 191–199, and its map table layout, 217–226): probing over plain `Vec<int>`s, no new object kind, usable by any collection keyed by a `Hash + Eq` type. Keys and payloads stay in userland `Vec`s. Native code runs the map table's find, insert, liveness and length ops in place (archive 8.16), so a `HashMap` operation makes no host call; they are host natives in MIR, not MIR ops, so every engine runs them.
 
 ## Userland (this change)
 

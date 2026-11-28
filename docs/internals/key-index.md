@@ -1,6 +1,6 @@
 # Key index natives
 
-`key_index::*` (HostInvoke 191–199, archive 6.19) is an insertion-ordered hash index that a collection keyed by any `Hash + Eq` type builds on. `collections::index::KeyIndex<K>` in coil-stdlib wraps it, and `HashMap` / `HashSet` sit on `KeyIndex`. coil-json drives the natives directly for its member index.
+`key_index::*` (HostInvoke 191–199, archive 6.19) is an insertion-ordered hash index (the map table layout below, 217–226, is the one the stdlib uses) that a collection keyed by any `Hash + Eq` type builds on. `collections::index::KeyIndex<K>` in coil-stdlib wraps it, and `HashMap` / `HashSet` sit on `KeyIndex`. coil-json drives the natives directly for its member index.
 
 Source: `machine/src/key_index.rs`, signatures and docs in `compiler/src/builtin_docs/key_index.coil`.
 
@@ -62,6 +62,62 @@ and each clone keeps only one side. Floats, tuples, enums and classes stay on mo
 
 - `collections::index::KeyIndex<K>` (stdlib), and through it `HashMap` / `HashSet`.
 - coil-json `Store`: one table for the whole store, keyed by a member key's hash mixed with its object id, for objects with at least 32 members. The candidate check compares the slot's object and key.
+
+## Map tables
+
+`key_index::map_*` (HostInvoke 217–226, archive 8.16) is a second layout of the
+same index, for collections that look keys up on every operation
+(`collections::index::KeyIndex`, and through it `HashMap` / `HashSet`). One
+plain `Vec<int>` per index holds everything the natives keep; the caller still
+keeps keys and payloads in its own `Vec`s by slot.
+
+Source: `machine/src/map_table.rs`; native code's in-place ops are in
+`coil-native` (`lower_map_op`, see [native.md](native.md), "Map table ops").
+
+| Words | Hold |
+|-------|------|
+| `ix[0]` | `mask`: `cap - 1`, `cap` a power of two, at least 8 |
+| `ix[1]` | cells in use: live entries and tombstones |
+| `ix[2]` | live entries |
+| `ix[3]` | `0`, reserved |
+| `ix[4 .. 4 + 2cap]` | cells `{hash, ref}`: `ref` is `slot + 1`, `0` empty, `-1` a tombstone |
+| `ix[4 + 2cap ..]` | one word per slot, in insertion order: its cell, or `-1` once removed |
+
+The hash sits beside the slot in the cell, so a probe compares hashes on the
+cell's own cache line and reads a key only when the hash matches. The slot
+words give liveness and remove-by-slot without a probe. Probing is linear
+from the same `home(h)` as above. An insert that would take the cells past
+half full, counting tombstones, rebuilds them at the size that keeps the
+live entries under half full (never smaller), keeping every slot's number.
+An insert reuses the first tombstone its probe passed. Only `map_compact`,
+which the owner calls after it compacted its own `Vec`s the same way,
+renumbers the slots.
+
+| Native | Id | Does |
+|--------|----|------|
+| `map_table(n)` | 217 | an empty table with room for `n` entries |
+| `map_find(ix, keys, h, k, mode)` | 218 | the slot whose key equals `k` by `mode` (`eq_mode`), or `-1`; mode `0` finds nothing |
+| `map_upsert(ix, keys, h, k, mode)` | 219 | `map_find`, or registers slot `s` (the slot count) for an absent `k` and returns `-1 - s`; the caller pushes `k` and its value |
+| `map_probe(ix, h, after)` | 220 | the next live slot whose hash is `h` after slot `after`, for keys whose `==` is coil code |
+| `map_add(ix, h)` | 221 | registers a new slot for a key the caller checked is absent |
+| `map_live(ix, s)` | 222 | whether slot `s` holds a key |
+| `map_len(ix)` | 223 | the live count |
+| `map_remove(ix, s)` | 224 | tombstones slot `s`; other slots keep their numbers |
+| `map_compact(ix)` | 225 | drops removed slots, numbers the rest from `0` in order, rebuilds the cells |
+| `map_clear(ix)` | 226 | no entries and no slots; the cells keep their count |
+
+All are direct natives that write only numbers, into the table only
+(`host_writes_only_numbers`, `writes_first_arg_only` in `hir/escape.rs`: the
+keys `Vec` `map_upsert` is handed is not made unique for it), and keep
+nothing they are passed (`NON_RETAINING_HOSTS`). The table is an ordinary
+`Vec<int>`: copy-on-write separates it before a native writes it, and the
+collector, counts and thread sends treat it like any other array. A
+malformed table (a hand-made `Vec<int>`) finds nothing and adds nothing.
+
+Native code runs `map_find`, `map_upsert` (when no growth is due and the
+table's storage has room for the slot's word), `map_live` and `map_len` in
+place, with no host call. The MIR interpreter, and so wasm and comptime,
+calls the natives.
 
 ## Measured (callgrind, 2026-11-02)
 
