@@ -9,6 +9,7 @@ pub use addr_hash::*;
 pub use heap::*;
 pub use slab::{Bump, FREE_LINK};
 pub use strbuf::StrData;
+pub(crate) use strbuf::shared_layout;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 

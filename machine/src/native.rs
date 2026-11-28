@@ -175,7 +175,7 @@ pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_f
 /// Byte offset of [`NativeCtx::calls`].
 pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 
-pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, StringSlots, array_slots, inline_object, product_slots, layout_fingerprint, string_slots};
+pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, StringFree, StringSlots, array_slots, inline_object, product_slots, layout_fingerprint, string_free, string_slots};
 
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;

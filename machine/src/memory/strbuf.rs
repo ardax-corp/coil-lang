@@ -332,6 +332,32 @@ impl fmt::Debug for StrData {
     }
 }
 
+/// Where a [`StrData::Shared`] keeps what native code's inline string free
+/// reads (`super::StringFree`): byte offsets in the `StrData` of its
+/// discriminant byte's value, its buffer pointer and its `accounted`
+/// count, and of the reference count in the buffer's header.
+pub(crate) struct SharedLayout {
+    pub tag: u8,
+    pub buf_at: usize,
+    pub accounted_at: usize,
+    pub refs_at: usize,
+}
+
+/// [`SharedLayout`], probed from a real shared string.
+pub(crate) fn shared_layout() -> SharedLayout {
+    let data = StrData::shared(SharedBuf::with_parts(MIN_SHARED_CAP, &[b"ab"]), 0, 2, MIN_SHARED_CAP).expect("small view");
+    let base = ptr::from_ref(&data) as usize;
+    // SAFETY: `StrData` is `repr(u8)`: the discriminant is its first byte.
+    let tag = unsafe { *ptr::from_ref(&data).cast::<u8>() };
+    let StrData::Shared { buf, accounted, .. } = &data else { unreachable!("a shared string") };
+    SharedLayout {
+        tag,
+        buf_at: ptr::from_ref(buf) as usize - base,
+        accounted_at: ptr::from_ref(accounted) as usize - base,
+        refs_at: mem::offset_of!(Header, refs),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
