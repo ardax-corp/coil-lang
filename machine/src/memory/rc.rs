@@ -247,6 +247,7 @@ impl Heap {
     /// Keep counts in this heap, or not (tests that count by hand).
     pub fn set_rc_counting(&mut self, on: bool) {
         self.rc_on = on;
+        self.sync_free_gate();
     }
 
     /// The objects `obj`'s words name, as the collector reads its words,
@@ -554,6 +555,8 @@ impl Heap {
         }
         if self.rc_dec_obj(o) && self.rc_frees {
             self.rc_pending.borrow_mut().push(o.addr());
+            // The next `RcDec` goes through the runtime, which releases it.
+            self.free_gate.set(0);
         }
     }
 
@@ -579,6 +582,7 @@ impl Heap {
                 n += self.rc_release(o);
             }
         }
+        self.sync_free_gate();
         n
     }
 
@@ -613,6 +617,7 @@ impl Heap {
     /// Free objects whose count reaches zero ([`Self::rc_drop`]).
     pub fn set_rc_frees(&mut self, on: bool) {
         self.rc_frees = on;
+        self.sync_free_gate();
     }
 
     /// `RcInc` (plan step 3): `v`'s object gains an owner, when counts are
@@ -757,11 +762,20 @@ impl Heap {
         }
         let Some(words) = a.as_ref().gc_words() else { return 0 };
         let (ptr, len) = (words.as_ptr(), words.len());
+        // Pointer words with no steal epoch open: a young inline string at
+        // its last owner frees without the general tests.
+        let strings = (!cfg!(feature = "rc-check") && kind == common::WORD_POINTER && self.alloc_lock.is_null()).then(string_free);
         let mut n = 0;
         for i in 0..len {
             // SAFETY: the array is live until this release frees it, and
             // freeing its elements does not touch its storage.
             let v = unsafe { *ptr.add(i) };
+            if let Some(sf) = &strings
+                && self.rc_free_young_string(v, sf)
+            {
+                n += 1;
+                continue;
+            }
             let Some(o) = self.rc_object_of_kind(v, kind) else { continue };
             if !self.rc_dec_obj(o) {
                 continue;
@@ -779,6 +793,43 @@ impl Heap {
             }
         }
         n
+    }
+
+    /// Take the last owner of pointer word `v` and free its object when it
+    /// is a young inline string at count one that no weak handle names, as
+    /// native code's inline free does ([`StringFree`]): one test of its
+    /// header word and one of its tag, then its slot goes on the string
+    /// class's nursery free list. Whether it did; anything else is left
+    /// as it was.
+    #[inline(always)]
+    fn rc_free_young_string(&mut self, v: Value, sf: &StringFree) -> bool {
+        let addr = v.heap_addr() & !1;
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+            return false;
+        }
+        let one = 1u64 << (8 * HEADER_COUNT_OFFSET);
+        let count_bits = u64::from(u32::MAX) << (8 * HEADER_COUNT_OFFSET);
+        let p = addr as *mut u64;
+        // SAFETY: a pointer word in the slab's range is a live object's
+        // slot start, its header word first.
+        let h = unsafe { p.read() };
+        if h & (sf.header_mask | count_bits) != sf.header_want | one {
+            return false;
+        }
+        // SAFETY: a string's slot: its `StrData` tag is at `tag_at`.
+        if unsafe { *((addr + u64::from(sf.tag_at)) as *const u8) } != sf.inline_tag {
+            return false;
+        }
+        self.counts.alloc_bytes -= sf.size as usize;
+        debug_assert!(self.counts.live_count > 0);
+        self.counts.live_count -= 1;
+        self.freed_early = true;
+        // SAFETY: its last owner went and an inline string holds nothing:
+        // the header is poisoned as `Gc::recycle` leaves it.
+        unsafe { p.write(h & sf.header_keep) };
+        // SAFETY: a young slot of the string class, poisoned.
+        unsafe { self.slab.push_young_free(sf.class as usize, NonNull::new_unchecked(p.cast())) };
+        true
     }
 
     /// Free `obj` on the spot when it is a plain string at count zero
