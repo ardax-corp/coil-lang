@@ -1084,10 +1084,17 @@ impl VecLoopKind {
 /// with more keeps the argument tuple.
 pub const EXTERN_CALL_MAX_WORDS: usize = common::FFI_CALL_MAX_WORDS;
 
+/// The most words past the second a lane element (`LaneIndex::dest_more`,
+/// `MirLaneShape`) and a flat wide field carry: four words of storage.
+pub const MAX_RET_MORE: usize = 2;
+
 /// The most result words past the second a direct `Call` / `Return`
 /// carries (`dest_more` / `more` / `MirFunc::ret_more_tys`): a direct call
-/// returns at most `2 + MAX_RET_MORE` words.
-pub const MAX_RET_MORE: usize = 2;
+/// returns at most `2 + MAX_CALL_RET_MORE` words, those past the
+/// registers in a return area the caller gives (native code's `tail`
+/// convention). As many as a tuple has items
+/// ([`common::PACKED_KIND_WORDS`]).
+pub const MAX_CALL_RET_MORE: usize = common::PACKED_KIND_WORDS - 2;
 
 /// The signature of an [`MirInst::ExternCall`]: the C symbol, the
 /// declared parameters' and the result's FFI type tags (each

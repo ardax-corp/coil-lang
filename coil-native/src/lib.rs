@@ -1422,7 +1422,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
     if let Some(t) = f.ret_more_tys.iter().find(|t| !numeric(**t)) {
         return Err(format!("return type {t:?}"));
     }
-    if f.ret_more_tys.len() > compiler::native_mir::MAX_RET_MORE || (!f.ret_more_tys.is_empty() && f.ret_hi_ty.is_none()) {
+    if f.ret_more_tys.len() > compiler::native_mir::MAX_CALL_RET_MORE || (!f.ret_more_tys.is_empty() && f.ret_hi_ty.is_none()) {
         return Err(format!("return of {} words past the second", f.ret_more_tys.len()));
     }
     let mut callees = Vec::new();

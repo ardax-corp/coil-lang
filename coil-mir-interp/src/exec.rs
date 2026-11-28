@@ -430,8 +430,8 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                     Terminator::Return { lo, hi, more } => {
                         let lo = lo.map_or(0, |v| *regs.add(reg(v)));
                         let hi = hi.map(|v| *regs.add(reg(v)));
-                        // Words 3.. of a wide return (at most `MAX_RET_MORE`).
-                        let mut words = [0u64; compiler::native_mir::MAX_RET_MORE];
+                        // Words 3.. of a wide return (at most `MAX_CALL_RET_MORE`).
+                        let mut words = [0u64; compiler::native_mir::MAX_CALL_RET_MORE];
                         for (w, v) in words.iter_mut().zip(more) {
                             *w = *regs.add(reg(*v));
                         }

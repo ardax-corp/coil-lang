@@ -2,7 +2,8 @@
 //! tuple, which is a niche word over the tuple object, a `Result` of a
 //! tuple whose `Err` is a heap word, also a niche word, or any nesting of
 //! those) crosses a direct call as its words when neither side needs the
-//! object, up to four words once flattened.
+//! object, up to sixteen words once flattened (past the registers, on the
+//! stack).
 //!
 //! A body gets a twin, `name$words`, that takes such a parameter as its
 //! words (one MIR parameter per word) and returns such a result as its
@@ -18,7 +19,7 @@
 //! `Ok` tuple's leaf words (`Lay::res`).
 //! So `((int, int), int)`, `(string, int, int)` and
 //! `Option<((int, int), string)>` are three, three and four words. The
-//! only bound is the word budget (four); a tuple whose nested words do not
+//! only bound is the word budget (`MAX_WORDS`); a tuple whose nested words do not
 //! fit keeps its inner tuples as heap words.
 //!
 //! What "can" means is one question per value of a body (a *node*: a
@@ -44,13 +45,15 @@ use std::rc::Rc;
 
 use super::cse::dce;
 use super::func::MirFunc;
-use super::inst::{BlockId, MirAllocKind, MirBinOp, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId, MAX_RET_MORE};
+use super::inst::{BlockId, MirAllocKind, MirBinOp, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId, MAX_CALL_RET_MORE};
 use super::native_capture::NativeBody;
 use super::ty::MirTy;
 use crate::bodies::Label;
 
-/// The most words a value crosses a call in.
-const MAX_WORDS: usize = 2 + MAX_RET_MORE;
+/// The most words a value crosses a call in: past the registers, the
+/// arguments spill to the stack and the results come back in a return
+/// area the caller gives.
+const MAX_WORDS: usize = 2 + MAX_CALL_RET_MORE;
 
 fn new_value(f: &mut MirFunc, ty: MirTy) -> ValueId {
     let v = ValueId(f.types.len() as u32);

@@ -476,7 +476,7 @@ impl MirFunc {
         if !self.ret_more_tys.is_empty() && self.ret_hi_ty.is_none() {
             return Err("result words past the second without a second".into());
         }
-        if self.ret_more_tys.len() > crate::mir::MAX_RET_MORE {
+        if self.ret_more_tys.len() > crate::mir::MAX_CALL_RET_MORE {
             return Err(format!("function returns {} words", 2 + self.ret_more_tys.len()));
         }
         let mut defined = vec![false; self.types.len()];
@@ -885,7 +885,7 @@ impl MirFunc {
                 if !dest_more.is_empty() && dest_hi.is_none() {
                     return Err(format!("{dest} call has more result words but no second"));
                 }
-                if dest_more.len() > crate::mir::MAX_RET_MORE {
+                if dest_more.len() > crate::mir::MAX_CALL_RET_MORE {
                     return Err(format!("{dest} call returns {} words", 2 + dest_more.len()));
                 }
                 if let Some(w) = dest_more.iter().find(|w| !self.vty(**w).is_word_lane()) {
