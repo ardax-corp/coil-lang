@@ -346,7 +346,7 @@ fn probe_string_alloc() -> StringAlloc {
     // (a tag, a length, 30 bytes and the hash word: no padding).
     let raw = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&obj).cast::<u8>(), std::mem::size_of::<ObjString>()) };
     put(&mut img, data, raw);
-    debug_assert!(layout.size() % 8 == 0 && layout.align() <= 8);
+    debug_assert!(layout.size().is_multiple_of(8) && layout.align() <= 8);
     StringAlloc {
         class: inline_class_indices()[2] as u32,
         slot: layout.size() as u32,
