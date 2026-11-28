@@ -257,6 +257,17 @@ pub fn cold_helper_of(name: &str) -> Option<&str> {
     (!k.is_empty() && k.bytes().all(|b| b.is_ascii_digit())).then_some(base)
 }
 
+/// What the twin of a body that takes or returns tuples as their words is
+/// called: `{function}$words` (`mir::wide_ret`).
+pub const WORDS_TWIN_SUFFIX: &str = "$words";
+
+/// The body id the code of body `name` reports its sites under: a
+/// `$words` twin has no entry of its own and is its function's code, so a
+/// panic in it names its line in that function.
+pub fn site_body_id(body_ids: &std::collections::HashMap<String, u32>, name: &str) -> Option<u32> {
+    body_ids.get(name).or_else(|| body_ids.get(name.strip_suffix(WORDS_TWIN_SUFFIX)?)).copied()
+}
+
 /// The magic a native MIR section (`ArchivedProgram::native_mir`) starts
 /// with, before its format byte.
 pub const MIR_SECTION_MAGIC: &[u8; 5] = b"CNMIR";

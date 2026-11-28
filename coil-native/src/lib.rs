@@ -700,7 +700,7 @@ fn define_all<M: Module>(
             ctx.func.signature = impl_signature(&*module, &body.mir, plan.tail_conv.contains(&i));
             let lowered = {
                 let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, &body.mir);
-                lower.body_id = body_ids.get(&body.name).copied();
+                lower.body_id = common::site_body_id(body_ids, &body.name);
                 lower.body_index = Some(i);
                 lower.pins = plan.pins.contains(&i);
                 let r = lower.body(&body.mir);
@@ -721,7 +721,7 @@ fn define_all<M: Module>(
                 let lowered = {
                     // Its sites are its body's: a panic in a `defer` names it.
                     let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, pad);
-                    lower.body_id = body_ids.get(&body.name).copied();
+                    lower.body_id = common::site_body_id(body_ids, &body.name);
                     lower.is_pad = true;
                     lower.pins = plan.pins.contains(&i);
                     let r = lower.body(pad);

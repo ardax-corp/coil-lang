@@ -241,7 +241,7 @@ fn body_sites(f: &MirFunc, pc: u32, sites: &mut Vec<NativeSite>) -> (Vec<Vec<u32
     (ops, entry)
 }
 
-fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mut Vec<NativeSite>) -> Body {
+fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, site_pc: Option<u32>, sites: &mut Vec<NativeSite>) -> Body {
     let (mut mir, cleanup) = {
         let mut m = mir;
         let c = m.cleanup.take();
@@ -249,10 +249,10 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
     };
     let refused = refusal(&mir).is_some();
     let code = pc.unwrap_or(u32::MAX);
-    let pad = cleanup.map(|c| Box::new(build_body(*c, program, pc, sites)));
+    let pad = cleanup.map(|c| Box::new(build_body(*c, program, pc, site_pc, sites)));
     let is_drop = mir.name.ends_with("::drop") && mir.params.len() == 1;
     let reads = used_params(&mir) as u32;
-    let (op_sites, entry_site) = if pc.is_some() { body_sites(&mir, code, sites) } else { (mir.blocks.iter().map(|b| vec![machine::native::NO_SITE as u32; b.insts.len() + 1]).collect(), machine::native::NO_SITE as u32) };
+    let (op_sites, entry_site) = if let Some(site_pc) = site_pc { body_sites(&mir, site_pc, sites) } else { (mir.blocks.iter().map(|b| vec![machine::native::NO_SITE as u32; b.insts.len() + 1]).collect(), machine::native::NO_SITE as u32) };
     mir.shrink_to_fit();
     Body { mir, program, pc: code, reads, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), ops: None }
 }
@@ -301,7 +301,8 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u
             None => compiled.push(b.name.clone()),
         }
         let pc = body_ids.get(&b.name).copied();
-        let mut body = build_body(b.mir, at, pc, &mut sites);
+        let site_pc = common::site_body_id(body_ids, &b.name);
+        let mut body = build_body(b.mir, at, pc, site_pc, &mut sites);
         body.ops = ops.as_mut().and_then(Iterator::next);
         built.push(body);
     }

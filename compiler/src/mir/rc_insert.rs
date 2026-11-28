@@ -54,10 +54,11 @@ pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mu
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
     let owning: HashSet<Label> = twins.values().copied().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
+    let wide_numbers = number_return_words(bodies.iter().map(|(l, f)| (*l, &**f)), &numbers);
     let mut coros = owning_bodies(bodies.iter().map(|(_, f)| &**f));
     coros.extend(owning.iter().copied());
     let quiet = quiet_bodies(bodies.iter().map(|(l, f)| (*l, &**f)), &coros);
-    let mut facts = Facts { numbers, quiet, owned_params: HashMap::new(), twin_of: twins.clone() };
+    let mut facts = Facts { numbers, wide_numbers, quiet, owned_params: HashMap::new(), twin_of: twins.clone() };
     // Which parameters a tail twin releases: its caller hands each an owner.
     let owned_params: HashMap<Label, Vec<bool>> = bodies
         .iter()
@@ -179,6 +180,9 @@ fn consumes(f: &MirFunc) -> bool {
 struct Facts {
     /// The bodies that return only numbers ([`number_returns`]).
     numbers: HashSet<Label>,
+    /// Per body returning more than two words, not all numbers: which of
+    /// them are ([`number_return_words`]).
+    wide_numbers: HashMap<Label, Vec<bool>>,
     /// The bodies that write no word into an object ([`quiet_bodies`]).
     quiet: HashSet<Label>,
     /// The tail twins ([`owning_tail_twins`]): for each parameter, whether
@@ -260,7 +264,7 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
             if !set.contains(l) {
                 continue;
             }
-            let nums = number_words(f, &set);
+            let nums = number_words(f, &set, &HashMap::new());
             let used = used_as_numbers(f, true);
             let all = f.blocks.iter().all(|b| match &b.term {
                 // A wide return's words are numbers only by their definition
@@ -281,6 +285,35 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
     }
 }
 
+/// Per body returning more than two words that is not in `numbers` (a
+/// heap word among them): for each word, whether every return gives a
+/// number there (by its definition, as [`number_returns`]' wide words).
+fn number_return_words<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>, numbers: &HashSet<Label>) -> HashMap<Label, Vec<bool>> {
+    let mut out = HashMap::new();
+    for (l, f) in bodies {
+        let Some(l) = l else { continue };
+        if f.ret_more_tys.is_empty() || numbers.contains(&l) || super::frame_words::is_generator(f) {
+            continue;
+        }
+        let nums = number_words(f, numbers, &HashMap::new());
+        let tys: Vec<MirTy> = f.ret_ty.into_iter().chain(f.ret_hi_ty).chain(f.ret_more_tys.iter().copied()).collect();
+        let mut mask: Vec<bool> = tys.iter().map(|t| t.is_int()).collect();
+        for b in &f.blocks {
+            if let Some(Terminator::Return { lo, hi, more }) = &b.term {
+                for (k, v) in lo.iter().chain(hi.iter()).chain(more.iter()).enumerate() {
+                    if k < mask.len() && !nums.contains(v) {
+                        mask[k] = false;
+                    }
+                }
+            }
+        }
+        if mask.iter().any(|&m| m) {
+            out.insert(l, mask);
+        }
+    }
+    out
+}
+
 /// `f` returns more than two words, none of them a heap word
 /// ([`super::wide_ret`]'s twins).
 fn wide_scalar_ret(f: &MirFunc) -> bool {
@@ -288,8 +321,9 @@ fn wide_scalar_ret(f: &MirFunc) -> bool {
 }
 
 /// The words of `func` that are numbers by their definition, a call of a
-/// body in `numbers` included (φs optimistically).
-fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
+/// body in `numbers` included, and the words of a wide result `wide` says
+/// are numbers (φs and bit ops optimistically).
+fn number_words(func: &MirFunc, numbers: &HashSet<Label>, wide: &HashMap<Label, Vec<bool>>) -> HashSet<ValueId> {
     let insts = || func.blocks.iter().flat_map(|b| &b.insts);
     let mut out: HashSet<ValueId> = insts()
         .filter(|i| match i {
@@ -309,14 +343,30 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
     if !func.opaque_words {
         out.extend(func.params.iter().copied().filter(|p| ty_of(func, *p) == MirTy::I64));
     }
+    // A word of a wide result is a number where every return of the
+    // callee's gives one ([`number_return_words`]).
+    for inst in insts() {
+        if let MirInst::Call { target, dest_more, .. } = inst
+            && !dest_more.is_empty()
+            && let Some(mask) = wide.get(target)
+        {
+            out.extend(inst.dests().zip(mask).filter(|(_, n)| **n).map(|(d, _)| d));
+        }
+    }
+    // A bit op of numbers is a number (a pointer's untagging is a bit op
+    // of a word that may be one), optimistically as φs.
+    out.extend(insts().filter(|i| matches!(i, MirInst::Bin { op: MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor, .. })).map(MirInst::dest));
     loop {
         let before = out.len();
         for inst in insts() {
-            if let MirInst::Phi { dest, args, .. } = inst
-                && out.contains(dest)
-                && args.iter().any(|(_, a)| !out.contains(a))
-            {
-                out.remove(dest);
+            match inst {
+                MirInst::Phi { dest, args, .. } if out.contains(dest) && args.iter().any(|(_, a)| !out.contains(a)) => {
+                    out.remove(dest);
+                }
+                MirInst::Bin { dest, op: MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor, lhs, rhs, .. } if out.contains(dest) && !(out.contains(lhs) && out.contains(rhs)) => {
+                    out.remove(dest);
+                }
+                _ => {}
             }
         }
         if out.len() == before {
@@ -779,10 +829,10 @@ impl Pass {
         counted.extend(maybe_obj_words(func));
         counted.extend(pointers);
         // A call of a body that only returns numbers hands back no object.
-        let number_calls: HashSet<ValueId> = if numbers.is_empty() {
+        let number_calls: HashSet<ValueId> = if numbers.is_empty() && facts.wide_numbers.is_empty() {
             HashSet::new()
         } else {
-            number_words(func, numbers)
+            number_words(func, numbers, &facts.wide_numbers)
                 .into_iter()
                 .filter(|v| ty_of(func, *v).is_int())
                 .collect()
@@ -1005,7 +1055,7 @@ impl Pass {
             .collect();
         let mut scalar: HashSet<ValueId> = scalar;
         // A φ of numbers only is a number (a loop's running sum).
-        scalar.extend(number_words(func, numbers).into_iter().filter(|d| !base.contains_key(d)));
+        scalar.extend(number_words(func, numbers, &facts.wide_numbers).into_iter().filter(|d| !base.contains_key(d)));
         let mut pass = Self { base, borrowed, owned_at_def, scalar, owned_params: facts.owned_params.clone(), twin_of: facts.twin_of.clone() };
         pass.borrow_loads_of_live_holders(func, &quiet);
         pass
