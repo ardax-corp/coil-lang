@@ -1,0 +1,33 @@
+// CPU: a field write into an element of a vector of objects,
+// `ps[i].x = ps[i].x + 1`, in a hot loop. Nothing shares `ps` or its
+// objects, so each write is in place behind one copy-on-write check.
+use io::sync::println;
+use string::format;
+
+class P {
+    pub x: int,
+    pub tags: Vec<int>,
+}
+
+fn bump(Vec<P> ps, int reps) {
+    let r = 0;
+    while r < reps {
+        let i = 0;
+        while i < ps.len() {
+            ps[i].x = ps[i].x + i;
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+}
+
+fn main() {
+    let ps: Vec<P> = Vec::new();
+    let i = 0;
+    while i < 1000 {
+        ps.push(new P(i, Vec::new()));
+        i = i + 1;
+    }
+    bump(ps, 5000);
+    let _ = println(format("n=%i x=%i", ps.len(), ps[9].x));
+}

@@ -1858,6 +1858,37 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
     obj
 }
 
+/// `CowIndex`: element `index` of the array `addr` made unique in place,
+/// `a[i] = unique(a[i])`, writing the element back only when it copied
+/// (the copy gains the array as an owner, the shared original loses it).
+/// Out of bounds it traps, as [`coil_native_index`] does. Returns `addr`.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_cow_index(ctx: *mut NativeCtx, addr: u64, index: i64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(old) = gc.as_ref().read_indexed(index, false) else {
+        unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
+        return unsafe { bail(ctx) };
+    };
+    if let Some(copy) = heap.cow_unique(old) {
+        gc.as_mut().store_indexed(index, copy, false);
+        if heap.rc_counting() {
+            let kind = gc.as_ref().elem_kind();
+            heap.rc_inc_word(copy, kind);
+            heap.rc_dec_word(old, kind);
+        }
+        unsafe { note_alloc(ctx, heap) };
+    }
+    addr
+}
+
 // ---------------------------------------------------------------------------
 // Allocation for native code (`Alloc`, `ArrayPush`), as the runtime's
 // `DenseMake` / `DenseMakeObject` / `ArrayPush` do. Same rule as the Cow
@@ -3409,6 +3440,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_fn_entry_pair", coil_native_fn_entry_pair as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
+        ("coil_native_cow_index", coil_native_cow_index as *const u8),
         ("coil_native_rc", coil_native_rc as *const u8),
         ("coil_native_rc_reuse", coil_native_rc_reuse as *const u8),
         ("coil_native_rc_take", coil_native_rc_take as *const u8),
@@ -3458,7 +3490,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 60;
+const HELPERS: usize = 61;
 
 #[cfg(test)]
 mod pin_tests {

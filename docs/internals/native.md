@@ -124,8 +124,11 @@ A view has a state word (`machine::VIEW_PLAIN` = 1): a view stores and loads in
 place when it is set (`ok != 0`). The state is part of `layout_fingerprint`, so
 AOT code built for another protocol is refused.
 
-`Cow`, `Alloc` and `ArrayPush` call `coil_native_cow`, `_cow_field`, `_alloc` and
-`_array_push`. More ops follow the same pattern:
+`Cow`, `CowIndex`, `Alloc` and `ArrayPush` call `coil_native_cow`, `_cow_field`,
+`_cow_index`, `_alloc` and `_array_push`. A unique check (`Cow` unique, with a
+field or not, and `CowIndex`) tests the word inline first: the element is read
+as `Index` reads it, and only a class instance or an array whose header has
+the shared flag calls the helper, on a cold path. More ops follow the same pattern:
 
 | MIR | Helper | Note |
 |---|---|---|

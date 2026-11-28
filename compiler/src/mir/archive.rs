@@ -35,7 +35,7 @@ const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// takes this format only: older sections' `kinds` words have one bit per
 /// type parameter. The older formats remain for tests of what their
 /// sections hold.
-const FORMAT: u8 = common::MIR_SECTION_MAYBE_OBJ_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_COW_INDEX_FORMAT;
 /// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
 /// signatures carry struct layouts from it on.
 const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
@@ -221,6 +221,8 @@ const I_STORE_INDEX_SCALAR: u8 = 55;
 /// Reuse in place (format 24, archive 8.11).
 const I_RC_REUSE: u8 = 56;
 const I_ALLOC_AT: u8 = 57;
+/// An element made unique in place (format 27, archive 8.17).
+const I_COW_INDEX: u8 = 58;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -566,6 +568,12 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*src);
             w.u8(*unique as u8);
             w.u32(field.unwrap_or(u32::MAX));
+        }
+        MirInst::CowIndex { dest, array, index } => {
+            w.u8(I_COW_INDEX);
+            w.v(*dest);
+            w.v(*array);
+            w.v(*index);
         }
         MirInst::CowPin { dest, src } => {
             w.u8(I_COW_PIN);
@@ -1275,6 +1283,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
             MirInst::Cow { dest, src, unique, field }
         }
+        I_COW_INDEX => MirInst::CowIndex { dest: r.v()?, array: r.v()?, index: r.v()? },
         I_COW_PIN if r.pins => MirInst::CowPin { dest: r.v()?, src: r.v()? },
         I_COW_UNPIN if r.pins => MirInst::CowUnpin { dest: r.v()?, src: r.v()?, saved: r.v()? },
         I_RC_INC => MirInst::RcInc { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
@@ -1447,12 +1456,13 @@ mod tests {
 
     /// A section of an archive before two-bit `kinds` words (formats 16 to
     /// 20) is refused: its constant `kinds` words mean otherwise. So is
-    /// format 23, whose calls and returns have no words past the second, and
-    /// format 25, which lists the maybe-object words in a value set.
+    /// format 23, whose calls and returns have no words past the second,
+    /// format 25, which lists the maybe-object words in a value set, and
+    /// format 26, which has no element unique.
     #[test]
     fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT, common::MIR_SECTION_WIDE_LANES_FORMAT] {
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT, common::MIR_SECTION_WIDE_LANES_FORMAT, common::MIR_SECTION_MAYBE_OBJ_FORMAT] {
             let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
             assert!(decode(&old).is_err(), "format {format}");
         }
@@ -1501,6 +1511,24 @@ mod tests {
             MirInst::LaneIndex { dest: v(1), dest_hi: v(2), dest_more: vec![v(3), v(2)], array: v(0), index: ValueId(0) },
             MirInst::LaneStore { dest: v(4), array: v(0), index: ValueId(0), lo: v(1), hi: v(2), more: vec![v(3), v(1)], shape },
             MirInst::LanePush { dest: v(5), array: v(0), lo: v(1), hi: v(2), more: vec![v(3)], shape },
+        ]);
+        let bytes = bytes(&b);
+        assert_eq!(bytes[MAGIC.len()], FORMAT);
+        let (back, _) = decode(&bytes).expect("decode");
+        assert_eq!(back[0].mir, b.mir);
+    }
+
+    /// An element made unique in place comes back (format 27).
+    #[test]
+    fn the_element_unique_comes_back() {
+        let mut b = body();
+        let n = b.mir.types.len() as u32;
+        b.mir.types.extend([MirTy::HeapRef, MirTy::I64, MirTy::HeapRef]);
+        let v = |k: u32| ValueId(n + k);
+        b.mir.blocks[0].insts.extend([
+            MirInst::Alloc { dest: v(0), kind: MirAllocKind::Array, elems: Vec::new(), kinds: 0 },
+            MirInst::Const { dest: v(1), c: MirConst::I64(0) },
+            MirInst::CowIndex { dest: v(2), array: v(0), index: v(1) },
         ]);
         let bytes = bytes(&b);
         assert_eq!(bytes[MAGIC.len()], FORMAT);

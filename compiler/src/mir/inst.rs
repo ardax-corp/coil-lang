@@ -793,6 +793,19 @@ pub enum MirInst {
         unique: bool,
         field: Option<u32>,
     },
+    /// Copy-on-write unique of element `index` of the array `array`, in
+    /// place (archive 8.17): `array[index] = unique(array[index])` in one
+    /// instruction, writing the element back only when it copied. Traps
+    /// out of bounds as [`Self::Index`] does. Dest is `array`'s word, as
+    /// [`Self::Cow`]'s with a field is its object's. Neither takes nor drops
+    /// an owner of `array` (a copy replaces a shared element, whose other
+    /// owner keeps it). A side effect and an allocating safepoint; pair
+    /// with [`Self::GcBarrier`].
+    CowIndex {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+    },
     /// Copy-on-write pin (archive 8.2): `dest` (a `bool`) is whether
     /// `src`'s object was pinned, and the op pins it, so a share of it
     /// hands out a copy instead of marking it shared until [`Self::CowUnpin`]
@@ -1298,6 +1311,7 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Cow { dest, .. }
+            | Self::CowIndex { dest, .. }
             | Self::CowPin { dest, .. }
             | Self::CowUnpin { dest, .. }
             | Self::RcInc { dest, .. }
@@ -1355,6 +1369,7 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Cow { dest, .. }
+            | Self::CowIndex { dest, .. }
             | Self::CowPin { dest, .. }
             | Self::CowUnpin { dest, .. }
             | Self::RcInc { dest, .. }
@@ -1431,6 +1446,7 @@ impl MirInst {
             Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
+            Self::CowIndex { array, index, .. } => vec![*array, *index],
             Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => std::iter::once(*src).chain(*guard).collect(),
             Self::RcReuse { src, .. } => vec![*src],
             Self::AllocAt { slot, elems, .. } => slot.iter().copied().chain(elems.iter().copied()).collect(),
@@ -1540,6 +1556,10 @@ impl MirInst {
             Self::CowUnpin { src, saved, .. } => {
                 *src = map(*src);
                 *saved = map(*saved);
+            }
+            Self::CowIndex { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
             }
             Self::RcReuse { src, .. } => *src = map(*src),
             Self::AllocAt { slot, elems, .. } => {

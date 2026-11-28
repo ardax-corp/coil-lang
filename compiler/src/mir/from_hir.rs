@@ -4108,6 +4108,9 @@ impl Lower<'_> {
                 self.adjust_value(id, *place, *value)
             }
             HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
+                if let Some(done) = self.cow_elem(*place, base, index, *value)? {
+                    return Ok(done);
+                }
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(slot) = self.frame_field(*place) => {
@@ -5435,16 +5438,89 @@ impl Lower<'_> {
         Ok(Some(Val::Unit))
     }
 
-    /// `value` is `unique(place)` and `place` is a field of a local: the
-    /// assignment `place = value` copy-on-write puts before a write.
+    /// `value` is `unique(place)` and `place` is a field of a place (a
+    /// local, a field or an element of one, by pure indexes): the assignment
+    /// `place = value` copy-on-write puts before a write.
     fn same_field(&self, place: HirId, value: HirId) -> bool {
         let (HirKind::Field { base, name }, HirKind::Builtin { op: Builtin::Cow { unique: true }, args }) = (&self.hir.expr(place).kind, &self.hir.expr(value).kind) else {
             return false;
         };
-        let ([inner], HirKind::Local(local)) = (args.as_slice(), &self.hir.expr(*base).kind) else {
+        let [inner] = args.as_slice() else {
             return false;
         };
-        matches!(&self.hir.expr(*inner).kind, HirKind::Field { base: b, name: n } if n == name && matches!(self.hir.expr(*b).kind, HirKind::Local(l) if l == *local))
+        // Past a field of a local, only a plain object: a type parameter's
+        // word or an existential's pack takes the general unique.
+        if !matches!(self.hir.expr(*base).kind, HirKind::Local(_)) && !self.plain_cow(place) {
+            return false;
+        }
+        matches!(&self.hir.expr(*inner).kind, HirKind::Field { base: b, name: n } if n == name && self.same_place(*base, *b))
+    }
+
+    /// Whether `id`'s value is an object a plain `Cow` makes unique: not a
+    /// type parameter's word (a shared body tests its `kinds` bit) nor an
+    /// existential's pack (whose unique copies the object inside).
+    fn plain_cow(&self, id: HirId) -> bool {
+        self.expr_ty(id).map(strip_readonly).is_some_and(|t| !is_var(t) && !is_var_app(t) && !matches!(t, Ty::Existential { .. }))
+    }
+
+    /// Whether `a` and `b` are the same place read twice: a local or a
+    /// global, then fields and elements of it at indexes that compute the
+    /// same from locals and literals (what copy-on-write's `place =
+    /// unique(place)` duplicates).
+    fn same_place(&self, a: HirId, b: HirId) -> bool {
+        match (&self.hir.expr(a).kind, &self.hir.expr(b).kind) {
+            (HirKind::Local(x), HirKind::Local(y)) => x == y,
+            (HirKind::Global { .. }, HirKind::Global { .. }) => self.hir.expr(a).kind == self.hir.expr(b).kind,
+            (HirKind::Field { base: x, name: n }, HirKind::Field { base: y, name: m }) => n == m && self.same_place(*x, *y),
+            (HirKind::Index { base: x, index: i, kind: k }, HirKind::Index { base: y, index: j, kind: l }) => k == l && self.same_place(*x, *y) && self.same_index(*i, *j),
+            _ => false,
+        }
+    }
+
+    /// Whether the indexes `a` and `b` compute the same: locals, literals
+    /// and pure arithmetic on them.
+    fn same_index(&self, a: HirId, b: HirId) -> bool {
+        match (&self.hir.expr(a).kind, &self.hir.expr(b).kind) {
+            (HirKind::Local(x), HirKind::Local(y)) => x == y,
+            (HirKind::Lit(x), HirKind::Lit(y)) => x == y,
+            (HirKind::Bin { op: o, lhs: x1, rhs: x2 }, HirKind::Bin { op: p, lhs: y1, rhs: y2 }) => o == p && self.same_index(*x1, *y1) && self.same_index(*x2, *y2),
+            (HirKind::Un { op: o, operand: x }, HirKind::Un { op: p, operand: y }) => o == p && self.same_index(*x, *y),
+            (HirKind::Cast { value: x }, HirKind::Cast { value: y }) => self.expr_ty(a) == self.expr_ty(b) && self.same_index(*x, *y),
+            _ => false,
+        }
+    }
+
+    /// `a[i] = unique(a[i])` on a heap array of objects (what copy-on-write
+    /// puts before a write through `a[i]`): one in-place op that writes the
+    /// element back only when it copied.
+    fn cow_elem(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Option<Val>, Refusal> {
+        let HirKind::Builtin { op: Builtin::Cow { unique: true }, args } = &self.hir.expr(value).kind else {
+            return Ok(None);
+        };
+        let [inner] = args.as_slice() else {
+            return Ok(None);
+        };
+        if !self.same_place(place, *inner) || !self.plain_cow(place) || self.lane(base).is_some() || self.boxed(base).is_some() || !self.heap_array(base) {
+            return Ok(None);
+        }
+        if let HirKind::Local(local) = self.hir.expr(base).kind
+            && self.stack(local.0).is_some()
+        {
+            return Ok(None);
+        }
+        let heap = |t: Option<MirTy>| t == Some(MirTy::HeapRef);
+        if !heap(self.expr_ty(base).and_then(|t| self.elem_word(t))) || !heap(self.expr_ty(place).and_then(|t| self.word_ty(t))) || self.pair_tys(place).is_some() {
+            return Ok(None);
+        }
+        let Some(arr) = self.word(base)? else {
+            return Ok(Some(Val::Never));
+        };
+        let Some(idx) = self.index_word(index)? else {
+            return Ok(Some(Val::Never));
+        };
+        let out = self.at_expr(value, |l| l.b.ins_cow_index(arr, idx).map_err(mir))?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, out).map_err(mir)?;
+        Ok(Some(Val::Unit))
     }
 
     #[track_caller]
@@ -8860,20 +8936,24 @@ impl Lower<'_> {
         self.switch(body_b);
         let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
         let pinned = matches!(items, Items::Array) && self.cx.pinned_for(id);
-        let item = self.b.ins_index(arr, cur, elem, pinned).map_err(mir)?;
+        let array = into_iter.is_none() && matches!(items, Items::Array);
+        let in_place = matches!(pat, HirPat::Bind(local) if !self.unit_local(*local) && self.for_mut_item(*local, elem, array));
+        // `for mut c in xs`: `c` names the item in `xs`, which the plan made
+        // unique before the loop; an item another name still shares is
+        // copied and stored back first, in place, so the writes through `c`
+        // reach `xs` only (#2782). The check read the item in bounds.
+        let item = if in_place {
+            let out = self.at_expr(id, |l| l.b.ins_cow_index(arr, cur).map_err(mir))?;
+            self.b.ins_gc_barrier(MirGcKind::Safepoint, out).map_err(mir)?;
+            self.b.ins_index(arr, cur, elem, true).map_err(mir)?
+        } else {
+            self.b.ins_index(arr, cur, elem, pinned).map_err(mir)?
+        };
         match (pat, parts) {
             (HirPat::Bind(local), _) if self.unit_local(*local) => {}
             (HirPat::Bind(local), _) => {
-                let array = into_iter.is_none() && matches!(items, Items::Array);
-                let item = if self.for_mut_item(*local, elem, array) {
-                    // `for mut c in xs`: `c` names the item in `xs`, which
-                    // the plan made unique before the loop; an item another
-                    // name still shares is copied and stored back first, so
-                    // the writes through `c` reach `xs` only (#2782).
-                    let own = self.at_expr(id, |l| l.b.ins_cow(item, true).map_err(mir))?;
-                    let own = self.b.ins_gc_barrier(MirGcKind::Safepoint, own).map_err(mir)?;
-                    self.b.ins_store_index(arr, cur, own, pinned).map_err(mir)?;
-                    own
+                let item = if in_place {
+                    item
                 } else if let Some(bit) = self.for_mut_open_item(*local, elem, array) {
                     // The same in a shared body, where the `kinds` bit says
                     // the item is an object (#2836).

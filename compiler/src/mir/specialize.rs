@@ -20,6 +20,16 @@ pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions) {
             loop_opts(func, true);
         }
     }
+    // A slot's copy-on-write check made twice in a block runs once, and a
+    // loop's checks on what it does not change run ahead of it.
+    if opts.mir_loop {
+        let dropped = crate::mir::dedup_cow_checks(func);
+        check_after(func, "dedup_cow_checks");
+        if crate::mir::hoist_cow_checks(func) + dropped > 0 {
+            check_after(func, "hoist_cow_checks");
+            loop_opts(func, true);
+        }
+    }
     if opts.mir_fold {
         crate::mir::instcombine(func);
         check_after(func, "instcombine");
