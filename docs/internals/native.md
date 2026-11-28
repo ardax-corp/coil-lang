@@ -582,7 +582,12 @@ strings. An upsert runs in place only where pushes may be written in place
   object words. Growth takes the host call. The views are dropped after.
 - `hash_string` reads the hash cached in the string's header
   (`string_slots`: the kind byte, `ObjString`'s hash word and its "set"
-  bit) and calls the native when the hash is not cached yet.
+  bit). When it is not cached yet (a string just built, lowered or split)
+  it takes the bytes from `coil_native_str_view` (a leaf helper, no host
+  call), runs FNV-1a over them in place (`machine::native::FNV_BASIS` /
+  `FNV_PRIME`, as `ObjString::hash`) and caches `HASH_SET | h` in the
+  header as `ObjString::hash_code` does. Only a word that is not a string
+  object itself calls the native.
 
 `layout_fingerprint` covers `string_slots`.
 

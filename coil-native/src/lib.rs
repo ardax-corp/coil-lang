@@ -7921,9 +7921,44 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(str_b);
                 let w = self.b.ins().load(types::I64, t, s, sl.hash_at as i32);
                 let set = self.b.ins().band_imm_u(w, sl.hash_set as i64);
-                self.b.ins().brif(set, have, &[], slow, &[]);
+                let compute = self.b.create_block();
+                self.b.ins().brif(set, have, &[], compute, &[]);
                 self.b.switch_to_block(have);
                 let h = self.b.ins().band_imm_u(w, 0xFFFF_FFFF);
+                self.b.ins().jump(join, &[h.into()]);
+                // Not cached yet (a string just built or sliced): FNV-1a
+                // over its bytes here, as `ObjString::hash`, then cache it
+                // as `ObjString::hash_code` does (`HASH_SET | h`; the
+                // interned bit is only ever set after `HASH_SET`). The
+                // bytes come from the leaf view helper, no host call.
+                self.b.switch_to_block(compute);
+                let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
+                self.b.ins().call(self.str_view, &[s, out]);
+                let p = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 0);
+                let n = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8);
+                let (head, body, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.append_block_param(head, types::I64);
+                self.b.append_block_param(head, types::I32);
+                self.b.append_block_param(done, types::I32);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                let basis = self.b.ins().iconst(types::I32, i64::from(machine::native::FNV_BASIS as i32));
+                self.b.ins().jump(head, &[zero.into(), basis.into()]);
+                self.b.switch_to_block(head);
+                let (i, acc) = (self.b.block_params(head)[0], self.b.block_params(head)[1]);
+                let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
+                self.b.ins().brif(more, body, &[], done, &[acc.into()]);
+                self.b.switch_to_block(body);
+                let at = self.b.ins().iadd(p, i);
+                let byte = self.b.ins().uload8(types::I32, t, at, 0);
+                let x = self.b.ins().bxor(acc, byte);
+                let x = self.b.ins().imul_imm_s(x, i64::from(machine::native::FNV_PRIME as i32));
+                let i1 = self.b.ins().iadd_imm_s(i, 1);
+                self.b.ins().jump(head, &[i1.into(), x.into()]);
+                self.b.switch_to_block(done);
+                let h32 = self.b.block_params(done)[0];
+                let h = self.b.ins().uextend(types::I64, h32);
+                let cached = self.b.ins().bor_imm_u(h, sl.hash_set as i64);
+                self.b.ins().store(t, cached, s, sl.hash_at as i32);
                 self.b.ins().jump(join, &[h.into()]);
             }
             MapOp::Len => {
