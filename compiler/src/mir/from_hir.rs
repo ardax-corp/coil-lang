@@ -521,12 +521,21 @@ impl Lower<'_> {
     }
 
     /// A flat wide class field `id`: its first slot, first tail slot and
-    /// its items' word types.
-    fn wide_field(&self, id: HirId) -> Option<(u32, u32, Vec<MirTy>)> {
-        match self.field(id).word {
-            HirFieldWord::Wide { slot, tail, n, tys } => Some((slot, tail, tys[..n as usize].to_vec())),
-            _ => None,
-        }
+    /// its type's leaves and nesting.
+    fn wide_field(&self, id: HirId) -> Result<Option<(u32, u32, WideWords)>, Refusal> {
+        let HirFieldWord::Wide { slot, tail, n } = self.field(id).word else {
+            return Ok(None);
+        };
+        let shape = self.wide_words(id).filter(|w| w.tys.len() == n as usize).ok_or("wide field type")?;
+        Ok(Some((slot, tail, shape)))
+    }
+
+    /// The leaves' word types and nesting of `id`'s tuple type, a flat wide
+    /// field's ([`crate::layout::wide_shape_of`]).
+    fn wide_words(&self, id: HirId) -> Option<WideWords> {
+        let shape = crate::layout::wide_shape_of(self.expr_ty(id)?)?;
+        let tys = shape.leaves.iter().map(scalar).collect::<Option<Vec<_>>>()?;
+        Some(WideWords { tys, nest: shape.nest })
     }
 
     /// The slot of item `i` of a flat wide field at `slot` / `tail`.
@@ -534,43 +543,145 @@ impl Lower<'_> {
         if i == 0 { slot } else { tail + i as u32 - 1 }
     }
 
-    /// The `n` items of tuple value `id` as words: a tuple made in place
-    /// gives its items, any other its object's loads. `None` if it never
-    /// returns.
-    fn tuple_item_words(&mut self, id: HirId, tys: &[MirTy]) -> Result<Option<Vec<ValueId>>, Refusal> {
-        if let HirKind::Make { kind: MakeKind::Tuple, args } = &self.hir.expr(id).kind
-            && args.len() == tys.len()
-        {
-            let args = args.clone();
-            let mut words = Vec::with_capacity(args.len());
-            for (&a, &ty) in args.iter().zip(tys) {
-                let Some(v) = self.word(a)? else {
-                    return Ok(None);
-                };
-                if self.b.value_ty(v) != ty {
-                    return Err("wide item type".into());
-                }
-                words.push(v);
-            }
-            return Ok(Some(words));
-        }
-        let Some(obj) = self.word(id)? else {
+    /// The leaves of tuple value `id` of shape `w` as words, at any depth:
+    /// a tuple made in place gives its items (a nested one made in place
+    /// its own), any other its object's loads. `None` if it never returns.
+    fn tuple_leaf_words(&mut self, id: HirId, w: &WideWords) -> Result<Option<Vec<ValueId>>, Refusal> {
+        let mut words = Vec::with_capacity(w.tys.len());
+        let mut at = (0, 0);
+        if !self.leaf_words_of(id, w, &mut at, &mut words)? {
             return Ok(None);
-        };
-        if self.b.value_ty(obj) != MirTy::HeapRef {
-            return Err("wide value".into());
-        }
-        let mut words = Vec::with_capacity(tys.len());
-        for (i, &ty) in tys.iter().enumerate() {
-            words.push(self.b.ins_product_load(obj, i as u32, ty).map_err(mir)?);
         }
         Ok(Some(words))
     }
 
-    /// A tuple object of number words `words`, as `make_tuple` makes one.
-    fn wide_tuple(&mut self, words: Vec<ValueId>) -> Result<ValueId, Refusal> {
-        let kinds = common::pack_word_kinds(std::iter::repeat_n(common::WORD_SCALAR, words.len()));
-        let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?;
+    /// [`Self::tuple_leaf_words`] of the tuple at `at.0` of `w.nest`
+    /// (its first leaf `at.1`): `false` if it never returns.
+    fn leaf_words_of(&mut self, id: HirId, w: &WideWords, at: &mut (usize, usize), out: &mut Vec<ValueId>) -> Result<bool, Refusal> {
+        let n = usize::from(w.nest[at.0]);
+        at.0 += 1;
+        if let HirKind::Make { kind: MakeKind::Tuple, args } = &self.hir.expr(id).kind
+            && args.len() == n
+        {
+            for a in args.clone() {
+                if w.nest[at.0] != 0 {
+                    if !self.leaf_words_of(a, w, at, out)? {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+                let Some(v) = self.word(a)? else {
+                    return Ok(false);
+                };
+                if self.b.value_ty(v) != w.tys[at.1] {
+                    return Err("wide item type".into());
+                }
+                at.0 += 1;
+                at.1 += 1;
+                out.push(v);
+            }
+            return Ok(true);
+        }
+        // A two-word value: its two items, a nested tuple's object loaded.
+        if n == 2 && self.pair_tys(id).is_some() {
+            let Some((lo, hi)) = self.pair(id)? else {
+                return Ok(false);
+            };
+            for v in [lo, hi] {
+                if w.nest[at.0] != 0 {
+                    self.object_leaf_words(v, w, at, out)?;
+                    continue;
+                }
+                if self.b.value_ty(v) != w.tys[at.1] {
+                    return Err("wide item type".into());
+                }
+                out.push(v);
+                at.0 += 1;
+                at.1 += 1;
+            }
+            return Ok(true);
+        }
+        let Some(obj) = self.word(id)? else {
+            return Ok(false);
+        };
+        at.0 -= 1;
+        self.object_leaf_words(obj, w, at, out)?;
+        Ok(true)
+    }
+
+    /// The leaves of tuple object `obj`, the tuple at `at.0` of `w.nest`,
+    /// by its loads (a nested tuple's object first).
+    fn object_leaf_words(&mut self, obj: ValueId, w: &WideWords, at: &mut (usize, usize), out: &mut Vec<ValueId>) -> Result<(), Refusal> {
+        if self.b.value_ty(obj) != MirTy::HeapRef {
+            return Err("wide value".into());
+        }
+        let n = w.nest[at.0];
+        at.0 += 1;
+        for i in 0..u32::from(n) {
+            if w.nest[at.0] != 0 {
+                let inner = self.b.ins_product_load(obj, i, MirTy::HeapRef).map_err(mir)?;
+                self.object_leaf_words(inner, w, at, out)?;
+                continue;
+            }
+            out.push(self.b.ins_product_load(obj, i, w.tys[at.1]).map_err(mir)?);
+            at.0 += 1;
+            at.1 += 1;
+        }
+        Ok(())
+    }
+
+    /// The `n` items of flat tuple value `id` as words (a lane array's
+    /// wide element), as [`Self::tuple_leaf_words`].
+    fn tuple_item_words(&mut self, id: HirId, tys: &[MirTy]) -> Result<Option<Vec<ValueId>>, Refusal> {
+        self.tuple_leaf_words(id, &WideWords::flat(tys.to_vec()))
+    }
+
+    /// A flat tuple object of number words `words`, as `make_tuple` makes
+    /// one.
+    fn flat_tuple(&mut self, words: Vec<ValueId>) -> Result<ValueId, Refusal> {
+        let w = WideWords::flat(vec![MirTy::I64; words.len()]);
+        self.wide_tuple_at(&words, &w, &mut (0, 0))
+    }
+
+    /// The tuple of shape `w` its leaves `words` make, nested tuples first,
+    /// as `make_tuple` makes each: the value of `id`, two words when its
+    /// type is a two-word one (`((int, int), int)`).
+    fn wide_tuple(&mut self, id: HirId, words: &[ValueId], w: &WideWords) -> Result<Val, Refusal> {
+        let mut at = (0, 0);
+        if w.nest[0] == 2 && self.pair_tys(id).is_some() {
+            at.0 = 1;
+            let mut items = [words[0]; 2];
+            for item in &mut items {
+                if w.nest[at.0] != 0 {
+                    *item = self.wide_tuple_at(words, w, &mut at)?;
+                } else {
+                    *item = words[at.1];
+                    at.0 += 1;
+                    at.1 += 1;
+                }
+            }
+            return Ok(Val::Pair(items[0], items[1]));
+        }
+        Ok(Val::V(self.wide_tuple_at(words, w, &mut at)?))
+    }
+
+    fn wide_tuple_at(&mut self, words: &[ValueId], w: &WideWords, at: &mut (usize, usize)) -> Result<ValueId, Refusal> {
+        let n = w.nest[at.0];
+        at.0 += 1;
+        let mut items = Vec::with_capacity(usize::from(n));
+        let mut kinds = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            if w.nest[at.0] != 0 {
+                items.push(self.wide_tuple_at(words, w, at)?);
+                kinds.push(common::WORD_POINTER);
+            } else {
+                items.push(words[at.1]);
+                kinds.push(common::WORD_SCALAR);
+                at.0 += 1;
+                at.1 += 1;
+            }
+        }
+        let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, items, common::pack_word_kinds(kinds)).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, obj).map_err(mir)
     }
 
@@ -889,9 +1000,10 @@ pub enum HirFieldWord {
     /// slot (the second) and their word types.
     Pair { slot: u32, tail: u32, lo: MirTy, hi: MirTy },
     /// A flat wide class field (`Checker::class_wide_tails`): the slot of
-    /// its first item, the first of its tail slots (items `1..n`, in
-    /// order) and its `n` items' word types (`tys[..n]`), all numbers.
-    Wide { slot: u32, tail: u32, n: u32, tys: [MirTy; 4] },
+    /// its first leaf, the first of its tail slots (leaves `1..n`, in
+    /// order) and its `n` leaves, all numbers
+    /// ([`crate::layout::wide_field_shape`] of its type).
+    Wide { slot: u32, tail: u32, n: u32 },
     /// A heap class object's field (or a record variant's payload) that
     /// holds the word its type says: its slot and word type.
     Heap { slot: u32, ty: MirTy },
@@ -899,6 +1011,23 @@ pub enum HirFieldWord {
     /// ground type with a niche layout of its own: its slot holds the
     /// boxed enum object, unboxed on the way out and boxed on the way in.
     OpenNiche { slot: u32, layout: ValueLayout },
+}
+
+/// A flat wide field's leaves' word types and its type's nesting
+/// ([`crate::layout::WideShape::nest`]).
+#[derive(Clone, Debug)]
+struct WideWords {
+    tys: Vec<MirTy>,
+    nest: Vec<u8>,
+}
+
+impl WideWords {
+    /// One tuple of `tys`, nothing nested.
+    fn flat(tys: Vec<MirTy>) -> Self {
+        let mut nest = vec![u8::try_from(tys.len()).expect("a wide tuple's arity")];
+        nest.resize(tys.len() + 1, 0);
+        Self { tys, nest }
+    }
 }
 
 /// How a body's lane arrays are used ([`LowerCx::lane_uses`]).
@@ -4203,7 +4332,7 @@ impl Lower<'_> {
                 Ok(Val::Pair(lo, hi))
             }
             // A flat wide field: its items from their slots, as a tuple.
-            HirKind::Field { base, .. } if let Some((slot, tail, tys)) = self.wide_field(id) => {
+            HirKind::Field { base, .. } if let Some((slot, tail, w)) = self.wide_field(id)? => {
                 let Some(obj) = self.word(*base)? else {
                     return Ok(Val::Never);
                 };
@@ -4211,22 +4340,22 @@ impl Lower<'_> {
                     return Err("wide field base".into());
                 }
                 let invariant = self.field(id).invariant;
-                let mut words = Vec::with_capacity(tys.len());
-                for (i, &ty) in tys.iter().enumerate() {
-                    let w = self.b.ins_product_load(obj, Self::wide_slot(slot, tail, i), ty).map_err(mir)?;
+                let mut words = Vec::with_capacity(w.tys.len());
+                for (i, &ty) in w.tys.iter().enumerate() {
+                    let v = self.b.ins_product_load(obj, Self::wide_slot(slot, tail, i), ty).map_err(mir)?;
                     if invariant {
-                        self.b.mark_invariant_load(w);
+                        self.b.mark_invariant_load(v);
                     }
-                    words.push(w);
+                    words.push(v);
                 }
-                Ok(Val::V(self.wide_tuple(words)?))
+                self.wide_tuple(id, &words, &w)
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
-                    && let Some((slot, tail, tys)) = self.wide_field(*place) =>
+                    && let Some((slot, tail, w)) = self.wide_field(*place)? =>
             {
                 // The value, then the object, as a pair field's.
-                let Some(words) = self.tuple_item_words(*value, &tys)? else {
+                let Some(words) = self.tuple_leaf_words(*value, &w)? else {
                     return Ok(Val::Never);
                 };
                 let Some(obj) = self.word(base)? else {
@@ -7504,7 +7633,7 @@ impl Lower<'_> {
             // Boxed before the array drops it: a heap payload is then held
             // by its box, a reference.
             let boxed = if lane.is_wide() {
-                l.wide_tuple(words)?
+                l.flat_tuple(words)?
             } else {
                 let Val::V(boxed) = l.box_pair_val(&elem, words[0], words[1])? else {
                     return Err("lane element box".into());
@@ -7593,7 +7722,7 @@ impl Lower<'_> {
         };
         if lane.is_wide() {
             let words = self.b.ins_lane_index_words(arr, idx, &lane.tys()).map_err(mir)?;
-            return Ok(Val::V(self.wide_tuple(words)?));
+            return Ok(Val::V(self.flat_tuple(words)?));
         }
         let (lo, hi) = self.b.ins_lane_index(arr, idx, lane.lo, lane.hi).map_err(mir)?;
         Ok(Val::Pair(lo, hi))
@@ -7944,11 +8073,8 @@ impl Lower<'_> {
                 if matches!(tails.get(i), Some(Some(_))) {
                     None
                 } else if matches!(wide.get(i), Some(Some(_))) {
-                    // A wide field's first item, a number.
-                    match self.expr_ty(a).map(strip_readonly) {
-                        Some(Ty::Tuple(items)) => items.first().cloned(),
-                        _ => None,
-                    }
+                    // A wide field's first leaf, a number.
+                    self.expr_ty(a).and_then(crate::layout::wide_shape_of).and_then(|s| s.leaves.first().cloned())
                 } else {
                     self.expr_ty(a).cloned()
                 }
@@ -7998,12 +8124,8 @@ impl Lower<'_> {
             // A flat wide field: its first item here, the others in its
             // tail slots.
             if let Some(&Some((tail, extra))) = wide.get(i) {
-                let item_tys = self.expr_ty(arg).and_then(|t| match strip_readonly(t) {
-                    Ty::Tuple(items) if items.len() as u32 == extra + 1 => items.iter().map(scalar).collect::<Option<Vec<_>>>(),
-                    _ => None,
-                });
-                let item_tys = item_tys.ok_or("wide field argument")?;
-                let Some(items) = self.tuple_item_words(arg, &item_tys)? else {
+                let w = self.wide_words(arg).filter(|w| w.tys.len() as u32 == extra + 1).ok_or("wide field argument")?;
+                let Some(items) = self.tuple_leaf_words(arg, &w)? else {
                     return Ok(None);
                 };
                 let mut items = items.into_iter();
@@ -9041,7 +9163,7 @@ impl Lower<'_> {
             let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
             let words = self.b.ins_lane_index_words(arr, cur, &lane.tys()).map_err(mir)?;
             if let Some(slot) = whole {
-                let tuple = self.wide_tuple(words)?;
+                let tuple = self.flat_tuple(words)?;
                 self.b.def_local(slot, tuple).map_err(mir)?;
             } else {
                 for (slot, w) in slots.into_iter().zip(words) {

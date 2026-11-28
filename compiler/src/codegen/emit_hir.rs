@@ -13116,15 +13116,11 @@ impl<'a> HirLowerCx<'a> {
             && let Some((FieldAt::Slot(idx), fty)) = c.hir_field(hir, base, name)
             && let Some(key) = c.hir_class_of(hir, base)
             && let Some(&Some((tail, extra))) = c.wide_tails_at(&key, &c.hir_class_args(hir, base)).get(idx as usize)
-            && let Some(items) = crate::layout::wide_scalar_items(checker, &fty).or_else(|| ty.and_then(|t| crate::layout::wide_scalar_items(checker, t)))
-            && items.len() as u32 == extra + 1
-            && ty.is_some_and(|t| crate::layout::wide_scalar_items(checker, t).is_some_and(|i| i.len() == items.len()))
+            && let Some(shape) = crate::layout::wide_field_shape(checker, &fty).or_else(|| ty.and_then(|t| crate::layout::wide_field_shape(checker, t)))
+            && shape.leaves.len() as u32 == extra + 1
+            && ty.is_some_and(|t| crate::layout::wide_field_shape(checker, t).is_some_and(|s| s.nest == shape.nest))
         {
-            let mut tys = [crate::mir::MirTy::I64; 4];
-            for (t, item) in tys.iter_mut().zip(&items) {
-                *t = crate::mir::scalar_mir_ty(item).unwrap_or(crate::mir::MirTy::I64);
-            }
-            return HirFieldWord::Wide { slot: idx, tail, n: extra + 1, tys };
+            return HirFieldWord::Wide { slot: idx, tail, n: extra + 1 };
         }
         if base_ty.is_some_and(|t| {
             self.is_class(t) || {
