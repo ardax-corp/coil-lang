@@ -142,7 +142,12 @@ test("int keys: insert, overwrite and find through growth") {
     assert!(m.find(7919 * 5) == 5);
     // Negative keys and hashes.
     assert!(m.insert(-5, 1) && m.insert(-1, 2) && m.insert(-9223372036854775807, 3));
-    assert!(m.get_or(-5, 0) == 1 && m.get_or(-1, 0) == 2 && m.get_or(0, -1) == 0 && m.get_or(-9223372036854775807, 0) == 3);
+    assert!(
+        m.get_or(-5, 0) == 1 &&
+        m.get_or(-1, 0) == 2 &&
+        m.get_or(0, -1) == 0 &&
+        m.get_or(-9223372036854775807, 0) == 3,
+    );
 }
 
 test("string keys equal in contents but other objects") {
@@ -263,7 +268,14 @@ test("values of one, two and three words") {
     let s: Map<int, string> = Map::new();
     let i = 0;
     while i < 1000 {
-        let _ = o.insert(i, if i % 2 == 0 { Some(i) } else { None });
+        let _ = o.insert(
+            i,
+            if i % 2 == 0 {
+                Some(i)
+            } else {
+                None
+            },
+        );
         let _ = t.insert("t" + i.show(), (i, i * 2, i * 3));
         let _ = s.insert(i, "v" + i.show());
         i = i + 1;
