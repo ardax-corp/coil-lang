@@ -562,10 +562,7 @@ fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn F
     // strings; anything else orders before every string.
     register(out, register_id, common::STRING_COMPARE_NATIVE, FfiType::Int, |sig| {
         HostClosureFn::new_direct(sig, |heap, args| {
-            let text = |v: Value| match heap.find_object_by_addr(v.bits()) {
-                Some(crate::memory::Object::String(gc)) => Some(gc),
-                _ => None,
-            };
+            let text = |v: Value| heap.str_at(v.bits());
             let order = match (text(args[0]), text(args[1])) {
                 (Some(a), Some(b)) => a.as_ref().data.as_bytes().cmp(b.as_ref().data.as_bytes()),
                 (a, b) => a.is_some().cmp(&b.is_some()),

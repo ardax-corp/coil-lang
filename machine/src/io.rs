@@ -505,8 +505,8 @@ pub fn stream_read(
     stream: Value,
     buf: Value,
 ) -> Result<Option<usize>, IoErrorTag> {
-    let capacity = match heap.find_object_by_addr(buf.bits()) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().len(),
+    let capacity = match heap.array_at(buf.bits()) {
+        Some(arr_gc) => arr_gc.as_ref().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     stream_read_into(heap, stream, buf, capacity)
@@ -520,8 +520,8 @@ fn stream_read_into(
     cap: usize,
 ) -> Result<Option<usize>, IoErrorTag> {
     let buf_addr = buf.bits();
-    let capacity = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().len().min(cap),
+    let capacity = match heap.array_at(buf_addr) {
+        Some(arr_gc) => arr_gc.as_ref().len().min(cap),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     if capacity == 0 {
@@ -545,7 +545,7 @@ fn stream_read_into(
     })??;
 
     if let Some(n) = n {
-        let Some(Object::Array(mut arr_gc)) = heap.find_object_by_addr(buf_addr) else {
+        let Some(mut arr_gc) = heap.array_at(buf_addr) else {
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
@@ -572,8 +572,8 @@ pub fn stream_write_from(
         return Err(IoErrorTag::InvalidInput);
     }
     let buf_addr = buf.bits();
-    let bytes: Vec<u8> = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => {
+    let bytes: Vec<u8> = match heap.array_at(buf_addr) {
+        Some(arr_gc) => {
             let arr = arr_gc.as_ref();
             let start = offset as usize;
             if start > arr.len() {
@@ -631,7 +631,7 @@ pub fn stream_read_exact(
     buf: Value,
 ) -> Result<Option<usize>, IoErrorTag> {
     let buf_addr = buf.bits();
-    let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
+    let Some(arr_gc) = heap.array_at(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
     let need = arr_gc.as_ref().len();
@@ -656,12 +656,12 @@ pub fn stream_read_exact(
                 wait_readable(heap, stream)?;
             }
             Ok(Some(n)) => {
-                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits())
+                let Some(src) = heap.array_at(scratch.bits())
                 else {
                     return Err(IoErrorTag::Other);
                 };
                 let chunk = src.as_ref().to_byte_vec();
-                let Some(Object::Array(mut dst)) = heap.find_object_by_addr(buf_addr) else {
+                let Some(mut dst) = heap.array_at(buf_addr) else {
                     return Err(IoErrorTag::Other);
                 };
                 dst.as_mut().write_bytes_at(filled, &chunk[..n]);
@@ -687,7 +687,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
             Ok(None) => break,
             Ok(Some(0)) => wait_readable(heap, stream)?,
             Ok(Some(n)) => {
-                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits())
+                let Some(src) = heap.array_at(scratch.bits())
                 else {
                     return Err(IoErrorTag::Other);
                 };
@@ -710,7 +710,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
 /// Block until the entire buffer is written.
 pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<(), IoErrorTag> {
     let buf_addr = buf.bits();
-    let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
+    let Some(arr_gc) = heap.array_at(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
     let bytes: Vec<u8> = arr_gc.as_ref().to_byte_vec();
@@ -1392,8 +1392,8 @@ pub fn udp_send_to(
 /// The first `nbytes` elements of `buf` are filled.
 pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value, IoErrorTag> {
     let buf_addr = buf.bits();
-    let capacity = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().len(),
+    let capacity = match heap.array_at(buf_addr) {
+        Some(arr_gc) => arr_gc.as_ref().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     if capacity == 0 {
@@ -1427,7 +1427,7 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
     )??;
 
     {
-        let Some(Object::Array(mut arr_gc)) = heap.find_object_by_addr(buf_addr) else {
+        let Some(mut arr_gc) = heap.array_at(buf_addr) else {
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
@@ -1457,8 +1457,8 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
 
 /// The text of heap string `v`, if it is one.
 pub fn heap_string(heap: &Heap, v: Value) -> Option<String> {
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::String(gc)) => Some(gc.as_ref().data.to_string()),
+    match heap.str_at(v.bits()) {
+        Some(gc) => Some(gc.as_ref().data.to_string()),
         _ => None,
     }
 }
@@ -1493,10 +1493,10 @@ pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
 
 /// Read a heap `Vec<byte>` (Array carrier) into a Rust `Vec<u8>`.
 pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
-    match heap.find_object_by_addr(v.bits()) {
+    match heap.array_at(v.bits()) {
         // Out-of-range word elements would be a typechecker bug; they
         // narrow (`as u8`) rather than panic in the host.
-        Some(Object::Array(arr_gc)) => Ok(arr_gc.as_ref().to_byte_vec()),
+        Some(arr_gc) => Ok(arr_gc.as_ref().to_byte_vec()),
         _ => Err(IoErrorTag::InvalidInput),
     }
 }
@@ -1517,7 +1517,7 @@ pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes
 /// is left empty. Invalid UTF-8 puts the bytes back.
 pub fn from_bytes_take(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes::StringErrorTag> {
     use crate::str_bytes::StringErrorTag;
-    let Some(Object::Array(mut arr_gc)) = heap.find_object_by_addr(buf.bits()) else {
+    let Some(mut arr_gc) = heap.array_at(buf.bits()) else {
         return Err(StringErrorTag::InvalidUtf8);
     };
     let arr: &mut ObjArray = arr_gc.as_mut();
@@ -1541,8 +1541,8 @@ pub fn from_bytes_take(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_
 /// rejects this case).
 pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
     // One pass over the string's bytes (no intermediate `String` copy).
-    let bytes: Vec<u8> = match heap.find_object_by_addr(s.bits()) {
-        Some(Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
+    let bytes: Vec<u8> = match heap.str_at(s.bits()) {
+        Some(gc) => gc.as_ref().data.as_bytes().to_vec(),
         _ => Vec::new(),
     };
     let (obj, _) = heap.alloc(ObjArray::from_bytes(bytes), Object::Array);

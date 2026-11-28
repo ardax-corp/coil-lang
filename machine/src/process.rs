@@ -60,8 +60,8 @@ fn io_tag(e: std::io::Error) -> IoErrorTag {
 }
 
 fn heap_strings(heap: &Heap, v: Value) -> Result<Vec<String>, IoErrorTag> {
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::Array(gc)) => gc.as_ref().iter().map(|e| value_as_string(heap, e)).collect(),
+    match heap.array_at(v.bits()) {
+        Some(gc) => gc.as_ref().iter().map(|e| value_as_string(heap, e)).collect(),
         _ => Err(IoErrorTag::InvalidInput),
     }
 }

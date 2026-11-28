@@ -44,8 +44,8 @@ pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.capacity() -> int`
 pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let cap = match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(gc)) => gc.as_ref().capacity(),
+    let cap = match heap.array_at(handle.bits()) {
+        Some(gc) => gc.as_ref().capacity(),
         _ => 0,
     };
     Value::from(cap as i64)
@@ -55,7 +55,7 @@ pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let extra = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
         gc.as_mut().reserve(extra);
         heap.account_array(gc.as_mut());
     }
@@ -65,7 +65,7 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.clear() -> ()`
 pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
         gc.as_mut().clear();
     }
     Value::from(0i64)
@@ -74,8 +74,8 @@ pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.pop() -> Option<T>`
 pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(mut gc)) => {
+    match heap.array_at(handle.bits()) {
+        Some(mut gc) => {
             let kind = gc.as_ref().elem_kind();
             let v = gc.as_mut().pop();
             pack_vec_element(heap, v, kind)
@@ -89,7 +89,7 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(0);
     let value = args.get(2).copied().unwrap_or(Value::from(0i64));
-    let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) else {
+    let Some(mut gc) = heap.array_at(handle.bits()) else {
         return Err("Vec::insert on non-array".to_string());
     };
     let len = gc.as_ref().len();
@@ -105,8 +105,8 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
 pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(-1);
-    match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(mut gc)) => {
+    match heap.array_at(handle.bits()) {
+        Some(mut gc) => {
             let len = gc.as_ref().len();
             if index < 0 || (index as usize) >= len {
                 pack_vec_option(heap, None)
@@ -127,7 +127,7 @@ pub fn host_vec_drain(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let from = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
     let to = args.get(2).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
         gc.as_mut().drain_range(from, to);
     }
     Value::from(0i64)
@@ -140,7 +140,7 @@ pub fn host_vec_drain(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_rotate_in(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let i = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+    if let Some(mut gc) = heap.array_at(handle.bits()) {
         gc.as_mut().rotate_last_to(i);
     }
     Value::from(0i64)
@@ -207,8 +207,8 @@ pub const VEC_STAMP_WIRING: &[(&str, usize, crate::HostValueFn)] = &[(common::VE
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let arr = match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(gc)) => gc.as_ref().copy(),
+    let arr = match heap.array_at(handle.bits()) {
+        Some(gc) => gc.as_ref().copy(),
         _ => ObjArray::new(Vec::new()),
     };
     let (obj, _) = heap.alloc(arr, Object::Array);

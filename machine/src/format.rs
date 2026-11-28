@@ -99,9 +99,9 @@ pub(crate) fn stringify_value(heap: &Heap, v: Value) -> String {
 
 /// The string object at `addr`'s text (empty when it is not one).
 pub(crate) fn string_at(heap: &Heap, addr: u64) -> String {
-    match heap.find_object_by_addr(addr) {
-        Some(Object::String(gc)) => gc.as_ref().data.to_string(),
-        _ => String::new(),
+    match heap.str_at(addr) {
+        Some(gc) => gc.as_ref().data.to_string(),
+        None => String::new(),
     }
 }
 
