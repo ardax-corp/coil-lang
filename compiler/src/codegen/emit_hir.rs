@@ -4000,7 +4000,9 @@ impl Compiler {
             let [a] = args.as_slice() else {
                 continue;
             };
-            if self.checker.host_fn_in_scope(name) != Some(common::KEY_INDEX_EQ_MODE_NATIVE)
+            let native = self.checker.host_fn_in_scope(name);
+            let word_mode = native == Some(common::MAP_WORD_MODE_NATIVE);
+            if (native != Some(common::KEY_INDEX_EQ_MODE_NATIVE) && !word_mode)
                 || !matches!(hir.expr(*a).kind, HirKind::Local(_) | HirKind::Lit(_))
             {
                 continue;
@@ -4009,6 +4011,7 @@ impl Compiler {
                 continue;
             };
             let mode = match strip_readonly(&ty) {
+                _ if word_mode => self.map_word_mode(&ty),
                 _ if !ftv_ty(&ty).is_empty() => common::KEY_EQ_COIL,
                 Ty::Con(n) if n == INT => common::KEY_EQ_WORD,
                 Ty::Con(n) if n == STRING => common::KEY_EQ_STRING,
@@ -4017,6 +4020,29 @@ impl Compiler {
             out.get_or_insert_with(|| hir.clone()).exprs[i].kind = HirKind::Lit(crate::hir::Lit::Int(mode));
         }
         out
+    }
+
+    /// `key_index::word_mode` of a value of type `ty` (`common::WORD_MODE_*`):
+    /// one plain word (`Layout::Word`) in a `Vec` of it and in a host call's
+    /// argument, a number or a word that may name an object; anything else
+    /// (a pair, a niche word, a wide element, packed bytes, a type
+    /// parameter) is `WORD_MODE_OTHER`.
+    fn map_word_mode(&self, ty: &Ty) -> i64 {
+        use crate::layout::Layout;
+        use crate::typechecking::ty::{BYTE, ftv_ty, strip_readonly};
+        let c = &self.checker;
+        if !ftv_ty(ty).is_empty()
+            || matches!(strip_readonly(ty), Ty::Con(n) if n == BYTE)
+            || !matches!(crate::layout::of_resolved(c, ty), Layout::Word)
+            || crate::layout::wide_scalar_items(c, ty).is_some()
+        {
+            return common::WORD_MODE_OTHER;
+        }
+        match crate::layout::word_kind(c, ty) {
+            common::WORD_SCALAR => common::WORD_MODE_NUMBER,
+            common::WORD_POINTER => common::WORD_MODE_OBJECT,
+            _ => common::WORD_MODE_OTHER,
+        }
     }
 
     pub(super) fn hir_instance(&self, body: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> HirBody {

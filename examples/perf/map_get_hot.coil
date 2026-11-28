@@ -1,0 +1,30 @@
+// CPU: `m.get(k)` on a ground `HashMap` whose values are containers
+// (#2958). The `Option<V>` result is a top-level open enum in `get`'s
+// generic body; its per-type clone keeps it as the niche word, so a
+// lookup boxes nothing and takes no dictionary.
+use io::sync::println;
+use string::format;
+use collections::map::HashMap;
+
+fn main() {
+    let m: HashMap<int, Vec<int>> = HashMap::new();
+    let k = 0;
+    while k < 64 {
+        m.insert(k, [k, k + 1, k + 2]);
+        k += 1;
+    }
+    let total = 0;
+    let i = 0;
+    while i < 3000000 {
+        match m.get(i & 127) {
+            Some(v) => {
+                total += v.len();
+            },
+            None => {
+                total += 1;
+            },
+        }
+        i += 1;
+    }
+    let _ = println(format("%i", total));
+}

@@ -570,7 +570,7 @@ layout is refused.
 
 ## Map table ops
 
-`HostInvoke`s of `map_find`, `map_upsert`, `map_live` and `map_len`
+`HostInvoke`s of `map_find`, `map_upsert`, `map_put`, `map_live` and `map_len`
 (`key_index::map_*`, [key-index.md](key-index.md), "Map tables") and of
 `hash_string` run in place (`lower_map_op`), with the host call as the cold
 path. A find or upsert runs in place only when its key mode is a constant
@@ -592,9 +592,23 @@ strings. An upsert runs in place only where pushes may be written in place
   cells stay at most half full and the storage has room. Otherwise
   (growth, a full `Vec`) it leaves everything to the native. The table's
   views are dropped after an upsert.
+- A `map_put` (constant key mode, constant value mode `1` or `2`,
+  constant `replace`) reads the map object's three fields with
+  `product_slot_view`, checks each is an array (tag only), and takes the
+  host call when any field's header has `FLAG_SHARED`: the native makes it
+  unique. A hit with `replace` checks the slot against the values' length,
+  stores the value and, for object values, counts the new one up and the
+  old one down. A miss also checks that the keys and values are one per
+  slot and have room, then writes the cell and appends both, counting
+  object words. Growth takes the host call. The views are dropped after.
 - `hash_string` reads the hash cached in the string's header
   (`string_slots`: the kind byte, `ObjString`'s hash word and its "set"
-  bit) and calls the native when the hash is not cached yet.
+  bit). When it is not cached yet (a string just built, lowered or split)
+  it takes the bytes from `coil_native_str_view` (a leaf helper, no host
+  call), runs FNV-1a over them in place (`machine::native::FNV_BASIS` /
+  `FNV_PRIME`, as `ObjString::hash`) and caches `HASH_SET | h` in the
+  header as `ObjString::hash_code` does. Only a word that is not a string
+  object itself calls the native.
 
 `layout_fingerprint` covers `string_slots`.
 
