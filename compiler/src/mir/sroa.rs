@@ -131,7 +131,7 @@ pub fn forward_tuple_loads(func: &mut MirFunc) -> usize {
         .filter_map(|i| match i {
             MirInst::HeapFieldStore { object, .. } => Some(*object),
             MirInst::StoreIndex { array, .. } => Some(*array),
-            MirInst::Cow { src, .. } => Some(*src),
+            MirInst::Cow { src, .. } | MirInst::CowIndex { array: src, .. } => Some(*src),
             _ => None,
         })
         .collect();

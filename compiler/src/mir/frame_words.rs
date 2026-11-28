@@ -153,7 +153,8 @@ pub fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
                 | MirInst::LanesToWords { dest, .. }
                 | MirInst::Format { dest, .. }
                 | MirInst::Stringify { dest, .. }
-                | MirInst::Cow { dest, .. } => pending = Some(*dest),
+                | MirInst::Cow { dest, .. }
+                | MirInst::CowIndex { dest, .. } => pending = Some(*dest),
                 MirInst::GcBarrier { dest, .. } => {
                     if let Some(obj) = pending.take() {
                         out.entry(*dest).or_insert(obj);

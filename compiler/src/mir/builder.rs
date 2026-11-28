@@ -1335,6 +1335,21 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// [`MirInst::CowIndex`]: unique element `index` of `array` in place.
+    pub fn ins_cow_index(&mut self, array: ValueId, index: ValueId) -> Result<ValueId, MirError> {
+        let (array, index) = (self.resolve(array), self.resolve(index));
+        let at = self.resolve_ty(array);
+        if at != MirTy::HeapRef {
+            return Err(MirError::msg(format!("CowIndex array is {at}")));
+        }
+        if !self.resolve_ty(index).is_int() {
+            return Err(MirError::msg("CowIndex index is no int"));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::CowIndex { dest, array, index })?;
+        Ok(dest)
+    }
+
     /// [`MirInst::CowPin`] of `src`: whether its object was pinned.
     pub fn ins_cow_pin(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         let src = self.resolve(src);

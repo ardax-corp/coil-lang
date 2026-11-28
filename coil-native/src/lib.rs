@@ -1581,6 +1581,11 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(src)?;
                         }
                     }
+                    MirInst::CowIndex { dest, array, index } => {
+                        need(dest)?;
+                        need_heap(array)?;
+                        need_scalar(index)?;
+                    }
                     MirInst::CowPin { dest, src } => {
                         need_scalar(dest)?;
                         need(src)?;
@@ -1855,6 +1860,7 @@ struct Ids {
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
+    cow_index: FuncId,
     /// Reference count ops (`coil_native_rc`).
     rc: FuncId,
     /// Reuse in place (`coil_native_rc_reuse`, `coil_native_rc_take`,
@@ -2416,6 +2422,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
+    let cow_index = module.declare_function("coil_native_cow_index", Linkage::Import, &s3).map_err(e)?;
     let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
     let rc_reuse = module.declare_function("coil_native_rc_reuse", Linkage::Import, &s3).map_err(e)?;
     let rc_take = module.declare_function("coil_native_rc_take", Linkage::Import, &s3).map_err(e)?;
@@ -2488,6 +2495,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         fn_entry_pair,
         cow,
         cow_field,
+        cow_index,
         rc,
         rc_reuse,
         rc_take,
@@ -2792,6 +2800,7 @@ struct Lower<'a> {
     runtime_ffi: bool,
     cow: FuncRef,
     cow_field: FuncRef,
+    cow_index: FuncRef,
     rc: FuncRef,
     rc_reuse: FuncRef,
     rc_take: FuncRef,
@@ -2965,6 +2974,7 @@ impl<'a> Lower<'a> {
         let entry_sig = func.import_signature(entry_signature(module));
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
+        let cow_index = module.declare_func_in_func(ids.cow_index, func);
         let rc = module.declare_func_in_func(ids.rc, func);
         let rc_reuse = module.declare_func_in_func(ids.rc_reuse, func);
         let rc_take = module.declare_func_in_func(ids.rc_take, func);
@@ -3070,6 +3080,7 @@ impl<'a> Lower<'a> {
             runtime_ffi: false,
             cow,
             cow_field,
+            cow_index,
             rc,
             rc_reuse,
             rc_take,
@@ -5170,7 +5181,7 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let array = match inst {
-                    MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
+                    MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } | MirInst::CowIndex { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
                         self.stored.insert(*array);
                         *array
@@ -6645,6 +6656,52 @@ impl<'a> Lower<'a> {
                 self.b.ins().jump(done, &[w.into()]);
                 self.b.switch_to_block(done);
                 self.set_word(f, *dest, word);
+                self.view_of(f, *dest);
+            }
+            // An element's copy test: the element read as `Index` reads it
+            // (its bounds checked there), then the unique test on it; only a
+            // shared class instance or array calls the helper, which copies
+            // it and stores the copy back.
+            MirInst::CowIndex { dest, array, index } => {
+                let a = self.get(f, *array);
+                let a = self.coerce(a, types::I64);
+                let i = self.get(f, *index);
+                let (fast, slow, join) = self.in_view(f, *array, i, true);
+                self.b.switch_to_block(fast);
+                let at = self.element(*array, i);
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(slow);
+                let call = self.call_checked(self.index, &[self.ctx, a, i]);
+                let w = self.b.inst_results(call)[0];
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let elem = self.b.block_params(join)[0];
+                let t = MemFlagsData::trusted();
+                let (call_b, done) = (self.b.create_block(), self.b.create_block());
+                let (object, plain) = self.maybe_object(elem);
+                self.b.switch_to_block(plain);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(object);
+                let o = self.b.ins().band_imm_u(elem, !1i64);
+                let k = self.b.ins().uload8(types::I64, t, o, machine::HEADER_KIND_OFFSET);
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let either = self.b.ins().bor(inst, arr);
+                let flag_b = self.b.create_block();
+                self.b.ins().brif(either, flag_b, &[], done, &[]);
+                self.b.switch_to_block(flag_b);
+                let bits = self.b.ins().uload8(types::I64, t, o, machine::HEADER_FLAGS_OFFSET);
+                let shared = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_SHARED));
+                self.b.ins().brif(shared, call_b, &[], done, &[]);
+                self.b.set_cold_block(call_b);
+                self.b.switch_to_block(call_b);
+                let i = self.coerce(i, types::I64);
+                self.b.ins().call(self.cow_index, &[self.ctx, a, i]);
+                self.bail_on_helper();
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                self.set_word(f, *dest, a);
                 self.view_of(f, *dest);
             }
             MirInst::Cow { dest, src, unique, field } => {

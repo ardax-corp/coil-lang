@@ -356,7 +356,7 @@ fn used_as_numbers(func: &MirFunc, returns_number: bool) -> HashSet<ValueId> {
             let ok = |v: ValueId| match i {
                 MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
                 MirInst::Cmp { .. } => true,
-                MirInst::Index { array, .. } | MirInst::LaneIndex { array, .. } => *array != v,
+                MirInst::Index { array, .. } | MirInst::LaneIndex { array, .. } | MirInst::CowIndex { array, .. } => *array != v,
                 MirInst::StoreIndex { array, value, .. } => *array != v && *value != v,
                 MirInst::Phi { dest, .. } => set.contains(dest),
                 _ => false,
@@ -391,7 +391,7 @@ fn computed_with(func: &MirFunc, v: ValueId) -> bool {
     func.blocks.iter().flat_map(|b| &b.insts).any(|i| match i {
         MirInst::Bin { op, lhs, rhs, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor) && (*lhs == v || *rhs == v),
         MirInst::Cmp { op, lhs, rhs, .. } => !matches!(op, MirCmpOp::Eq | MirCmpOp::Ne) && (*lhs == v || *rhs == v),
-        MirInst::Index { index, .. } | MirInst::LaneIndex { index, .. } | MirInst::StoreIndex { index, .. } => *index == v,
+        MirInst::Index { index, .. } | MirInst::LaneIndex { index, .. } | MirInst::StoreIndex { index, .. } | MirInst::CowIndex { index, .. } => *index == v,
         _ => false,
     })
 }
@@ -449,6 +449,7 @@ fn reads_only(inst: &MirInst, v: ValueId, pure: &HashSet<ValueId>) -> bool {
         MirInst::StoreIndex { scalar: true, array, index, .. } => *array == v && *index != v,
         MirInst::ArrayPush { array, value, .. } => *array == v && *value != v,
         MirInst::Cow { field: Some(_), src, .. } => *src == v,
+        MirInst::CowIndex { array, index, .. } => *array == v && *index != v,
         _ => false,
     }
 }
@@ -623,7 +624,8 @@ fn cancel_pairs(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
             | MirInst::LoadStatic { dest, .. }
             | MirInst::Cow { dest, unique: false, field: None, .. }
             // The field's word after the copy, which the holder owns.
-            | MirInst::Cow { dest, field: Some(_), .. } => Some(*dest),
+            | MirInst::Cow { dest, field: Some(_), .. }
+            | MirInst::CowIndex { dest, .. } => Some(*dest),
             _ => None,
         })
         .collect();

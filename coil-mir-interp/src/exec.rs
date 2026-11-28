@@ -1012,6 +1012,17 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
                 set_word(f, regs, *dest, w);
             }
+            MirInst::CowIndex { dest, array, index } => {
+                let a = get!(*array);
+                let mark = rt::cow_report_mark(ctx);
+                let w = rt::coil_native_cow_index(ctx, a, get!(*index) as i64);
+                check!();
+                if let Some(mark) = mark {
+                    let top = (&(*act).frames).last().expect("a running frame");
+                    rt::cow_report_note(ctx, mark, body.site_at(top.block, top.ip));
+                }
+                set_word(f, regs, *dest, w);
+            }
             MirInst::CowPin { dest, src } => {
                 let s = get!(*src);
                 set!(*dest, rt::cow_pin(ctx, s));

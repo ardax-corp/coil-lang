@@ -581,6 +581,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::Cow { .. }
+        | MirInst::CowIndex { .. }
         | MirInst::CowPin { .. }
         | MirInst::CowUnpin { .. }
         | MirInst::RcInc { .. }

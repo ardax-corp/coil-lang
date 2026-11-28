@@ -148,6 +148,8 @@ impl MirInst {
             Self::RcInc { .. } | Self::RcDec { .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
             // A decrement that may keep the object's slot for an `AllocAt`.
             Self::RcReuse { .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
+            // As a unique, and out of bounds it traps, as an `Index` does.
+            Self::CowIndex { .. } => OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, traps: Traps::Yes, ..P },
             Self::Format { .. } | Self::Stringify { .. } | Self::Cow { .. } => {
                 OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, ..P }
             }

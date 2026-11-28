@@ -320,6 +320,12 @@ pub const MIR_SECTION_WIDE_LANES_FORMAT: u8 = 25;
 /// targets. A reader refuses format 25, whose sets sit elsewhere.
 pub const MIR_SECTION_MAYBE_OBJ_FORMAT: u8 = 26;
 
+/// The first MIR section format with an element made unique in place
+/// (archive 8.16): `CowIndex`, tag 58, an array's element `array[index] =
+/// unique(array[index])` in one op. A reader refuses format 26, which has
+/// none.
+pub const MIR_SECTION_COW_INDEX_FORMAT: u8 = 27;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

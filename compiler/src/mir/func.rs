@@ -1193,6 +1193,11 @@ impl MirFunc {
                     return Err(format!("{dest} Cow type"));
                 }
             }
+            MirInst::CowIndex { dest, array, index } => {
+                if self.vty(*dest) != MirTy::HeapRef || self.vty(*array) != MirTy::HeapRef || !self.vty(*index).is_int() {
+                    return Err(format!("{dest} CowIndex type"));
+                }
+            }
             MirInst::CowPin { dest, src } => {
                 if self.vty(*dest) != MirTy::Bool || self.vty(*src) != MirTy::HeapRef {
                     return Err(format!("{dest} CowPin type"));
