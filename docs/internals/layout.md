@@ -399,7 +399,8 @@ clones (`nested_head` in `plan_instance_dict_steps`, and a slot whose
 method's own signature reaches one, `HashMapIter::next -> Option<Pair<K,
 V>>`). A trait instance's method with an `Option` / `Result` in its
 signature (a boundary signature) is cloned there, which elsewhere only a
-`for` loop's `next` is (#2909): its dictionary slot holds the clone's `$dict` adapter,
+`for` loop's `next` and a plain ground call are (#2909,
+[generic-specialization.md](generic-specialization.md)): its dictionary slot holds the clone's `$dict` adapter,
 which converts the result from the clone's own layout to the trait's
 (`instance_clone_own_sig`); a ground call, a direct trait call and
 for-in (`hir_next_clone`) call the clone where the result is wanted in its

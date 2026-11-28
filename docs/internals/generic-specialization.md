@@ -98,26 +98,44 @@ their own layout and bounds resolve statically.
   a clone use the clone, so `sort`'s call to `merge_range` is cloned too.
 - **Gates.** A clone falls back to the shared body (through a boxing thunk)
   when its types mean something else to the old module (`knows_tys`: a
-  class declared later is not in its checker), or when the generic body
-  holds an enum over its type parameters below the top (`layout_safe`: an
-  element of `Vec<Option<T>>`, a class holding one, an enum's payload, which
-  the clone would read and write in its layout and the shared bodies in
-  theirs, as `task::Channel`'s buffer would). An open enum at the top, the
-  result of `HashMap::get -> Option<V>` or a local, is the clone's own
-  value, and a field holds one in its declared layout in either body
-  (`hir_field_rep`), so such a body clones (#2958). A generic enum's method, and a generic whose
-  signature holds a nested open enum (clone-only, `fn_sig_split`), are
-  compiled from their body anyway: no ground call of the latter reaches
-  its shared body, so nothing reads its values in the other layout
-  ([layout.md](layout.md), "Open enums", #2547). So is a generic whose
-  signature or instance head reaches a generic class instance holding a
-  field flat at the call's types (`Cell<Option<int>>`, `fn_flat_split`;
-  layout.md, "Flat instances"). A class whose module does not know the
+  class or enum declared later, or a tuple or array, is not in its
+  checker's terms). Otherwise it is compiled
+  from the body, whatever open enums the body holds (`layout_safe`). One
+  at the top, the result of `HashMap::get -> Option<V>` or a local, is the
+  clone's own value, and a field holds one in its declared layout in either
+  body (`hir_field_rep`; #2958). One below the top, a local
+  `Result<Result<T, E>, E>` in `task::timeout` or a `Vec<Option<T>>`, is
+  the clone's own too: such a value reaches another body only through a
+  signature that holds it, and every such signature is clone-only
+  (`fn_sig_split`; a class holding one is a nested open enum wherever it
+  is named), so the body that receives it is a ground clone reading the
+  same layout, as in this module's own mono clones
+  ([layout.md](layout.md), "Open enums", #2547). A generic whose signature
+  or instance head reaches a generic class instance holding a field flat
+  at the call's types (`Cell<Option<int>>`, `fn_flat_split`; layout.md,
+  "Flat instances") is cloned too. A class whose module does not know the
   types has no flat instance there, so its shared bodies agree with the
   instance's one-word field.
+- **Cloning in the caller's module.** A clone whose types the old module
+  does not know (a user class of the entry module passed to
+  `num::min`, `KeyIndex<Shape>`, `Result<T, task::TaskError>` seen from
+  `core`) is still a thunk. Compiling it in the caller's module, which
+  knows the types, needs the generic's body in a form that does not depend
+  on the old module's checker: the HIR body is lowered against that
+  checker's type, trait-impl and field tables, and the old module's private
+  names resolve only there. Either the HIR would carry its types and
+  resolved impls in a module-independent form, or the later module's
+  class, enum and impl facts would be ported into the old checker before
+  the clone lowers. Neither is done yet. A tuple or array over known types
+  would mean the same in the old module, but a clone there at one does not
+  lower natively yet: a bound's operator (`<` in `insertion_range` at
+  `(int, int)`, E0801 `operator`) and a bound method call on the class's
+  parameter (`k.hash()` in `HashMap<(int, int), V>::insert`, E0801
+  `callee-trait`) are refused, though the MIR interpreter runs both.
 
 Tests: `namespace::foreign_option_result_method_clone_compiles_from_its_body`,
-`namespace::foreign_for_in_next_takes_its_clone`; benches
+`namespace::foreign_for_in_next_takes_its_clone`,
+`namespace::foreign_clone_holding_a_nested_open_enum_compiles_from_its_body`; benches
 `examples/perf/map_get_hot.coil`, `examples/perf/map_walk_hot.coil`.
 
 ## A `for` loop's `next` with an open enum in the trait's signature
@@ -128,13 +146,21 @@ over a ground iterator calls `next`'s clone (`hir_next_clone`,
 `instance_clone_own_layout`) and reads its result in the clone's own
 layout, so `for p in m` over a `HashMap<int, int>` runs
 `HashMapIter::next`'s clone, not the shared body through the `Iterator`
-dictionary (#2909). Other callers of such a method keep the shared entry
-(`Compiler::boundary_clone`): a plain method call (`xs.min()` through
-`VecOrd`) reads the trait's layout, and a dictionary slot holds the shared
-entry. So does every caller where the clone would be a thunk around the
-shared entry (another module that does not know the types, `knows_tys`),
-which returns the trait's layout. A flat instance's method is cloned for
-every caller, as before.
+dictionary (#2909). A plain ground call of such a method (`xs.first()`
+through `VecOps`, `xs.min()` through `VecOrd`) does the same: the call
+site asks `Compiler::own_layout_clone`, and when the clone is compiled
+from its body it calls the clone and reads the result in the clone's
+layout (`ground_instance_clone`, `own_layout`). Not at an instance whose
+head is an open enum (`impl Wrap for Option<T>`): its call site boxes the
+receiver as the shared entry takes it. A dictionary slot still
+holds the shared entry (`Compiler::boundary_clone`), and so does every
+caller where the clone would be a thunk around the shared entry (another
+module that does not know the types, `knows_tys`), which returns the
+trait's layout. A flat instance's method is cloned for every caller, as
+before.
+
+Tests: `namespace::foreign_boundary_trait_method_call_takes_its_clone`,
+`tests/traits/assoc_option_result_direct_call.coil`.
 
 ## How many clones
 
