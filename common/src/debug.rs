@@ -321,7 +321,7 @@ pub const MIR_SECTION_WIDE_LANES_FORMAT: u8 = 25;
 pub const MIR_SECTION_MAYBE_OBJ_FORMAT: u8 = 26;
 
 /// The first MIR section format with an element made unique in place
-/// (archive 8.16): `CowIndex`, tag 58, an array's element `array[index] =
+/// (archive 8.17): `CowIndex`, tag 58, an array's element `array[index] =
 /// unique(array[index])` in one op. A reader refuses format 26, which has
 /// none.
 pub const MIR_SECTION_COW_INDEX_FORMAT: u8 = 27;

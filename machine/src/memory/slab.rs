@@ -38,6 +38,10 @@ impl PageMeta {
     }
 }
 
+/// Small 8-aligned slot sizes with a direct class index
+/// ([`Slab::small`]): up to `8 * SMALL_CLASSES` bytes.
+const SMALL_CLASSES: usize = 64;
+
 const SEGS: usize = 32;
 const SEG0: usize = 64;
 
@@ -279,6 +283,11 @@ pub struct Slab {
     /// Free lists keyed by `(slot_size, align)`. A handful of classes; a
     /// linear scan is cheaper than hashing the pair on every alloc.
     free: FreeLists,
+    /// Index + 1 in [`Self::free`] of the class `(8 * i, 8)` for the small
+    /// 8-aligned classes (0: none yet), so the alloc and free fast paths
+    /// find a class with one load instead of a scan. Classes are only
+    /// ever appended, so an index stays valid.
+    small: [u8; SMALL_CLASSES],
     /// Empty chunks whose pages went back to the OS, by `(slot_size, align)`.
     /// They stay mapped (zero pages read as poisoned headers) and are
     /// re-carved before a new chunk is mapped. Chunk indices.
@@ -366,6 +375,7 @@ impl Slab {
         Self {
             chunks: ChunkTable::new(),
             free: Vec::new(),
+            small: [0; SMALL_CLASSES],
             released: Vec::new(),
             recent: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
             released_mask: Vec::new(),
@@ -482,15 +492,24 @@ impl Slab {
     }
 
     /// Give a young slot (already poisoned) back to its class's nursery.
+    #[cfg(test)]
     pub fn free_young(&mut self, ptr: NonNull<u8>) {
         let Some((_, meta)) = self.chunk_for(ptr.as_ptr() as u64) else {
             debug_assert!(false, "slab free of unmapped pointer");
             return;
         };
         let key = (meta.slot_size, meta.slot_align);
+        self.free_young_in_class(key, ptr);
+    }
+
+    /// [`Self::free_young`] of a slot of class `key`, which the caller
+    /// knows (its object's layout): no chunk lookup.
+    #[inline]
+    pub fn free_young_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
+        self.debug_check_class(key, ptr);
         let cursor = self.young.iter().find(|c| c.key == key).map(|c| c.cursor);
         if let Some(cursor) = cursor
-            && meta.slot_size as u64 >= FREE_LINK + 8
+            && u64::from(key.0) >= FREE_LINK + 8
         {
             let bump = &mut self.bumps[cursor];
             // SAFETY: the slot is this class's, freed and poisoned; its
@@ -611,15 +630,42 @@ impl Slab {
         }
     }
 
+    /// The free list of class `key`, if it has one.
+    #[inline]
+    fn class_mut(&mut self, key: (u32, u32)) -> Option<&mut FreeClass> {
+        if let Some(i) = small_index(key) {
+            let at = self.small[i] as usize;
+            return if at == 0 { None } else { self.free.get_mut(at - 1) };
+        }
+        self.free.iter_mut().find(|c| c.key == key)
+    }
+
+    /// Append a new class's free list (none of `key` yet).
+    #[cold]
+    fn push_class(&mut self, class: FreeClass) {
+        debug_assert!(self.free.iter().all(|c| c.key != class.key));
+        let small = small_index(class.key);
+        self.free.push(class);
+        if let Some(i) = small {
+            self.small[i] = u8::try_from(self.free.len()).expect("at most 255 slab size classes");
+        }
+    }
+
+    #[inline]
     pub fn alloc(&mut self, layout: Layout) -> NonNull<u8> {
         let (slot_size, align) = slot_dims(layout);
         let key = (slot_size as u32, align as u32);
-        if let Some(class) = self.free.iter_mut().find(|c| c.key == key)
+        if let Some(class) = self.class_mut(key)
             && let Some(p) = class.slots.pop()
         {
             class.low_water = class.low_water.min(class.slots.len());
             return p;
         }
+        self.alloc_slow(slot_size, align)
+    }
+
+    #[inline(never)]
+    fn alloc_slow(&mut self, slot_size: usize, align: usize) -> NonNull<u8> {
         self.carve_page(slot_size, align)
     }
 
@@ -649,13 +695,13 @@ impl Slab {
         if slots.is_empty() {
             return;
         }
-        if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
+        if let Some(class) = self.class_mut(key) {
             class.slots.append(slots);
             return;
         }
         let rest = std::mem::take(slots);
         let low_water = rest.len();
-        self.free.push(FreeClass {
+        self.push_class(FreeClass {
             key,
             slots: rest,
             low_water,
@@ -671,12 +717,30 @@ impl Slab {
         self.free_in_class(key, ptr);
     }
 
+    /// Put a free slot of class `key` (the caller knows it: a batch's, or
+    /// its object's layout's) on that class's list: no chunk lookup.
+    #[inline]
     pub fn free_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
-        if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
+        self.debug_check_class(key, ptr);
+        if let Some(class) = self.class_mut(key) {
             class.slots.push(ptr);
             return;
         }
-        self.free.push(FreeClass {
+        self.new_free_class(key, ptr);
+    }
+
+    /// Debug builds: `ptr` is a slot of a chunk of class `key`.
+    #[inline]
+    fn debug_check_class(&self, key: (u32, u32), ptr: NonNull<u8>) {
+        if cfg!(debug_assertions) {
+            let meta = self.chunk_for(ptr.as_ptr() as u64).map(|(_, m)| (m.slot_size, m.slot_align));
+            debug_assert_eq!(meta, Some(key), "slot {ptr:p} freed into another size class");
+        }
+    }
+
+    #[cold]
+    fn new_free_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
+        self.push_class(FreeClass {
             key,
             slots: vec![ptr],
             low_water: 0,
@@ -708,9 +772,22 @@ impl Slab {
         }
         let n = self.chunks.len();
         let mut free = vec![0usize; n];
+        // A free list runs through a few chunks in order (a chunk is carved
+        // into it in address order, a sweep pushes a chunk's slots one after
+        // another): the last chunk found answers most lookups.
+        let last = std::cell::Cell::new((u64::MAX, 0usize));
+        let position = |chunks: &ChunkTable, addr: u64| {
+            let (start, i) = last.get();
+            if addr.wrapping_sub(start) < CHUNK as u64 {
+                return Some(i);
+            }
+            let i = chunks.position(addr)?;
+            last.set((chunks.get(i)?.ptr as u64, i));
+            Some(i)
+        };
         let chunks = &self.chunks;
         let mut tally = |addr: u64, k: usize| {
-            if let Some(i) = chunks.position(addr) {
+            if let Some(i) = position(chunks, addr) {
                 free[i] += k;
             }
         };
@@ -760,7 +837,7 @@ impl Slab {
             return 0;
         }
         let chunks = &self.chunks;
-        let gone = |addr: u64| chunks.position(addr).is_some_and(|i| empty[i]);
+        let gone = |addr: u64| position(chunks, addr).is_some_and(|i| empty[i]);
         for class in &mut self.free {
             class.slots.retain(|p| !gone(p.as_ptr() as u64));
             class.low_water = class.low_water.min(class.slots.len());
@@ -900,11 +977,11 @@ impl Slab {
         // order, so objects allocated (or copied) one after another sit
         // that way too (locality step 5).
         rest.reverse();
-        if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
+        if let Some(class) = self.class_mut(key) {
             class.slots.append(&mut rest);
         } else if !rest.is_empty() {
             let low_water = rest.len();
-            self.free.push(FreeClass {
+            self.push_class(FreeClass {
                 key,
                 slots: rest,
                 low_water,
@@ -953,6 +1030,13 @@ impl Drop for Slab {
             unmap(c.ptr, CHUNK);
         }
     }
+}
+
+/// The [`Slab::small`] entry of class `key`, if it is a small 8-aligned one.
+#[inline]
+fn small_index((size, align): (u32, u32)) -> Option<usize> {
+    let i = size as usize / 8;
+    (align == 8 && size.is_multiple_of(8) && i < SMALL_CLASSES).then_some(i)
 }
 
 fn slot_dims(layout: Layout) -> (usize, usize) {

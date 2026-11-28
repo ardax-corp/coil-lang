@@ -924,6 +924,16 @@ impl VirtualModules {
                 ("clear", common::KEY_INDEX_CLEAR_NATIVE),
                 ("find", common::KEY_INDEX_FIND_NATIVE),
                 ("eq_mode", common::KEY_INDEX_EQ_MODE_NATIVE),
+                ("map_table", common::MAP_TABLE_NATIVE),
+                ("map_find", common::MAP_FIND_NATIVE),
+                ("map_upsert", common::MAP_UPSERT_NATIVE),
+                ("map_probe", common::MAP_PROBE_NATIVE),
+                ("map_add", common::MAP_ADD_NATIVE),
+                ("map_live", common::MAP_LIVE_NATIVE),
+                ("map_len", common::MAP_LEN_NATIVE),
+                ("map_remove", common::MAP_REMOVE_NATIVE),
+                ("map_compact", common::MAP_COMPACT_NATIVE),
+                ("map_clear", common::MAP_CLEAR_NATIVE),
             ]),
         );
 

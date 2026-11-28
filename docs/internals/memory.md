@@ -162,9 +162,19 @@ A chunk is empty when its free slots (free lists, a nursery class's freed slots 
 its bump chunk) are all of its slots. A released chunk reads as zeros, so its headers are
 poisoned, and it is carved again before a new chunk is mapped.
 
+A free never looks its chunk up: `Heap::dealloc` takes the slot's class from the object's kind
+(`Layout::new::<GcData<T>>()`, the class every allocation path takes a slot of) and pushes the slot
+on that class's list (`Slab::free_in_class`). Small 8-aligned classes find their list through a
+direct index (`Slab::small`), on alloc too. The release scan's per-slot chunk lookup reuses the
+last chunk it found, since a free list runs through a few chunks in order.
+
 Releasing an array frees its leaf elements in place (`rc_release_elements`) instead of queuing
 one worklist entry per element, so a large array of plain objects frees without a transient
-buffer the size of the array.
+buffer the size of the array. A string at count zero that no weak handle names and the intern
+table never took is freed in one test (`rc_free_plain_string`), there and in `rc_release`: no
+leaf, releasable or weak-list checks of the general path. Native code's inline decrement that finds
+a typed word's last owner calls the runtime with flag 3 (`coil_native_rc`), which takes the word
+as a slot start without a slot search.
 
 The `region` hooks (host ids 177/178) are no-ops kept so later ids do not move.
 

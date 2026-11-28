@@ -241,6 +241,8 @@ host_groups! {
     68 => |o, r| push_wiring(o, r, crate::vec_ops::VEC_STAMP_WIRING);
     // Append-only after vec_stamp: auto-par's pool probe (minor 12).
     69 => |o, r| push_wiring(o, r, crate::thread::PAR_ROOM_WIRING);
+    // Append-only after the pool probe: `key_index::map_*` (minor 16).
+    70 => |o, r| push_wiring(o, r, crate::map_table::MAP_TABLE_WIRING);
 }
 
 /// Each standard group's first id and how many natives it pushes, by
@@ -1341,7 +1343,9 @@ mod tests {
         assert_eq!(names.get(213).map(String::as_str), Some(common::VEC_ROTATE_IN_NATIVE));
         assert_eq!(names.get(214).map(String::as_str), Some(common::STARTUP_RESTORE_NATIVE));
         assert_eq!(names.get(215).map(String::as_str), Some(common::VEC_STAMP_NATIVE));
-        assert_eq!(names.last().map(String::as_str), Some(common::THREAD_PAR_ROOM_NATIVE));
+        assert_eq!(names.get(216).map(String::as_str), Some(common::THREAD_PAR_ROOM_NATIVE));
+        assert_eq!(names.get(217).map(String::as_str), Some(common::MAP_TABLE_NATIVE));
+        assert_eq!(names.last().map(String::as_str), Some(common::MAP_CLEAR_NATIVE));
         assert_eq!(attach, 119);
     }
 
@@ -1766,7 +1770,15 @@ mod tests {
             registrations.get(end + 80).map(|(n, _)| n.as_str()),
             Some(common::THREAD_PAR_ROOM_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 81);
+        assert_eq!(
+            registrations.get(end + 81).map(|(n, _)| n.as_str()),
+            Some(common::MAP_TABLE_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 90).map(|(n, _)| n.as_str()),
+            Some(common::MAP_CLEAR_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 91);
     }
 
     #[test]

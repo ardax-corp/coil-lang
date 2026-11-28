@@ -221,7 +221,7 @@ const I_STORE_INDEX_SCALAR: u8 = 55;
 /// Reuse in place (format 24, archive 8.11).
 const I_RC_REUSE: u8 = 56;
 const I_ALLOC_AT: u8 = 57;
-/// An element made unique in place (format 27, archive 8.16).
+/// An element made unique in place (format 27, archive 8.17).
 const I_COW_INDEX: u8 = 58;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];

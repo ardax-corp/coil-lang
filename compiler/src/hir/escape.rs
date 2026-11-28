@@ -524,11 +524,40 @@ const FRESH_HOSTS: &[&str] = &[
     "with_capacity",
     // `key_index::table`: a new, empty table (`HashMap::new`, #2821).
     "key_index_table",
+    // `key_index::map_table`: a new, empty map table.
+    "map_table",
 ];
 
 /// Host natives with effects that still keep nothing they are passed: the
 /// buffer of a `write` is read during the call only.
-const NON_RETAINING_HOSTS: &[&str] = &["write", "write_from", "write_all", "read", "print", "println", "eprint", "eprintln"];
+/// The map table natives (`key_index::map_*`) read their key and keys and
+/// write numbers into the table only.
+const NON_RETAINING_HOSTS: &[&str] = &[
+    "write",
+    "write_from",
+    "write_all",
+    "read",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "map_find",
+    "map_upsert",
+    "map_probe",
+    "map_add",
+    "map_live",
+    "map_len",
+    "map_remove",
+    "map_compact",
+    "map_clear",
+];
+
+/// Host natives that write their first argument and no other: the map
+/// table natives that change the table (`map_upsert` only reads the keys
+/// `Vec` it is handed), so copy-on-write makes only the table unique.
+pub(super) fn writes_first_arg_only(name: &str) -> bool {
+    matches!(name, "map_upsert" | "map_add" | "map_remove" | "map_compact" | "map_clear")
+}
 
 /// The registry name of a host function export that is in [`FRESH_HOSTS`]
 /// under it, where its surface name differs (`key_index::table` is

@@ -89,7 +89,7 @@ impl Compiler {
                     .filter(|&a| self.hir_ffi_callback(hir, *builtin, a).is_none())
                     .collect(),
             ),
-            HirKind::Call { .. } if matches!(call(), Some(HirCall { builtin: Some(HirBuiltin::Ffi { .. } | HirBuiltin::Matrix), .. })) => Kids::All,
+            HirKind::Call { .. } if matches!(call(), Some(HirCall { builtin: Some(HirBuiltin::Ffi { .. } | HirBuiltin::Matrix | HirBuiltin::Identity), .. })) => Kids::All,
             HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) && matches!(call(), Some(HirCall { builtin: Some(HirBuiltin::Format), .. })) => Kids::Rest,
             _ => Kids::All,
         }
@@ -691,7 +691,7 @@ impl Compiler {
                     t.ffi = Some(site);
                 }
             }
-            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
+            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix | HirBuiltin::Identity))) => {
                 t.matrix_wrap = true;
             }
             HirKind::Call { args, .. }

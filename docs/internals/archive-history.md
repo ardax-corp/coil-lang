@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 16, below, is the
-current version, 8.16 with MIR section `FORMAT` 27). A runtime refuses a major
+only add something to the format raise the minor (minor 17, below, is the
+current version, 8.17 with MIR section `FORMAT` 27). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -229,13 +229,22 @@ targets). The layout changes, so the MIR section is a new `FORMAT`, 26
 (`common::MIR_SECTION_MAYBE_OBJ_FORMAT`), and the reader refuses 25: an
 8.14 archive's code is compiled again.
 
-Minor 16 (element unique in place) adds the MIR op `CowIndex { dest,
+Minor 16 (map tables) adds host natives **217**-**226**, `key_index::map_*`:
+`map_table`, `map_find`, `map_upsert`, `map_probe`, `map_add`, `map_live`,
+`map_len`, `map_remove`, `map_compact` and `map_clear`, one word array per
+index of `{hash, slot}` cells and each slot's cell
+([key-index.md](key-index.md), "Map tables"). Native code runs `map_find`,
+`map_upsert`, `map_live` and `map_len` in place, and `hash_string` reads a
+string's cached hash in place. An 8.15 archive loads unchanged: it never
+calls them.
+
+Minor 17 (element unique in place) adds the MIR op `CowIndex { dest,
 array, index }`, tag 58 (`cow.unique_index`): `array[index] =
 unique(array[index])` in one op, which writes the element back only when it
 copied, as `Cow` with a field does for a field. The runtime gains the helper
 `coil_native_cow_index`. The MIR section is a new `FORMAT`, 27
 (`common::MIR_SECTION_COW_INDEX_FORMAT`), and the reader refuses 26: an
-8.15 archive's code is compiled again.
+8.16 archive's code is compiled again.
 
 ## Major 7
 

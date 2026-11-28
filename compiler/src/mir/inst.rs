@@ -794,7 +794,7 @@ pub enum MirInst {
         field: Option<u32>,
     },
     /// Copy-on-write unique of element `index` of the array `array`, in
-    /// place (archive 8.16): `array[index] = unique(array[index])` in one
+    /// place (archive 8.17): `array[index] = unique(array[index])` in one
     /// instruction, writing the element back only when it copied. Traps
     /// out of bounds as [`Self::Index`] does. Dest is `array`'s word, as
     /// [`Self::Cow`]'s with a field is its object's. Neither takes nor drops

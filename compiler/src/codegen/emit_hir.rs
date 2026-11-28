@@ -295,6 +295,9 @@ enum HirBuiltin {
     LinAlg,
     /// `matrix(data)`: the data itself, a zero-cost wrap.
     Matrix,
+    /// A builtin thunk whose result is its one argument's word
+    /// (`Hash__int__hash`): the argument itself, with no call.
+    Identity,
     /// A trait method on a bare-class existential (`show(x)`): the pack to
     /// a temp, its value, its dictionary, the method's code pointer from
     /// the dictionary, then `CallIndirect`.
@@ -3886,17 +3889,31 @@ impl Compiler {
     /// (`Hash__string__hash`: the string's word, then `hash_string`) as the
     /// `HostInvoke` the thunk makes, so no frame is pushed per hash and the
     /// call needs no body to inline (#2183). A string is a heap word, which
-    /// the ground call passes as it is. Any other call as planned.
+    /// the ground call passes as it is. The thunk for `int`, whose hash is
+    /// the word itself, as its argument. Any other call as planned.
     fn hir_builtin_thunk_call(&self, hir: &HirBody, id: HirId, call: HirCall) -> HirCall {
+        use crate::typechecking::generics::Generics;
         let plain = call.generic.is_none()
             && call.own_dicts.is_empty()
             && call.instance.as_ref().is_some_and(|i| i.ground.is_some());
-        if !plain || call.key != crate::typechecking::generics::Generics::builtin_instance_fqn("Hash", "string", "hash") {
-            return call;
-        }
         let HirKind::Call { args, .. } = &hir.expr(id).kind else {
             return call;
         };
+        let int_arg = |&a: &HirId| {
+            Self::hir_ty(hir, a).is_some_and(|t| {
+                matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Con(n) if n == crate::typechecking::ty::INT)
+            })
+        };
+        if plain
+            && call.key == Generics::builtin_instance_fqn("Hash", "int", "hash")
+            && self.raw_instance_methods.contains(&call.key)
+            && matches!(args.as_slice(), [a] if int_arg(a))
+        {
+            return self.hir_builtin_abi(hir, id, HirBuiltin::Identity).unwrap_or(call);
+        }
+        if !plain || call.key != Generics::builtin_instance_fqn("Hash", "string", "hash") {
+            return call;
+        }
         let string = |&a: &HirId| {
             Self::hir_ty(hir, a).is_some_and(|t| {
                 matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Con(n) if n == crate::typechecking::ty::STRING)
@@ -7238,7 +7255,7 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        if matches!(builtin, HirBuiltin::Matrix) && args.len() != 1 {
+        if matches!(builtin, HirBuiltin::Matrix | HirBuiltin::Identity) && args.len() != 1 {
             return Err("callee-arity");
         }
         if matches!(builtin, HirBuiltin::LinAlg) {

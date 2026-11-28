@@ -253,6 +253,29 @@ pub struct HeapCounts {
     pub header_xor: u64,
 }
 
+/// `$body` with `$r` bound to `$obj`'s handle, whatever its kind.
+macro_rules! each_kind {
+    ($obj:expr, $r:ident => $body:expr) => {
+        match $obj {
+            Object::String($r) => $body,
+            Object::Instance($r) => $body,
+            Object::Enum($r) => $body,
+            Object::Library($r) => $body,
+            Object::Array($r) => $body,
+            Object::Coroutine($r) => $body,
+            Object::Root($r) => $body,
+            Object::Weak($r) => $body,
+            Object::Fn($r) => $body,
+            Object::Stream($r) => $body,
+            Object::Thread($r) => $body,
+            Object::Sender($r) => $body,
+            Object::Receiver($r) => $body,
+            Object::Mutex($r) => $body,
+            Object::RwLock($r) => $body,
+        }
+    };
+}
+
 /// How far the slab's resident bytes may run past twice the live bytes
 /// before empty chunks go back to the OS ([`Heap::release_chunks_if_due`]).
 pub const RELEASE_SLACK: usize = 32 << 20;
@@ -1843,17 +1866,35 @@ impl Heap {
     /// + Before calling this method, the caller must ensure that the object was
     ///   removed from the linked list of heap-allocated objects.
     unsafe fn dealloc(&mut self, object: Object) {
-        let size = object.size();
+        // SAFETY: the caller's.
+        each_kind!(object, r => unsafe { self.dealloc_gc(r) })
+    }
+
+    /// [`Self::dealloc`] of an object of a known kind: one dispatch, the
+    /// size, the slot's class and the payload's drop all static.
+    ///
+    /// ## Safety
+    ///
+    /// As [`Self::dealloc`].
+    #[inline(always)]
+    pub(super) unsafe fn dealloc_gc<T: GcSized>(&mut self, gc: Gc<T>) {
+        // As [`Object::size`] counts it: the paced header and the payload.
+        let size = gc.size();
         self.counts.alloc_bytes -= size;
         debug_assert!(self.counts.live_count > 0);
         self.counts.live_count -= 1;
-        let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
-        let young = object.generation() & GEN_YOUNG != 0;
-        unsafe { object.recycle_payload() };
+        let p = gc.as_ptr();
+        // SAFETY: the slot holds a live object until `recycle` below.
+        let young = unsafe { (*p).header.generation.get() } & GEN_YOUNG != 0;
+        let ptr = unsafe { NonNull::new_unchecked(p as *mut u8) };
+        // The slot's class is its kind's layout's (every allocation path
+        // takes a slot of that class), so no chunk lookup finds it.
+        let key = Slab::class_of(gc.data_layout());
+        unsafe { gc.recycle() };
         if young {
-            self.slab.free_young(ptr);
+            self.slab.free_young_in_class(key, ptr);
         } else {
-            self.slab.free(ptr);
+            self.slab.free_in_class(key, ptr);
         }
     }
 
@@ -2185,29 +2226,6 @@ pub enum Object {
     Receiver(RefReceiver),
     Mutex(RefThreadMutex),
     RwLock(RefRwLock),
-}
-
-/// `$body` with `$r` bound to `$obj`'s handle, whatever its kind.
-macro_rules! each_kind {
-    ($obj:expr, $r:ident => $body:expr) => {
-        match $obj {
-            Object::String($r) => $body,
-            Object::Instance($r) => $body,
-            Object::Enum($r) => $body,
-            Object::Library($r) => $body,
-            Object::Array($r) => $body,
-            Object::Coroutine($r) => $body,
-            Object::Root($r) => $body,
-            Object::Weak($r) => $body,
-            Object::Fn($r) => $body,
-            Object::Stream($r) => $body,
-            Object::Thread($r) => $body,
-            Object::Sender($r) => $body,
-            Object::Receiver($r) => $body,
-            Object::Mutex($r) => $body,
-            Object::RwLock($r) => $body,
-        }
-    };
 }
 
 /// What [`Object::visit_slots`] calls for each slot that may hold a
@@ -2566,7 +2584,7 @@ impl Object {
     pub(crate) unsafe fn from_header(addr: u64) -> Option<Self> {
         let header = unsafe { &*(addr as *const GcHeader) };
         Some(match header.kind.get() {
-            1 => Self::String(unsafe { Gc::from_addr(addr) }),
+            KIND_STRING => Self::String(unsafe { Gc::from_addr(addr) }),
             KIND_INSTANCE => Self::Instance(unsafe { Gc::from_addr(addr) }),
             3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
             4 => Self::Library(unsafe { Gc::from_addr(addr) }),
@@ -3243,6 +3261,29 @@ pub struct ArraySlots {
     /// Pushes may be written in place. A debug or rc-check runtime checks
     /// every write ([`GcData::as_mut`]), so its pushes take the helper.
     pub inline_push: bool,
+}
+
+/// Where native code reads a string's cached hash in place
+/// (`docs/internals/native.md`, "Map table ops"): byte offsets from the
+/// object's address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StringSlots {
+    /// The header's kind byte and a string's kind.
+    pub kind_at: u32,
+    pub kind: u8,
+    /// [`ObjString`]'s hash word: `hash_set | hash` once computed, `0`
+    /// before.
+    pub hash_at: u32,
+    pub hash_set: u64,
+}
+
+/// The [`StringSlots`] of this build.
+#[must_use]
+pub fn string_slots() -> StringSlots {
+    let header = GcHeader::new();
+    let kind_at = (header.kind.as_ptr() as usize - std::ptr::from_ref(&header) as usize) as u32;
+    let hash_at = (std::mem::offset_of!(GcData<ObjString>, data) + std::mem::offset_of!(ObjString, hash)) as u32;
+    StringSlots { kind_at, kind: KIND_STRING, hash_at, hash_set: HASH_SET }
 }
 
 /// Where a `Vec`'s pointer, length and capacity words sit, as offsets from
@@ -4629,6 +4670,8 @@ pub trait GcSized {
 /// [`GcHeader::kind`] of the objects native code allocates inline, and of
 /// those a share marks (an instance, an array).
 pub const KIND_INSTANCE: u8 = 2;
+/// [`GcHeader::kind`] of a string ([`StringSlots`]).
+pub const KIND_STRING: u8 = 1;
 const KIND_ENUM: u8 = 3;
 pub const KIND_ARRAY: u8 = 6;
 
@@ -4872,6 +4915,7 @@ impl<T> Gc<T> {
     }
 
     /// Drop `T` and poison the header. The slot stays mapped for reuse.
+    #[inline]
     unsafe fn recycle(self) {
         let p = self.ptr.as_ptr();
         unsafe {
@@ -5466,6 +5510,22 @@ mod tests {
         );
         assert!(from_vec.slots_are_inline());
         assert_eq!(from_vec.slot(1).map(|v| v.as_int()), Some(2));
+    }
+
+    #[test]
+    fn dealloc_gives_back_the_bytes_alloc_counted() {
+        let mut heap = Heap::default();
+        let before = heap.size();
+        let long = "a string too long to sit inline in the object itself";
+        let objs: Vec<Object> = [ObjString::from("hi"), ObjString::from(long)].into_iter().map(|s| heap.alloc(s, Object::String).0).collect();
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(1i64); 9]), Object::Array);
+        assert!(heap.size() > before);
+        for o in objs.into_iter().chain([arr]) {
+            // SAFETY: nothing names them.
+            unsafe { heap.dealloc(o) };
+        }
+        assert_eq!(heap.size(), before);
+        assert_eq!(heap.live_object_count(), 0);
     }
 
     #[test]

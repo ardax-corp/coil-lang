@@ -1253,6 +1253,18 @@ impl Checker {
                 let t = self.counter.fresh();
                 return Scheme::poly(vec![t], vec![], Ty::fun(&[vec_app_ty(Ty::Var(t)), vec_app_ty(int())], int()));
             }
+            common::MAP_TABLE_NATIVE => Ty::fun(&[int()], vec_app_ty(int())),
+            common::MAP_FIND_NATIVE | common::MAP_UPSERT_NATIVE => {
+                // (ix, keys, h, k, mode) -> slot; any key type.
+                let t = self.counter.fresh();
+                let k = Ty::Var(t);
+                return Scheme::poly(vec![t], vec![], Ty::fun(&[vec_app_ty(int()), vec_app_ty(k.clone()), int(), k, int()], int()));
+            }
+            common::MAP_PROBE_NATIVE => Ty::fun(&[vec_app_ty(int()), int(), int()], int()),
+            common::MAP_ADD_NATIVE => Ty::fun(&[vec_app_ty(int()), int()], int()),
+            common::MAP_LIVE_NATIVE | common::MAP_REMOVE_NATIVE => Ty::fun(&[vec_app_ty(int()), int()], boolean()),
+            common::MAP_LEN_NATIVE | common::MAP_COMPACT_NATIVE => Ty::fun(&[vec_app_ty(int())], int()),
+            common::MAP_CLEAR_NATIVE => Ty::fun(&[vec_app_ty(int())], unit_ty()),
             "io_capture_begin" => Ty::fun(&[], unit_ty()),
             "io_capture_end" => Ty::fun(&[], tuple_ty(vec![string(), string()])),
 
