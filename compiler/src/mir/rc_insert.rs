@@ -331,6 +331,8 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>, wide: &HashMap<Label, 
             MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
             MirInst::Call { target, dest_hi: None, .. } => numbers.contains(target),
             MirInst::Call { target, dest_more, .. } if !dest_more.is_empty() => numbers.contains(target),
+            // A hash or a slot index.
+            MirInst::HostInvoke { native_id, dest_hi: None, .. } => common::host_returns_number(u64::from(*native_id)),
             MirInst::Phi { .. } => true,
             _ => false,
         })
@@ -833,9 +835,6 @@ impl Pass {
         let quiet = quiet_calls(func, &facts.quiet);
         let pointers = pointer_words(func);
         let mut counted: HashSet<ValueId> = (0..func.types.len() as u32).map(ValueId).filter(|v| matches!(ty_of(func, *v), t if heap_word(t) || t == MirTy::Value)).collect();
-        counted.extend(opaque_words(func));
-        counted.extend(maybe_obj_words(func));
-        counted.extend(pointers);
         // A call of a body that only returns numbers hands back no object.
         let number_calls: HashSet<ValueId> = if numbers.is_empty() && facts.wide_numbers.is_empty() {
             HashSet::new()
@@ -845,6 +844,18 @@ impl Pass {
                 .filter(|v| ty_of(func, *v).is_int())
                 .collect()
         };
+        // An opaque body's `int` words may be a type variable's, but not
+        // those a number call or a native that only returns numbers gives.
+        let number_hosts: HashSet<ValueId> = func
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i, MirInst::HostInvoke { native_id, .. } if common::host_returns_number(u64::from(*native_id))))
+            .flat_map(MirInst::dests)
+            .collect();
+        counted.extend(opaque_words(func).into_iter().filter(|v| !number_calls.contains(v) && !number_hosts.contains(v)));
+        counted.extend(maybe_obj_words(func));
+        counted.extend(pointers);
         // An `int` word read from an object or handed back by a call may
         // be a pointer the types do not say (a pair's low word, a payload
         // of a type variable): counted, the runtime tests the address.

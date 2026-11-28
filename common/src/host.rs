@@ -651,7 +651,7 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
 /// Host natives whose result is always a number (a hash, a slot index):
 /// it never names an object, so a frame does not count it.
 pub fn host_returns_number(id: u64) -> bool {
-    [HASH_STRING_ID, KEY_INDEX_FIND_ID, MAP_FIND_ID, MAP_UPSERT_ID, MAP_PROBE_ID, MAP_ADD_ID, MAP_LEN_ID, MAP_PUT_ID, MAP_WORD_MODE_ID]
+    [HASH_STRING_ID, KEY_INDEX_EQ_MODE_ID, KEY_INDEX_FIND_ID, MAP_FIND_ID, MAP_UPSERT_ID, MAP_PROBE_ID, MAP_ADD_ID, MAP_LEN_ID, MAP_PUT_ID, MAP_WORD_MODE_ID]
         .iter()
         .any(|&k| u64::from(k) == id)
 }
