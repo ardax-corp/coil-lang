@@ -558,7 +558,7 @@ impl ProgramEffects {
         (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| {
             let mut s = escape::host_summary(&short, Summary::of(flags));
             if flags.contains(EffectFlags::HEAP_MUT) {
-                s.mutates = u64::MAX;
+                s.mutates = if escape::writes_first_arg_only(&short) { 1 } else { u64::MAX };
             }
             s
         })
