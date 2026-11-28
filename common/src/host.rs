@@ -134,7 +134,9 @@ host_natives! {
     7 "await_readable" (1) SUSPEND, NO_CAP;
     8 "await_writable" (1) SUSPEND, NO_CAP;
     9 "drive" (0) SUSPEND, NO_CAP;
-    10 "from_bytes" (1) TEXT, NO_CAP, LEAF;
+    /// `from_bytes` (frozen row 10): native code makes a short ASCII result
+    /// in place.
+    10 "from_bytes" (1) TEXT, NO_CAP, LEAF => FROM_BYTES_ID;
     11 "to_bytes" (1) TEXT, NO_CAP, LEAF;
     12 "tcp_connect" (2) NET, NET_CAP;
     13 "tcp_connect_timeout" (3) NET, NET_CAP;

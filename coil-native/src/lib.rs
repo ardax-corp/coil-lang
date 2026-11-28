@@ -6506,6 +6506,18 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if from_bytes_in_place_fits(*native_id, *layout, args) => {
+                let join = self.from_bytes_in_place(f, args[0]);
+                let w = self.host_call(f, *native_id, *layout, args);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
+                if !keeps_views(*native_id) {
+                    self.drop_views();
+                }
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
             MirInst::HostInvoke { dest, dest_hi, native_id, layout, args } => {
                 // `s[i]` on a string: the byte in place when `i` is in range,
                 // else the host call (out of range, a boxed string).
@@ -8213,7 +8225,6 @@ impl<'a> Lower<'a> {
     /// or reports, a longer result, a closed gate, a spent chunk) is left
     /// in the current block for the host call.
     fn slice_in_place(&mut self, f: &MirFunc, args: &[ValueId]) -> Block {
-        use machine::native::{BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_HEADER_XOR, COUNTS_INLINE_GATE, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS};
         let t = MemFlagsData::trusted();
         let sa = machine::native::string_alloc();
         let (p, n) = self.str_bytes(f, args[0]);
@@ -8224,9 +8235,8 @@ impl<'a> Lower<'a> {
         let join = self.b.create_block();
         self.b.append_block_param(join, types::I64);
         let slow = self.b.create_block();
-        let blocks: Vec<Block> = (0..9).map(|_| self.b.create_block()).collect();
-        let [ranged, start_in, start_ok, end_in, gated, bump, spent, popped, fill] = blocks[..] else { unreachable!() };
-        self.b.append_block_param(fill, types::I64);
+        let blocks: Vec<Block> = (0..4).map(|_| self.b.create_block()).collect();
+        let [ranged, start_in, start_ok, end_in] = blocks[..] else { unreachable!() };
         // `a <= e <= n` unsigned (so `a >= 0`), and at most `max` bytes.
         let lo = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, a, e);
         let hi = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, e, n);
@@ -8255,6 +8265,25 @@ impl<'a> Lower<'a> {
         let end_test = self.b.create_block();
         boundary(self, e, end_in, end_test);
         self.b.switch_to_block(end_in);
+        let from = self.b.ins().iadd(p, a);
+        self.inline_string(from, len, join, slow);
+        self.b.set_cold_block(slow);
+        self.b.switch_to_block(slow);
+        join
+    }
+
+    /// A young inline string of the `len` bytes at `from` (at most
+    /// [`machine::native::StringAlloc::max`], valid UTF-8: the caller
+    /// checked both), made from the string class's bump chunk and handed to
+    /// `join`; `slow` when inline allocation is gated off or the chunk is
+    /// spent with no slot free. Ends in no block.
+    fn inline_string(&mut self, from: cranelift_codegen::ir::Value, len: cranelift_codegen::ir::Value, join: Block, slow: Block) {
+        use machine::native::{BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_HEADER_XOR, COUNTS_INLINE_GATE, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS};
+        let t = MemFlagsData::trusted();
+        let sa = machine::native::string_alloc();
+        let blocks: Vec<Block> = (0..5).map(|_| self.b.create_block()).collect();
+        let [gated, bump, spent, popped, fill] = blocks[..] else { unreachable!() };
+        self.b.append_block_param(fill, types::I64);
         let counts = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
         let gate = self.b.ins().load(types::I64, t, counts, COUNTS_INLINE_GATE);
         self.b.ins().brif(gate, gated, &[], slow, &[]);
@@ -8302,7 +8331,6 @@ impl<'a> Lower<'a> {
         self.b.ins().brif(none, copied, &[], copy, &[zero.into()]);
         self.b.switch_to_block(copy);
         let k = self.b.block_params(copy)[0];
-        let from = self.b.ins().iadd(p, a);
         let from = self.b.ins().iadd(from, k);
         let byte = self.b.ins().uload8(types::I64, t, from, 0);
         let byte = self.b.ins().ireduce(types::I8, byte);
@@ -8319,6 +8347,63 @@ impl<'a> Lower<'a> {
         let live = self.b.ins().iadd_imm_s(live, 1);
         self.b.ins().store(t, live, counts, COUNTS_LIVE_COUNT);
         self.b.ins().jump(join, &[o.into()]);
+    }
+
+    /// `from_bytes` (or `from_bytes_take`) of a byte array of at most
+    /// [`machine::native::StringAlloc::max`] ASCII bytes: the inline string
+    /// made here ([`Self::inline_string`]), whose word is the `Ok` of the
+    /// result's niche. Anything else (word storage, a longer or non-ASCII
+    /// buffer, no slot) branches to the host call, after which the caller
+    /// jumps to the returned join block with its result.
+    fn from_bytes_in_place(&mut self, f: &MirFunc, buf: ValueId) -> Block {
+        let t = MemFlagsData::trusted();
+        let l = machine::native::array_slots();
+        let sa = machine::native::string_alloc();
+        let b = self.get(f, buf);
+        let b = self.coerce(b, types::I64);
+        let join = self.b.create_block();
+        self.b.append_block_param(join, types::I64);
+        let slow = self.b.create_block();
+        let blocks: Vec<Block> = (0..5).map(|_| self.b.create_block()).collect();
+        let [kind_b, tag_b, sized, scan, ascii] = blocks[..] else { unreachable!() };
+        self.b.append_block_param(scan, types::I64);
+        self.b.ins().brif(b, kind_b, &[], slow, &[]);
+        self.b.switch_to_block(kind_b);
+        let k = self.b.ins().uload8(types::I64, t, b, l.kind_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+        self.b.ins().brif(is, tag_b, &[], slow, &[]);
+        self.b.switch_to_block(tag_b);
+        let tag = self.b.ins().uload8(types::I64, t, b, l.data_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.bytes_tag));
+        self.b.ins().brif(is, sized, &[], slow, &[]);
+        self.b.switch_to_block(sized);
+        let p = self.b.ins().load(types::I64, t, b, l.bytes_ptr_at as i32);
+        let n = self.b.ins().load(types::I64, t, b, l.bytes_len_at as i32);
+        let short = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, n, i64::from(sa.max));
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, n, 0);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let (go, empty) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(short, go, &[], slow, &[]);
+        self.b.switch_to_block(go);
+        self.b.ins().brif(none, empty, &[], scan, &[zero.into()]);
+        self.b.switch_to_block(empty);
+        self.b.ins().jump(ascii, &[]);
+        // Every byte below 0x80: ASCII, so UTF-8 with no check of its own.
+        self.b.switch_to_block(scan);
+        let i = self.b.block_params(scan)[0];
+        let at = self.b.ins().iadd(p, i);
+        let byte = self.b.ins().uload8(types::I64, t, at, 0);
+        let high = self.b.ins().band_imm_u(byte, 0x80);
+        let (next, more) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(high, slow, &[], next, &[]);
+        self.b.switch_to_block(next);
+        let i1 = self.b.ins().iadd_imm_s(i, 1);
+        let left = self.b.ins().icmp(IntCC::UnsignedLessThan, i1, n);
+        self.b.ins().brif(left, more, &[], ascii, &[]);
+        self.b.switch_to_block(more);
+        self.b.ins().jump(scan, &[i1.into()]);
+        self.b.switch_to_block(ascii);
+        self.inline_string(p, n, join, slow);
         self.b.set_cold_block(slow);
         self.b.switch_to_block(slow);
         join
@@ -8896,6 +8981,16 @@ fn lane_expr_fits(e: &compiler::native_mir::LaneExpr, streams: usize, scalars: u
 /// Whether a `HostInvoke` is a `string_slice_bytes` whose `Ok` result is
 /// its string's word (a niche result) that native code may make in place
 /// (`Lower::slice_in_place`; `COIL_NATIVE_INLINE_ALLOC=0` turns it off).
+/// Whether a `from_bytes` / `from_bytes_take` call returns its result in
+/// the niche layout, so a short ASCII one can be made in place
+/// ([`Lower::from_bytes_in_place`]).
+fn from_bytes_in_place_fits(native_id: u16, layout: u8, args: &[ValueId]) -> bool {
+    (native_id == common::FROM_BYTES_ID || native_id == common::FROM_BYTES_TAKE_ID)
+        && args.len() == 1
+        && common::host_layout_base(u32::from(layout)) == common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        && !std::env::var_os("COIL_NATIVE_INLINE_ALLOC").is_some_and(|v| v == "0")
+}
+
 fn slice_in_place_fits(native_id: u16, layout: u8, args: &[ValueId]) -> bool {
     native_id == common::STRING_SLICE_BYTES_ID
         && args.len() == 3
