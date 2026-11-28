@@ -358,6 +358,12 @@ pub struct Heap {
     rc_on: bool,
     /// A count that reaches zero frees its object ([`Self::set_rc_frees`]).
     rc_frees: bool,
+    /// Non-zero while native code may free a string inline when its count
+    /// reaches zero ([`super::string_free`]): counts are kept and free,
+    /// inline allocation's gate is open, and no host-side zero waits in
+    /// [`Self::rc_pending`] for the next runtime `RcDec`
+    /// ([`Self::sync_free_gate`]).
+    free_gate: Cell<u8>,
     /// Objects a host-side diff ([`Self::rc_after`]) took to count zero:
     /// released at the next `RcDec`, once the code has counted what the
     /// host handed back (a popped element). A collection drops the list
@@ -434,6 +440,7 @@ impl Default for Heap {
             rc_on: true,
             rc_frees: true,
             rc_pending: std::cell::RefCell::new(Vec::new()),
+            free_gate: Cell::new(0),
             rc_stack: Vec::new(),
             rc_due: Vec::new(),
             leak_exempt: std::collections::HashSet::new(),
@@ -947,6 +954,13 @@ impl Heap {
             && self.nursery
             && !self.epoch_stw;
         self.counts.inline_gate = u64::from(open);
+        self.sync_free_gate();
+    }
+
+    /// Open or close native code's inline string free ([`Self::free_gate`]).
+    pub(crate) fn sync_free_gate(&self) {
+        let open = self.counts.inline_gate != 0 && self.rc_on && self.rc_frees && self.rc_pending.borrow().is_empty();
+        self.free_gate.set(u8::from(open));
     }
 
     /// Where native code's inline allocation reads and bumps: the
@@ -1682,6 +1696,7 @@ impl Heap {
         heap.set_byte_cap(self.byte_cap);
         heap.rc_on = self.rc_on;
         heap.rc_frees = self.rc_frees;
+        heap.sync_free_gate();
         heap
     }
 
@@ -3113,6 +3128,10 @@ impl ObjString {
 
 impl GcSized for ObjString {
     const HOLDS_REFS: bool = false;
+    /// Bump-allocated, and freed onto its class's intrusive free list,
+    /// which native code pops and pushes too (an interned string is old:
+    /// [`Heap::intern_ref`]).
+    const NURSERY: bool = true;
 
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.data.accounted_bytes()
@@ -4710,7 +4729,7 @@ pub(super) const FLAG_MARKED: u8 = 1;
 pub const FLAG_SHARED: u8 = 1 << 2;
 /// An instance's or enum's `drop` has been claimed: it never runs twice
 /// ([`Object::claim_finalizer`]).
-const FLAG_FINALIZED: u8 = 1 << 3;
+pub(super) const FLAG_FINALIZED: u8 = 1 << 3;
 /// Copy-on-write: a name writes this object in place without a test (an
 /// alias the compiler pinned it for, `CowPin`), so a share copies it
 /// instead of setting [`FLAG_SHARED`] ([`Heap::cow_share`]). A pinned
@@ -4718,7 +4737,7 @@ const FLAG_FINALIZED: u8 = 1 << 3;
 pub const FLAG_PINNED: u8 = 1 << 4;
 /// A `gc::weak` handle names this object: its release clears them
 /// ([`Heap::clear_weaks_to`]).
-const FLAG_WEAK_TARGET: u8 = 1 << 5;
+pub(super) const FLAG_WEAK_TARGET: u8 = 1 << 5;
 
 /// A count that never changes: interned and constant objects that live as
 /// long as the program.
@@ -4747,6 +4766,13 @@ pub const HEADER_FLAGS_OFFSET: i32 = std::mem::offset_of!(GcHeader, flags) as i3
 /// counts are not kept ([`Heap::rc_counting`]); native code's inline count
 /// ops test it.
 pub const HEAP_ALLOC_LOCK_OFFSET: i32 = std::mem::offset_of!(Heap, alloc_lock) as i32;
+
+/// Byte offset of [`Heap`]'s inline free gate, a byte (`Heap::free_gate`):
+/// native code frees a string inline only while it is non-zero.
+pub const HEAP_FREE_GATE_OFFSET: i32 = std::mem::offset_of!(Heap, free_gate) as i32;
+/// Byte offset of [`Heap`]'s `freed_early` flag, a byte native code's
+/// inline free sets as the runtime's does.
+pub const HEAP_FREED_EARLY_OFFSET: i32 = std::mem::offset_of!(Heap, freed_early) as i32;
 
 /// Byte offset of [`Heap`]'s steal-epoch generation, a byte: native code
 /// counts an object born in the open epoch in place when its header's
@@ -5290,7 +5316,7 @@ mod nursery;
 
 #[path = "inline.rs"]
 mod inline;
-pub use inline::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
+pub use inline::{InlineObject, InlineShape, ProductSlots, StringFree, inline_object, product_slots, layout_fingerprint, string_free};
 
 #[path = "rc.rs"]
 mod rc;
@@ -5526,6 +5552,45 @@ mod tests {
         }
         assert_eq!(heap.size(), before);
         assert_eq!(heap.live_object_count(), 0);
+    }
+
+    /// What native code's inline string free ([`string_free`]) tests and
+    /// writes matches real young strings: an inline one and a view of a
+    /// buffer pass the header test, carry the probed tags and fields, sit
+    /// in the probed class and are charged the probed bytes.
+    #[test]
+    fn string_free_matches_young_strings() {
+        let sf = string_free();
+        let mut heap = Heap::default();
+        heap.set_nursery(true);
+        let byte = |o: Object, at: u32| unsafe { *((o.addr() + u64::from(at)) as *const u8) };
+        let before = heap.size();
+        let (short, _) = heap.alloc(ObjString::from("hi"), Object::String);
+        assert_eq!(heap.size() - before, sf.size as usize);
+        // SAFETY: a live object's header word.
+        let h = unsafe { (short.addr() as *const u64).read() };
+        assert_eq!(h & sf.header_mask, sf.header_want);
+        assert_eq!(byte(short, sf.tag_at), sf.inline_tag);
+        let class = Slab::class_of(Layout::new::<GcData<ObjString>>());
+        assert_eq!(heap.slab.young_cursor(class), Some(sf.class as usize));
+        // Two views of one buffer: the second appended in place.
+        let first = crate::StrData::copy_of(&"x".repeat(40)).concat("y");
+        let second = first.concat("z");
+        let accounted = second.accounted_bytes() as u32;
+        let (a, _) = heap.alloc(ObjString::from_data(first), Object::String);
+        let (b, _) = heap.alloc(ObjString::from_data(second), Object::String);
+        assert_eq!((byte(a, sf.tag_at), byte(b, sf.tag_at)), (sf.shared_tag, sf.shared_tag));
+        let word = |o: Object, at: u32| unsafe { ((o.addr() + u64::from(at)) as *const u64).read_unaligned() };
+        let buf = word(a, sf.buf_at);
+        assert_eq!(word(b, sf.buf_at), buf);
+        // SAFETY: the buffer both views hold.
+        assert_eq!(unsafe { ((buf + u64::from(sf.refs_at)) as *const usize).read() }, 2);
+        assert_eq!(unsafe { ((b.addr() + u64::from(sf.accounted_at)) as *const u32).read() }, accounted);
+        for o in [short, a, b] {
+            // SAFETY: nothing names them.
+            unsafe { heap.dealloc(o) };
+        }
+        assert_eq!(heap.size(), before);
     }
 
     #[test]

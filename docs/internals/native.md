@@ -519,6 +519,8 @@ image with the payload words in place, and adds the object to `alloc_bytes` and
 `live_count`. A full chunk, a closed gate or a `drop` type falls back to the helper,
 which refills the chunk and sets `gc_due` when the cycle collector is due, so it still
 runs at a safepoint on time. A free pushes the slot on its class's free list inline.
+The last owner of a young string (inline, or a view of a buffer another string still
+holds) is freed in place the same way ([memory.md](memory.md), "The allocator").
 
 The images come from `machine::memory::inline_object`, probed from real objects:
 `ObjEnum`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so
