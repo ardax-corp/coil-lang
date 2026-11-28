@@ -633,8 +633,8 @@ impl Slab {
     /// The free list of class `key`, if it has one.
     #[inline]
     fn class_mut(&mut self, key: (u32, u32)) -> Option<&mut FreeClass> {
-        if key.1 == 8 && key.0 % 8 == 0 && (key.0 as usize / 8) < SMALL_CLASSES {
-            let at = self.small[key.0 as usize / 8] as usize;
+        if let Some(i) = small_index(key) {
+            let at = self.small[i] as usize;
             return if at == 0 { None } else { self.free.get_mut(at - 1) };
         }
         self.free.iter_mut().find(|c| c.key == key)
@@ -644,10 +644,10 @@ impl Slab {
     #[cold]
     fn push_class(&mut self, class: FreeClass) {
         debug_assert!(self.free.iter().all(|c| c.key != class.key));
-        let (size, align) = class.key;
+        let small = small_index(class.key);
         self.free.push(class);
-        if align == 8 && size % 8 == 0 && (size as usize / 8) < SMALL_CLASSES {
-            self.small[size as usize / 8] = u8::try_from(self.free.len()).expect("at most 255 slab size classes");
+        if let Some(i) = small {
+            self.small[i] = u8::try_from(self.free.len()).expect("at most 255 slab size classes");
         }
     }
 
@@ -1030,6 +1030,13 @@ impl Drop for Slab {
             unmap(c.ptr, CHUNK);
         }
     }
+}
+
+/// The [`Slab::small`] entry of class `key`, if it is a small 8-aligned one.
+#[inline]
+fn small_index((size, align): (u32, u32)) -> Option<usize> {
+    let i = size as usize / 8;
+    (align == 8 && size.is_multiple_of(8) && i < SMALL_CLASSES).then_some(i)
 }
 
 fn slot_dims(layout: Layout) -> (usize, usize) {
