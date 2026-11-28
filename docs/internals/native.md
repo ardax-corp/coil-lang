@@ -520,7 +520,15 @@ image with the payload words in place, and adds the object to `alloc_bytes` and
 which refills the chunk and sets `gc_due` when the cycle collector is due, so it still
 runs at a safepoint on time. A free pushes the slot on its class's free list inline.
 The last owner of a young string (inline, or a view of a buffer another string still
-holds) is freed in place the same way ([memory.md](memory.md), "The allocator").
+holds) is freed in place the same way, by `coil_rc_last`, a function each module defines
+once and every decrement site calls ([memory.md](memory.md), "The allocator").
+
+`string_slice_bytes` of a string whose bytes are in view (`str_views`) makes a result of
+up to 30 bytes in place (`slice_in_place`, `machine::native::string_alloc`): when
+`0 <= a <= e <= len` and both ends are on character boundaries, it bumps or pops a
+string-class slot, writes a young empty inline string's image, the length byte and the
+bytes, and counts it. Anything else (an end the host clamps or reports, a longer result,
+a closed gate, a spent chunk) takes the host call.
 
 The images come from `machine::memory::inline_object`, probed from real objects:
 `ObjEnum`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so

@@ -5316,7 +5316,7 @@ mod nursery;
 
 #[path = "inline.rs"]
 mod inline;
-pub use inline::{InlineObject, InlineShape, ProductSlots, StringFree, inline_object, product_slots, layout_fingerprint, string_free};
+pub use inline::{InlineObject, InlineShape, ProductSlots, StringAlloc, StringFree, inline_object, product_slots, layout_fingerprint, string_alloc, string_free};
 
 #[path = "rc.rs"]
 mod rc;
