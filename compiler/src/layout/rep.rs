@@ -309,6 +309,53 @@ pub fn wide_scalar_items(checker: &Checker, ty: &Ty) -> Option<Vec<Ty>> {
     }
 }
 
+/// A closed tuple of immediates at any depth (`(int, int, int)`,
+/// `((int, int), int)`, `(float, (float, float), float)`) of three to
+/// [`common::PACKED_KIND_WORDS`] leaves, the words a direct call carries
+/// it in: a flat class field keeps its leaves in its slot and tail slots
+/// (`Checker::class_wide_tails`), one number word each, by one rule at
+/// any depth. Its leaves in order and its nesting ([`WideShape`]).
+pub fn wide_field_shape(checker: &Checker, ty: &Ty) -> Option<WideShape> {
+    wide_shape_of(&apply_ty_prune(checker.subst(), ty))
+}
+
+/// The leaves and nesting of a flat wide field's tuple type ([`wide_field_shape`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WideShape {
+    /// The immediates, in order.
+    pub leaves: Vec<Ty>,
+    /// Each tuple's arity and `0` for a leaf, in preorder (the outer tuple
+    /// first).
+    pub nest: Vec<u8>,
+}
+
+/// [`wide_field_shape`] of a resolved type.
+pub fn wide_shape_of(ty: &Ty) -> Option<WideShape> {
+    fn walk(ty: &Ty, out: &mut WideShape) -> Option<()> {
+        match strip_readonly(ty) {
+            Ty::Tuple(items) if !items.is_empty() => {
+                out.nest.push(u8::try_from(items.len()).ok()?);
+                for item in items {
+                    walk(item, out)?;
+                }
+                Some(())
+            }
+            t if is_immediate(t) && out.leaves.len() < common::PACKED_KIND_WORDS => {
+                out.nest.push(0);
+                out.leaves.push(t.clone());
+                Some(())
+            }
+            _ => None,
+        }
+    }
+    if !matches!(strip_readonly(ty), Ty::Tuple(_)) {
+        return None;
+    }
+    let mut out = WideShape { leaves: Vec::new(), nest: Vec::new() };
+    walk(ty, &mut out)?;
+    (out.leaves.len() >= 3).then_some(out)
+}
+
 /// `int`, `float`, `bool` or `byte`.
 pub(crate) fn is_immediate(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == INT || n == FLOAT || n == BOOL || n == BYTE)

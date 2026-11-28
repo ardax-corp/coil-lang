@@ -20949,9 +20949,12 @@ impl Checker {
         }
         let mut next = fields.len() as u32;
         for (i, (name, ty)) in fields.iter().enumerate() {
+            // A tuple of immediates nested in it is a wide field's words
+            // (`((int, int), int)`), not a pair.
             if !self.is_borrow_field(key, name)
                 && !ty_names_param(ty, &params)
                 && crate::layout::pair_word_kinds(self, ty).is_some()
+                && crate::layout::wide_field_shape(self, ty).is_none()
             {
                 tails[i] = Some(next);
                 next += 1;
@@ -20962,8 +20965,8 @@ impl Checker {
 
     /// For each field of class `key`, in declaration order, the first of
     /// the tail slots that hold words 2.. of a flat wide field and how many
-    /// there are: a field of a tuple of three or four immediates
-    /// ([`crate::layout::wide_scalar_items`]) keeps its first item in its
+    /// there are: a field of a tuple of immediates at any depth
+    /// ([`crate::layout::wide_field_shape`]) keeps its first leaf in its
     /// own slot and the others after the pair tails
     /// ([`Self::class_flat_tails`]), all number slots. The same classes and
     /// fields as a flat pair field qualify.
@@ -20984,9 +20987,9 @@ impl Checker {
         for (i, (name, ty)) in fields.iter().enumerate() {
             if !self.is_borrow_field(key, name)
                 && !ty_names_param(ty, &params)
-                && let Some(items) = crate::layout::wide_scalar_items(self, ty)
+                && let Some(shape) = crate::layout::wide_field_shape(self, ty)
             {
-                let extra = items.len() as u32 - 1;
+                let extra = shape.leaves.len() as u32 - 1;
                 tails[i] = Some((next, extra));
                 next += extra;
             }
@@ -21006,7 +21009,7 @@ impl Checker {
     /// a field typed by a bare class parameter whose argument is a closed
     /// two-word type ([`crate::layout::pair_word_kinds`], both words of a
     /// kind the instance's own packed kinds can say) or a tuple of three or
-    /// four immediates ([`crate::layout::wide_scalar_items`]). Each gets
+    /// more immediates at any depth ([`crate::layout::wide_field_shape`]). Each gets
     /// its tail slots after the class's own ([`Self::class_slot_count`]),
     /// in field order, so the class row (one per class) stays right for
     /// every slot it names, and the instance's own kinds
@@ -21060,13 +21063,13 @@ impl Checker {
                 continue;
             }
             let at = &args[p];
-            if crate::layout::pair_word_kinds(self, at).is_some_and(|k| !k.contains(&common::WORD_UNKNOWN)) {
-                out.push((i, InstanceTail::Pair(next)));
-                next += 1;
-            } else if let Some(items) = crate::layout::wide_scalar_items(self, at) {
-                let extra = items.len() as u32 - 1;
+            if let Some(shape) = crate::layout::wide_field_shape(self, at) {
+                let extra = shape.leaves.len() as u32 - 1;
                 out.push((i, InstanceTail::Wide(next, extra)));
                 next += extra;
+            } else if crate::layout::pair_word_kinds(self, at).is_some_and(|k| !k.contains(&common::WORD_UNKNOWN)) {
+                out.push((i, InstanceTail::Pair(next)));
+                next += 1;
             }
         }
         if next as usize > INSTANCE_OWN_KIND_WORDS {
