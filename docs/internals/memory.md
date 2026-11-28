@@ -178,7 +178,7 @@ and one tag test (`rc_free_young_string`), the same tests native code makes.
 
 Strings are young too (`ObjString::NURSERY`; an interned one is old, `intern_ref`), in a size
 class fixed for every heap (`make_inline_classes`). Native code's inline decrement that takes a
-string's last owner frees it in place when the heap's free gate (`Heap::free_gate`: inline
+typed word's last owner calls the module's generated `coil_rc_last`, which frees a string in place when the heap's free gate (`Heap::free_gate`: inline
 allocation open, counts kept and freeing, no host-side zero pending) is open: a young inline
 string, or a view of a shared buffer some other string still holds (its decrement of the
 buffer's count does not reach zero), has its header poisoned, leaves `alloc_bytes` and
