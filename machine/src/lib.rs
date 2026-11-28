@@ -11,6 +11,7 @@ pub mod char_ord;
 pub mod clock;
 pub mod entropy;
 pub mod key_index;
+pub mod map_table;
 pub mod symbol;
 pub mod debug;
 pub mod env;
