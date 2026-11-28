@@ -711,10 +711,12 @@ of the payload's own type if there is one, else the first it can share:
 a number beside a heap word is a `MaybeObj` word), then a `bool`, `true`
 for `Ok`; the words an arm does not use are `0`. So
 `Result<(int, int, int), string>` is four words and `Result<(Handle,
-int), Handle>` three. The only bound is the budget of four words (`MAX_RET_MORE` + 2);
-a nest whose leaves do not fit keeps its inner tuples as one heap word
-each (`((int, int, int), (int, int))` goes as two words, the two inner
-tuples), and anything wider than four items stays an object. Shapes are
+int), Handle>` three. The only bound is the budget of sixteen words
+(`MAX_CALL_RET_MORE` + 2, as many as a tuple has items): words past the
+registers go on the stack as arguments and come back in a return area
+the caller gives as results, never as an object. A nest whose leaves do
+not fit keeps its inner tuples as one heap word each, and a tuple of
+sixteen items or more stays an object. Shapes are
 unified as terms (`Classes::unify`, items pairwise at any depth) along
 every call edge, φ and item, so every place a value's words go agrees on
 them.
@@ -765,7 +767,7 @@ A twin's heap words are counted as any word of their type: a parameter
 is borrowed (the caller holds it across the call), a result is owned by
 the caller, a word read from no object is no new count. Its scalar words
 are numbers to count insertion (`rc_insert::number_returns`). The MIR carries
-up to four result words on a direct call (`MirInst::Call::dest_more`,
+up to sixteen result words on a direct call (`MirInst::Call::dest_more`,
 `Terminator::Return::more`, `MirFunc::ret_more_tys`) and any number of
 parameter words; native code passes and returns them as Cranelift values
 (the `tail` convention past two results), and a runtime entry into a twin
