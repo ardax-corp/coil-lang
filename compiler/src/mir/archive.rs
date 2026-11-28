@@ -35,7 +35,7 @@ const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// takes this format only: older sections' `kinds` words have one bit per
 /// type parameter. The older formats remain for tests of what their
 /// sections hold.
-const FORMAT: u8 = common::MIR_SECTION_COW_ELEM_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_NESTED_LANES_FORMAT;
 /// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
 /// signatures carry struct layouts from it on.
 const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
@@ -503,13 +503,14 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*index);
             w.u8(*unchecked as u8);
         }
-        MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } => {
+        MirInst::LaneIndex { dest, dest_hi, dest_more, array, index, shape } => {
             w.u8(I_LANE_INDEX);
             w.v(*dest);
             w.v(*dest_hi);
             w.vs(dest_more);
             w.v(*array);
             w.v(*index);
+            lane_shape(w, shape);
         }
         MirInst::LaneStore { dest, array, index, lo, hi, more, shape } => {
             w.u8(I_LANE_STORE);
@@ -1273,7 +1274,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
-        I_LANE_INDEX => MirInst::LaneIndex { dest: r.v()?, dest_hi: r.v()?, dest_more: r.vs()?, array: r.v()?, index: r.v()? },
+        I_LANE_INDEX => MirInst::LaneIndex { dest: r.v()?, dest_hi: r.v()?, dest_more: r.vs()?, array: r.v()?, index: r.v()?, shape: read_lane_shape(r)? },
         I_LANE_STORE => MirInst::LaneStore { dest: r.v()?, array: r.v()?, index: r.v()?, lo: r.v()?, hi: r.v()?, more: r.vs()?, shape: read_lane_shape(r)? },
         I_LANE_PUSH => MirInst::LanePush { dest: r.v()?, array: r.v()?, lo: r.v()?, hi: r.v()?, more: r.vs()?, shape: read_lane_shape(r)? },
         I_LANES_TO_WORDS => MirInst::LanesToWords { dest: r.v()?, array: r.v()?, shape: read_lane_shape(r)? },
@@ -1508,7 +1509,7 @@ mod tests {
         let shape = MirLaneShape::default();
         b.mir.blocks[0].insts.extend([
             MirInst::Alloc { dest: v(0), kind: MirAllocKind::Lanes { tag_mask: 0, more: 2 }, elems: Vec::new(), kinds: 0 },
-            MirInst::LaneIndex { dest: v(1), dest_hi: v(2), dest_more: vec![v(3), v(2)], array: v(0), index: ValueId(0) },
+            MirInst::LaneIndex { dest: v(1), dest_hi: v(2), dest_more: vec![v(3), v(2)], array: v(0), index: ValueId(0), shape: MirLaneShape { tag_mask: 2, payload_mask: 0x6699, unit_mask: 0 } },
             MirInst::LaneStore { dest: v(4), array: v(0), index: ValueId(0), lo: v(1), hi: v(2), more: vec![v(3), v(1)], shape },
             MirInst::LanePush { dest: v(5), array: v(0), lo: v(1), hi: v(2), more: vec![v(3)], shape },
         ]);

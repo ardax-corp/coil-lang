@@ -16,7 +16,7 @@ use crate::debug::{DebugLine, ProgramDebug, SpanLoc};
 pub const ARCHIVE_MAJOR: u16 = 8;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 19;
+pub const ARCHIVE_MINOR: u16 = 20;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -218,6 +218,85 @@ pub fn pack_word_kinds(kinds: impl IntoIterator<Item = u8>) -> PackedKinds {
         .take(PACKED_KIND_WORDS)
         .enumerate()
         .fold(0, |acc, (i, k)| acc | (PackedKinds::from(k & 3) << (2 * i)))
+}
+
+/// The nesting of a wide lane element's tuple (`MirLaneShape` and a lane
+/// helper's `payload_mask` / `unit_mask` words of a wide element): its
+/// tuples' arities and its leaves in preorder ([`lane_nest_unpack`]), two
+/// bits a symbol from bit 0 of the first word on: `1` opens a tuple, `2`
+/// is a leaf, `3` closes a tuple, `0` ends. The outer tuple is not
+/// written, so `0` (both words) is a flat tuple, the one shape a wide
+/// element had before archive 8.20. Sixteen leaves in fourteen
+/// nested tuples take 44 symbols, within the 64 of two words.
+pub fn lane_nest_pack(nest: &[u8]) -> Option<(u64, u64)> {
+    fn walk(nest: &[u8], at: &mut usize, out: &mut Vec<u8>) -> Option<()> {
+        let n = *nest.get(*at)?;
+        *at += 1;
+        for _ in 0..n {
+            if *nest.get(*at)? == 0 {
+                out.push(2);
+                *at += 1;
+            } else {
+                out.push(1);
+                walk(nest, at, out)?;
+                out.push(3);
+            }
+        }
+        Some(())
+    }
+    let mut syms = Vec::new();
+    let mut at = 0;
+    walk(nest, &mut at, &mut syms)?;
+    if at != nest.len() || syms.len() > 64 {
+        return None;
+    }
+    if !syms.contains(&1) {
+        return Some((0, 0));
+    }
+    let mut w = [0u64; 2];
+    for (i, &s) in syms.iter().enumerate() {
+        w[i / 32] |= u64::from(s) << (2 * (i % 32));
+    }
+    Some((w[0], w[1]))
+}
+
+/// The preorder nesting ([`lane_nest_pack`]) of a wide element of `k`
+/// words from its two nest words: each tuple's arity and `0` for a leaf,
+/// the outer tuple first. `None` if the words do not describe `k` leaves.
+pub fn lane_nest_unpack(lo: u64, hi: u64, k: usize) -> Option<Vec<u8>> {
+    if lo == 0 && hi == 0 {
+        let mut nest = vec![u8::try_from(k).ok()?];
+        nest.resize(k + 1, 0);
+        return Some(nest);
+    }
+    let sym = |i: usize| ((if i < 32 { lo } else { hi }) >> (2 * (i % 32))) & 3;
+    // Each open tuple's index in `nest`, to count its items.
+    let mut nest = vec![0u8];
+    let mut open = vec![0usize];
+    let mut leaves = 0;
+    for i in 0..64 {
+        let s = sym(i);
+        if s == 0 {
+            break;
+        }
+        let top = *open.last()?;
+        if s == 3 {
+            if open.len() == 1 {
+                return None;
+            }
+            open.pop();
+            continue;
+        }
+        nest[top] = nest[top].checked_add(1)?;
+        if s == 1 {
+            open.push(nest.len());
+            nest.push(0);
+        } else {
+            nest.push(0);
+            leaves += 1;
+        }
+    }
+    (open.len() == 1 && leaves == k).then_some(nest)
 }
 
 /// Word kinds of a class's typed fields, in slot order (minor 24+).
@@ -428,6 +507,28 @@ pub fn decode_archived_program(buffer: &[u8]) -> Result<ArchivedProgram, Archive
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lane_nest_round_trips() {
+        // `(int, int, int)`, `((int, int), int)`, `(int, (int, (int, int)), int)`.
+        let flat = vec![3, 0, 0, 0];
+        assert_eq!(lane_nest_pack(&flat), Some((0, 0)));
+        assert_eq!(lane_nest_unpack(0, 0, 3), Some(flat));
+        for nest in [vec![2, 2, 0, 0, 0], vec![3, 0, 2, 0, 2, 0, 0, 0]] {
+            let k = nest.iter().filter(|&&n| n == 0).count();
+            let (lo, hi) = lane_nest_pack(&nest).expect("packs");
+            assert_ne!((lo, hi), (0, 0));
+            assert_eq!(lane_nest_unpack(lo, hi, k), Some(nest));
+        }
+        // Sixteen leaves, four `((a, b), (c, d))`: past the first word.
+        let mut deep = vec![4];
+        for _ in 0..4 {
+            deep.extend([2, 2, 0, 0, 2, 0, 0]);
+        }
+        let (lo, hi) = lane_nest_pack(&deep).expect("packs");
+        assert_eq!(lane_nest_unpack(lo, hi, 16), Some(deep));
+        assert_eq!(lane_nest_unpack(lo, hi, 15), None);
+    }
 
     #[test]
     fn tagged_slot_resolves_by_its_tag() {

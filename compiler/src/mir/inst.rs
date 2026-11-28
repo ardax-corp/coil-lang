@@ -653,14 +653,16 @@ pub enum MirInst {
     },
     /// Element `index` of a lane array (`k` words per element): its first
     /// word in `dest`, its second (an enum's tag) in `dest_hi`, words 3..k
-    /// of a wide element (a tuple of three or four numbers) in
-    /// `dest_more`. Out of bounds panics, as [`Self::Index`] does.
+    /// of a wide element (the leaves of a tuple nested at any depth) in
+    /// `dest_more`, read from its tuple as `shape` says on an array of one
+    /// word per element. Out of bounds panics, as [`Self::Index`] does.
     LaneIndex {
         dest: ValueId,
         dest_hi: ValueId,
         dest_more: Vec<ValueId>,
         array: ValueId,
         index: ValueId,
+        shape: MirLaneShape,
     },
     /// Store `lo`, `hi` and `more` as element `index` of a lane array
     /// (or, on an array of one word per element, the element boxed as
@@ -1085,8 +1087,9 @@ impl VecLoopKind {
 pub const EXTERN_CALL_MAX_WORDS: usize = common::FFI_CALL_MAX_WORDS;
 
 /// The most words past the second a lane element (`LaneIndex::dest_more`,
-/// `MirLaneShape`) and a flat wide field carry: four words of storage.
-pub const MAX_RET_MORE: usize = 2;
+/// `MirLaneShape`) carries: the wide-value word budget, as many as a
+/// direct call carries ([`MAX_CALL_RET_MORE`]).
+pub const MAX_RET_MORE: usize = common::PACKED_KIND_WORDS - 2;
 
 /// The most result words past the second a direct `Call` / `Return`
 /// carries (`dest_more` / `more` / `MirFunc::ret_more_tys`): a direct call
@@ -1170,6 +1173,11 @@ impl MirFfiOp {
 /// `payload_mask` is set, the empty tuple when bit `t` of `unit_mask` is),
 /// or a two-item tuple when `payload_mask` is `0`. `tag_mask` is the lane
 /// array's: the tags under which the first word is a heap reference.
+///
+/// A wide element's (three or more words, the leaves of a tuple at any
+/// depth): `tag_mask` has bit `j` set when word `j` is a heap word (the
+/// lane array's), and `payload_mask` / `unit_mask` are its tuple's nesting
+/// ([`common::lane_nest_pack`]; both `0` for a flat tuple).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct MirLaneShape {
     pub tag_mask: u64,
@@ -1183,8 +1191,8 @@ pub enum MirAllocKind {
     Array,
     /// A lane array of `2 + more` words per element, `elems` their words
     /// in order (`ObjArray::from_lanes`); lane 0 is a heap reference under
-    /// the tags set in `tag_mask` (`0` for a wide element, whose words are
-    /// all numbers).
+    /// the tags set in `tag_mask`, or for a wide element (`more` > 0) lane
+    /// `j` is one when bit `j` of `tag_mask` is set ([`MirLaneShape`]).
     Lanes {
         tag_mask: u64,
         more: u8,

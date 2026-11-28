@@ -1,0 +1,47 @@
+// CPU: a `Vec` of a nested tuple with a string leaf, ((string, int), int),
+// read and written in a loop. Each element's three leaves are lanes of the
+// array, the string's a pointer lane, so a read loads three words and a
+// write stores them: no tuple object made per write, none followed per
+// read.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn fill(int n) -> Vec<((string, int), int)> {
+    let v: Vec<((string, int), int)> = [];
+    let i = 0;
+    while i < n {
+        let name = "odd";
+        if (i & 1) == 0 {
+            name = "even";
+        }
+        v.push(((name, i), i * 3));
+        i += 1;
+    }
+    return v;
+}
+
+#[inline(never)]
+fn step(Vec<((string, int), int)> v, int r) -> int {
+    let n = v.len();
+    let s = 0;
+    let i = 0;
+    while i < n {
+        let ((name, a), b) = v[i];
+        s += a + b + name.len();
+        v[i] = ((name, (b + r) & 1023), (a + i) & 4095);
+        i += 1;
+    }
+    return s;
+}
+
+fn main() {
+    let v = fill(1000);
+    let total = 0;
+    let r = 0;
+    while r < 5000 {
+        total += step(v, r);
+        r += 1;
+    }
+    let _ = print(format("%i %v %i\n", total, v[7][0][0], v[7][1]));
+}

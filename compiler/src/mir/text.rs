@@ -287,7 +287,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
-        MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } => {
+        MirInst::LaneIndex { dest, dest_hi, dest_more, array, index, shape } => {
             write!(f, "{dest}, {dest_hi}")?;
             for w in dest_more {
                 write!(f, ", {w}")?;
@@ -296,7 +296,12 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             for w in dest_more {
                 write!(f, ".{}", func.ty(*w))?;
             }
-            write!(f, " {array}, {index}")
+            write!(f, " {array}, {index}")?;
+            // A wide element's heap lanes and nesting.
+            if *shape != MirLaneShape::default() {
+                write!(f, ", {}", lane_shape(shape))?;
+            }
+            Ok(())
         }
         MirInst::LaneStore { dest, array, index, lo, hi, more, shape } => {
             write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}, ")?;
@@ -561,10 +566,11 @@ impl<'a> Parser<'a> {
             let array = self.value()?;
             self.expect(',')?;
             let index = self.value()?;
+            let shape = if self.eat(',') { self.lane_shape()? } else { MirLaneShape::default() };
             for (&v, &ty) in [dest, hi].iter().chain(&dest_more).zip(&tys) {
                 ensure_ty(types, v, ty);
             }
-            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, dest_more, array, index });
+            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, dest_more, array, index, shape });
         }
         if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") && !op.starts_with("host.") {
             return Err(ParseError("pair dest is call-only".into()));

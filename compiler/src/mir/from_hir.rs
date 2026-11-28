@@ -234,9 +234,19 @@ impl HirLaneElem {
         [self.lo, self.hi].into_iter().chain(self.more.iter().flatten().copied()).collect()
     }
 
-    /// A wide element: a tuple of more than two number words.
+    /// A wide element: a tuple of more than two leaves, nested at any
+    /// depth, each a number or a heap word.
     pub fn is_wide(&self) -> bool {
         self.more[0].is_some()
+    }
+
+    /// A wide element's leaves' word types and kinds and its tuple's
+    /// nesting, from its shape ([`MirLaneShape`]).
+    fn wide(&self) -> Result<WideWords, Refusal> {
+        let tys = self.tys();
+        let nest = common::lane_nest_unpack(self.shape.payload_mask, self.shape.unit_mask, tys.len()).ok_or("lane nesting")?;
+        let kinds = (0..tys.len()).map(|j| if self.shape.tag_mask >> j & 1 == 1 { common::WORD_POINTER } else { common::WORD_SCALAR }).collect();
+        Ok(WideWords { tys, kinds, nest, leaf0: Ty::Con(crate::typechecking::ty::INT.into()) })
     }
 
     /// The `Alloc` of a lane array of this element.
@@ -635,19 +645,6 @@ impl Lower<'_> {
         Ok(())
     }
 
-    /// The `n` items of flat tuple value `id` as words (a lane array's
-    /// wide element), as [`Self::tuple_leaf_words`].
-    fn tuple_item_words(&mut self, id: HirId, tys: &[MirTy]) -> Result<Option<Vec<ValueId>>, Refusal> {
-        self.tuple_leaf_words(id, &WideWords::flat(tys.to_vec()))
-    }
-
-    /// A flat tuple object of number words `words`, as `make_tuple` makes
-    /// one.
-    fn flat_tuple(&mut self, words: Vec<ValueId>) -> Result<ValueId, Refusal> {
-        let w = WideWords::flat(vec![MirTy::I64; words.len()]);
-        self.wide_tuple_at(&words, &w, &mut (0, 0))
-    }
-
     /// The tuple of shape `w` its leaves `words` make, nested tuples first,
     /// as `make_tuple` makes each: the value of `id`, two words when its
     /// type is a two-word one (`((int, int), int)`).
@@ -1029,16 +1026,6 @@ struct WideWords {
     kinds: Vec<u8>,
     nest: Vec<u8>,
     leaf0: Ty,
-}
-
-impl WideWords {
-    /// One tuple of number words `tys`, nothing nested.
-    fn flat(tys: Vec<MirTy>) -> Self {
-        let mut nest = vec![u8::try_from(tys.len()).expect("a wide tuple's arity")];
-        nest.resize(tys.len() + 1, 0);
-        let kinds = vec![common::WORD_SCALAR; tys.len()];
-        Self { tys, kinds, nest, leaf0: Ty::Con(crate::typechecking::ty::INT.into()) }
-    }
 }
 
 /// How a body's lane arrays are used ([`LowerCx::lane_uses`]).
@@ -7641,11 +7628,11 @@ impl Lower<'_> {
                     i
                 }
             };
-            let words = l.b.ins_lane_index_words(arr, i, &lane.tys()).map_err(mir)?;
+            let words = l.b.ins_lane_index_words(arr, i, &lane.tys(), lane.shape).map_err(mir)?;
             // Boxed before the array drops it: a heap payload is then held
             // by its box, a reference.
             let boxed = if lane.is_wide() {
-                l.flat_tuple(words)?
+                l.wide_tuple_at(&words, &lane.wide()?, &mut (0, 0))?
             } else {
                 let Val::V(boxed) = l.box_pair_val(&elem, words[0], words[1])? else {
                     return Err("lane element box".into());
@@ -7733,8 +7720,8 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         if lane.is_wide() {
-            let words = self.b.ins_lane_index_words(arr, idx, &lane.tys()).map_err(mir)?;
-            return Ok(Val::V(self.flat_tuple(words)?));
+            let words = self.b.ins_lane_index_words(arr, idx, &lane.tys(), lane.shape).map_err(mir)?;
+            return Ok(Val::V(self.wide_tuple_at(&words, &lane.wide()?, &mut (0, 0))?));
         }
         let (lo, hi) = self.b.ins_lane_index(arr, idx, lane.lo, lane.hi).map_err(mir)?;
         Ok(Val::Pair(lo, hi))
@@ -7745,7 +7732,7 @@ impl Lower<'_> {
     /// returns.
     fn lane_words(&mut self, id: HirId, lane: &HirLaneElem) -> Result<Option<Vec<ValueId>>, Refusal> {
         if lane.is_wide() {
-            return self.tuple_item_words(id, &lane.tys());
+            return self.tuple_leaf_words(id, &lane.wide()?);
         }
         Ok(self.pair(id)?.map(|(lo, hi)| vec![lo, hi]))
     }
@@ -9133,6 +9120,9 @@ impl Lower<'_> {
         let mut slots: Vec<Option<(LocalId, MirTy)>> = vec![None; n];
         // A wide element bound whole: its tuple's local.
         let mut whole = None;
+        // A tuple nested in a wide element bound whole: its local, and
+        // where it starts in the nesting and in the leaves.
+        let mut subs = Vec::new();
         match pat {
             HirPat::Bind(local) if lane.is_wide() => {
                 if self.local_ty(*local)? != MirTy::HeapRef {
@@ -9145,6 +9135,10 @@ impl Lower<'_> {
                 slots = vec![Some((lo, lo_ty)), Some((hi, hi_ty))];
             }
             HirPat::Wild => {}
+            HirPat::Tuple(_) if lane.is_wide() => {
+                let w = lane.wide()?;
+                self.wide_pat(pat, &w, &mut (0, 0), &mut slots, &mut subs)?;
+            }
             HirPat::Tuple(pats) if pats.len() == n => {
                 for (slot, p) in slots.iter_mut().zip(pats) {
                     match p {
@@ -9173,13 +9167,17 @@ impl Lower<'_> {
         let more = self.b.ins_cmp(MirCmpOp::Lt, cur, len).map_err(mir)?;
         self.b.branch(more, body_b, exit).map_err(mir)?;
         self.switch(body_b);
-        if whole.is_some() || slots.iter().any(Option::is_some) {
+        if whole.is_some() || !subs.is_empty() || slots.iter().any(Option::is_some) {
             let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
-            let words = self.b.ins_lane_index_words(arr, cur, &lane.tys()).map_err(mir)?;
+            let words = self.b.ins_lane_index_words(arr, cur, &lane.tys(), lane.shape).map_err(mir)?;
             if let Some(slot) = whole {
-                let tuple = self.flat_tuple(words)?;
+                let tuple = self.wide_tuple_at(&words, &lane.wide()?, &mut (0, 0))?;
                 self.b.def_local(slot, tuple).map_err(mir)?;
             } else {
+                for (slot, mut at) in subs {
+                    let tuple = self.wide_tuple_at(&words, &lane.wide()?, &mut at)?;
+                    self.b.def_local(slot, tuple).map_err(mir)?;
+                }
                 for (slot, w) in slots.into_iter().zip(words) {
                     if let Some((slot, ty)) = slot {
                         let w = self.fit(w, ty)?;
@@ -9189,6 +9187,54 @@ impl Lower<'_> {
             }
         }
         self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1), None)
+    }
+
+    /// Where tuple pattern `pat` over the tuple at `at.0` of wide element
+    /// `w`'s nesting (its first leaf `at.1`) binds each leaf: a leaf's
+    /// local into `slots`, a nested tuple bound whole into `subs` (its
+    /// local and where it starts), a pair local's two words into theirs.
+    fn wide_pat(&mut self, pat: &HirPat, w: &WideWords, at: &mut (usize, usize), slots: &mut [Option<(LocalId, MirTy)>], subs: &mut Vec<(LocalId, (usize, usize))>) -> Result<(), Refusal> {
+        let n = w.nest[at.0];
+        if n == 0 {
+            match pat {
+                HirPat::Wild => {}
+                HirPat::Bind(l) if self.unit_local(*l) => {}
+                HirPat::Bind(l) if self.pair_local(*l).is_none() => slots[at.1] = Some((self.slot(*l)?, self.local_ty(*l)?)),
+                _ => return Err("for in pattern".into()),
+            }
+            at.0 += 1;
+            at.1 += 1;
+            return Ok(());
+        }
+        match pat {
+            HirPat::Tuple(pats) if pats.len() == usize::from(n) => {
+                at.0 += 1;
+                for p in pats {
+                    self.wide_pat(p, w, at, slots, subs)?;
+                }
+                return Ok(());
+            }
+            HirPat::Bind(l) if n == 2 && w.nest.get(at.0 + 1..at.0 + 3) == Some(&[0, 0]) && self.pair_local(*l).is_some() => {
+                let (lo, hi, lo_ty, hi_ty) = self.pair_local(*l).ok_or("for in lane binding")?;
+                slots[at.1] = Some((lo, lo_ty));
+                slots[at.1 + 1] = Some((hi, hi_ty));
+            }
+            HirPat::Bind(l) if self.local_ty(*l)? == MirTy::HeapRef => subs.push((self.slot(*l)?, *at)),
+            HirPat::Wild => {}
+            _ => return Err("for in pattern".into()),
+        }
+        // Past the tuple's nesting and leaves.
+        let mut open = usize::from(n);
+        at.0 += 1;
+        while open > 0 {
+            let a = w.nest[at.0];
+            open = open - 1 + usize::from(a);
+            if a == 0 {
+                at.1 += 1;
+            }
+            at.0 += 1;
+        }
+        Ok(())
     }
 
     /// Branch on `idx` to each of slots `base..base + n`, as HIR emission's

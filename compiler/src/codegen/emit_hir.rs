@@ -2091,15 +2091,24 @@ impl Compiler {
         if Ty::has_var(elem) {
             return None;
         }
-        // A tuple of three or four immediates: its number words in place,
-        // boxed as a tuple of them.
-        if let Some(items) = crate::layout::wide_scalar_items(&self.checker, elem) {
-            let tys = items.iter().map(crate::mir::scalar_mir_ty).collect::<Option<Vec<_>>>()?;
+        // A tuple of numbers and heap words nested at any depth
+        // (`layout::wide_field_shape`): its leaves in place, boxed as its
+        // tuple, its heap leaves' lanes and its nesting in the shape.
+        if let Some(shape) = crate::layout::wide_field_shape(&self.checker, elem) {
+            let tys = shape
+                .leaves
+                .iter()
+                .zip(&shape.kinds)
+                .map(|(t, &k)| if k == common::WORD_POINTER { Some(crate::mir::MirTy::HeapRef) } else { crate::mir::scalar_mir_ty(t) })
+                .collect::<Option<Vec<_>>>()?;
             let mut more = [None; crate::mir::MAX_RET_MORE];
             for (m, &t) in more.iter_mut().zip(&tys[2..]) {
                 *m = Some(t);
             }
-            return Some(crate::mir::HirLaneElem { lo: tys[0], hi: tys[1], more, shape: crate::mir::MirLaneShape::default() });
+            let tag_mask = shape.kinds.iter().enumerate().filter(|(_, k)| **k == common::WORD_POINTER).fold(0u64, |m, (j, _)| m | 1 << j);
+            let (payload_mask, unit_mask) = common::lane_nest_pack(&shape.nest)?;
+            let lane = crate::mir::MirLaneShape { tag_mask, payload_mask, unit_mask };
+            return Some(crate::mir::HirLaneElem { lo: tys[0], hi: tys[1], more, shape: lane });
         }
         let (lo, hi) = self.hir_mir_pair_tys(elem)?;
         let (tag_mask, payload_mask, unit_mask) = crate::layout::pair_lane_shape(&self.checker, elem)?;
@@ -4041,7 +4050,7 @@ impl Compiler {
         if !ftv_ty(ty).is_empty()
             || matches!(strip_readonly(ty), Ty::Con(n) if n == BYTE)
             || !matches!(crate::layout::of_resolved(c, ty), Layout::Word)
-            || crate::layout::wide_scalar_items(c, ty).is_some()
+            || crate::layout::wide_field_shape(c, ty).is_some()
         {
             return common::WORD_MODE_OTHER;
         }

@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 19, below, is the
-current version, 8.19 with MIR section `FORMAT` 28). A runtime refuses a major
+only add something to the format raise the minor (minor 20, below, is the
+current version, 8.20 with MIR section `FORMAT` 29). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -260,6 +260,22 @@ its table, keys and values) and stores its value, and the value-shape fold
 that gates it ([key-index.md](key-index.md), "Map objects"). Native code
 runs `map_put` in place. An 8.18 archive loads unchanged: it never calls
 them.
+
+Minor 20 (heap and nested lanes) lets a wide lane element (three to sixteen
+words, `MirAllocKind::Lanes` with `more` > 0) be the leaves of a tuple
+nested at any depth, each a number or a heap word. Its `MirLaneShape` says
+which: `tag_mask` bit `j` is set when word `j` is a heap word (also a wide
+lane array's `ObjArray::tag_mask`, which the collector and the counts read
+per lane), and `payload_mask` / `unit_mask` hold its nesting
+(`common::lane_nest_pack`; both `0` for a flat tuple, 8.19's only shape).
+`LaneIndex` carries a shape too, written after its index. `ALLOC_WIDE_LANES`
+takes the heap lanes above the word count in `extra`, and the wide lane
+helpers take a shape other than a flat tuple of numbers' as three words in
+their buffer, flagged in `k` (`machine::native::WIDE_SHAPED`), so a flat
+element of numbers calls them as before. The MIR section is a new
+`FORMAT`, 29 (`common::MIR_SECTION_NESTED_LANES_FORMAT`), and the reader
+refuses 28, whose `LaneIndex` has no shape: an 8.19 archive's code is
+compiled again. A snapshot's lane array keeps its mask as before.
 
 ## Major 7
 

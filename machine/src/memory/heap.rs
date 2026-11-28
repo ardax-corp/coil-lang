@@ -3603,10 +3603,15 @@ impl ObjArray {
     }
 
     /// Whether word `i` of lane words `words` (`k` per element) is a
-    /// reference: lane 0 of an element whose tag (lane 1) is in `mask`.
+    /// reference: of a two-word element, lane 0 of an element whose tag
+    /// (lane 1) is in `mask`; of a wide element (`k` > 2), lane `j` when
+    /// bit `j` of `mask` is set (a heap leaf of its tuple).
     #[inline]
     pub(crate) fn lane_pointer(words: &[Value], k: usize, mask: u64, i: usize) -> bool {
         let lane = i % k;
+        if k > 2 {
+            return mask >> lane & 1 == 1;
+        }
         lane == 0 && words.get(i + 1).is_some_and(|t| t.bits() < 64 && mask >> t.bits() & 1 == 1)
     }
 
