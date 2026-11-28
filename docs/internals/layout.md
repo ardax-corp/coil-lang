@@ -499,23 +499,34 @@ of a lane type allocate an empty lane array. An early free or a
 copy-on-write copy of the array keeps it in lanes as well. `coil dissect
 --boxes` lists each place an array still converts (`lane array`).
 
-A *wide* element, a tuple of three or four immediates (`(int, int, int)`,
-`(float, float, float, int)`, `layout::wide_scalar_items`), is a lane
-array of `k` = 3 or 4 words per element, all numbers (`tag_mask` 0). Its
-`Alloc` is `Lanes { more: k - 2 }` (`alloc.lanes 0/3` in the text form,
-runtime kind `ALLOC_WIDE_LANES`), and the lane ops carry the words past
-the second: `LaneIndex::dest_more`, `LaneStore::more`, `LanePush::more`
-(at most `MAX_RET_MORE`, verified to be numbers, the shape the default
-one). An element read is a fresh tuple of its words, which
-`forward_tuple_loads` drops when the tuple is only destructured; a store
-or push of a tuple made in place takes its items directly. A wide element
-boxes as the tuple `alloc.tuple` makes (every word `WORD_SCALAR`), and
-`LanesToWords` boxes a `k`-word array's elements so whatever its shape.
-Native code reads and stores the `k` words in place at stride `k` (the
-lane view checks the array's `k`) and calls `coil_native_lane_*_wide`
-with the words in a stack buffer otherwise; a push always calls it. Wide
-elements holding a heap word, and open `T` elements, stay one word per
-element.
+A *wide* element, a tuple of three to sixteen leaves nested at any depth,
+each a number or a one-word heap object (`(int, int, int)`, `((int, int),
+int)`, `(string, int, int)`, `((Handle, int), (int, int))`,
+`layout::wide_field_shape`, the rule a flat class field uses), is a lane
+array of `k` words per element, one per leaf. Its shape
+(`MirLaneShape`) says what a word is: bit `j` of `tag_mask` is set when
+word `j` is a heap word (the array's `ObjArray::tag_mask`, which
+`ObjArray::lane_pointer` reads per lane for a `k` > 2 array, so the
+collector and the counts see those words), and `payload_mask` /
+`unit_mask` hold the tuple's nesting (`common::lane_nest_pack`, two bits a
+symbol; both `0` for a flat tuple). Its `Alloc` is `Lanes { tag_mask,
+more: k - 2 }` (runtime kind `ALLOC_WIDE_LANES`, the heap lanes above the
+word count in `extra`), and the lane ops carry the words past the second:
+`LaneIndex::dest_more`, `LaneStore::more`, `LanePush::more` (at most
+`MAX_RET_MORE`, verified against the shape: a `heapref` where its bit is
+set, a number elsewhere). An element read builds its tuples from the
+words, inner ones first, which `forward_tuple_loads` drops when they are
+only destructured; a `for` pattern binds each leaf from its word, a
+nested tuple bound whole from its leaves. A store or push of a tuple made
+in place takes its leaves directly. A wide element boxes as `alloc.tuple`
+makes each of its tuples (a heap leaf a pointer item), and `LanesToWords`
+boxes a `k`-word array's elements so. Native code reads the `k` words in
+place at stride `k` (the lane view checks the array's `k`) and stores them
+so when no word is a heap word; otherwise, and on an array of one word per
+element, it calls `coil_native_lane_*_wide` with the words in a stack
+buffer and the shape, and the helper counts a heap word's store. A push
+always calls it. A wide element with a two-word or niche leaf, and open `T`
+elements, stay one word per element.
 
 ## The two-slot calling convention
 

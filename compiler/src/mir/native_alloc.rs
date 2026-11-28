@@ -36,7 +36,8 @@ pub fn alloc_call(
     Ok(match kind {
         MirAllocKind::Array => call(ALLOC_ARRAY, n, u64::from(kinds), None),
         MirAllocKind::Lanes { tag_mask, more: 0 } => call(ALLOC_LANES, n, tag_mask, None),
-        MirAllocKind::Lanes { more, .. } => call(ALLOC_WIDE_LANES, n, 2 + u64::from(more), None),
+        // A wide element's heap lanes ride above its word count.
+        MirAllocKind::Lanes { tag_mask, more } => call(ALLOC_WIDE_LANES, n, (2 + u64::from(more)) | tag_mask << 8, None),
         MirAllocKind::Enum { tag } => call(ALLOC_ENUM, n, u64::from(tag) | (kinds_or_packed() << 32), None),
         MirAllocKind::Object { type_id, nfields } => {
             call(ALLOC_OBJECT, u64::from(nfields), u64::from(type_id) | u64::from(kinds) << 32, None)

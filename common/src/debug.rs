@@ -343,6 +343,13 @@ pub const MIR_SECTION_COW_INDEX_FORMAT: u8 = 27;
 /// array.
 pub const MIR_SECTION_COW_ELEM_FORMAT: u8 = 28;
 
+/// The first MIR section format whose wide lane elements may nest and hold
+/// heap words (archive 8.20): `LaneIndex` writes its `MirLaneShape` after
+/// its index, and a wide shape's `tag_mask` names its heap lanes and its
+/// other two words its nesting. A reader refuses format 28, whose
+/// `LaneIndex` has none.
+pub const MIR_SECTION_NESTED_LANES_FORMAT: u8 = 29;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

@@ -893,13 +893,14 @@ impl MirBuilder {
 
     /// Element `index` of a lane array: its two words, typed `lo` / `hi`.
     pub fn ins_lane_index(&mut self, array: ValueId, index: ValueId, lo: MirTy, hi: MirTy) -> Result<(ValueId, ValueId), MirError> {
-        let w = self.ins_lane_index_words(array, index, &[lo, hi])?;
+        let w = self.ins_lane_index_words(array, index, &[lo, hi], MirLaneShape::default())?;
         Ok((w[0], w[1]))
     }
 
     /// Element `index` of a lane array of `tys.len()` words per element
-    /// (two, or a wide element's three or four): its words, typed `tys`.
-    pub fn ins_lane_index_words(&mut self, array: ValueId, index: ValueId, tys: &[MirTy]) -> Result<Vec<ValueId>, MirError> {
+    /// (two, or a wide element's three to sixteen, boxed as `shape` says):
+    /// its words, typed `tys`.
+    pub fn ins_lane_index_words(&mut self, array: ValueId, index: ValueId, tys: &[MirTy], shape: MirLaneShape) -> Result<Vec<ValueId>, MirError> {
         if self.resolve_ty(array) != MirTy::HeapRef || !self.resolve_ty(index).is_int() {
             return Err(MirError::msg("LaneIndex operand type"));
         }
@@ -907,7 +908,7 @@ impl MirBuilder {
             return Err(MirError::msg(format!("LaneIndex dest is {tys:?}")));
         }
         let words: Vec<ValueId> = tys.iter().map(|&t| self.alloc(t)).collect();
-        self.push(MirInst::LaneIndex { dest: words[0], dest_hi: words[1], dest_more: words[2..].to_vec(), array: self.resolve(array), index: self.resolve(index) })?;
+        self.push(MirInst::LaneIndex { dest: words[0], dest_hi: words[1], dest_more: words[2..].to_vec(), array: self.resolve(array), index: self.resolve(index), shape })?;
         Ok(words)
     }
 

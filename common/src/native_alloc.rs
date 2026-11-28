@@ -10,6 +10,7 @@ pub const ALLOC_POLY_FN: u64 = 5;
 pub const ALLOC_DROP_ENUM: u64 = 6;
 pub const ALLOC_CORO: u64 = 7;
 pub const ALLOC_LANES: u64 = 8;
-/// A lane array of wide elements (three or four number words each): `extra`
-/// is the words per element.
+/// A lane array of wide elements (3 to [`crate::PACKED_KIND_WORDS`] words
+/// each): `extra`'s low byte is the words per element, the bits above it
+/// the lanes that are heap words (`ObjArray::tag_mask` of a wide element).
 pub const ALLOC_WIDE_LANES: u64 = 9;

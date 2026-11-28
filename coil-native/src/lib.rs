@@ -1504,7 +1504,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need_scalar(dest)?;
                         need_heap(array)?;
                     }
-                    MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } => {
+                    MirInst::LaneIndex { dest, dest_hi, dest_more, array, index, .. } => {
                         need(dest)?;
                         need(dest_hi)?;
                         for w in dest_more {
@@ -2512,9 +2512,9 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let lane_store = module.declare_function("coil_native_lane_store", Linkage::Import, &s8).map_err(e)?;
     let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s7).map_err(e)?;
     let lanes_to_words = module.declare_function("coil_native_lanes_to_words", Linkage::Import, &s5).map_err(e)?;
-    let lane_index_wide = module.declare_function("coil_native_lane_index_wide", Linkage::Import, &s5).map_err(e)?;
-    let lane_store_wide = module.declare_function("coil_native_lane_store_wide", Linkage::Import, &s5).map_err(e)?;
-    let lane_push_wide = module.declare_function("coil_native_lane_push_wide", Linkage::Import, &s4).map_err(e)?;
+    let lane_index_wide = module.declare_function("coil_native_lane_index_wide", Linkage::Import, &s7).map_err(e)?;
+    let lane_store_wide = module.declare_function("coil_native_lane_store_wide", Linkage::Import, &s8).map_err(e)?;
+    let lane_push_wide = module.declare_function("coil_native_lane_push_wide", Linkage::Import, &s7).map_err(e)?;
     let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
     let free_early = module.declare_function("coil_native_free_early", Linkage::Import, &s3).map_err(e)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
@@ -3243,10 +3243,10 @@ impl<'a> Lower<'a> {
         let defer = module.declare_func_in_func(ids.defer, func);
         let claim = module.declare_func_in_func(ids.claim, func);
         let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
-        // Four words: a view's, or a wide lane element's words.
+        // A view's four words, or a wide lane element's sixteen.
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            32,
+            8 * common::PACKED_KIND_WORDS as u32,
             3,
         ));
         let ret = func.signature.returns[0].value_type;
@@ -6383,7 +6383,7 @@ impl<'a> Lower<'a> {
                     self.b.switch_to_block(join);
                 }
             }
-            MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } if !dest_more.is_empty() => {
+            MirInst::LaneIndex { dest, dest_hi, dest_more, array, index, shape } if !dest_more.is_empty() => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
                 let i = self.coerce(i, types::I64);
@@ -6403,7 +6403,8 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(slow);
                 let kk = self.b.ins().iconst(types::I64, k as i64);
                 let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
-                self.call_checked(self.lane_index_wide, &[self.ctx, a, i, kk, out]);
+                let [_, nl, nh] = self.lane_shape(shape);
+                self.call_checked(self.lane_index_wide, &[self.ctx, a, i, kk, out, nl, nh]);
                 let words: Vec<cranelift_codegen::ir::BlockArg> = (0..k).map(|n| self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8 * n as i32).into()).collect();
                 self.b.ins().jump(join, &words);
                 self.b.switch_to_block(join);
@@ -6437,7 +6438,7 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, lo);
                 self.set_word(f, *dest_hi, hi);
             }
-            MirInst::LaneStore { dest, array, index, lo, hi, more, .. } if !more.is_empty() => {
+            MirInst::LaneStore { dest, array, index, lo, hi, more, shape } if !more.is_empty() => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
                 let i = self.coerce(i, types::I64);
@@ -6446,20 +6447,26 @@ impl<'a> Lower<'a> {
                     let w = self.get(f, *v);
                     words.push(self.coerce(w, types::I64));
                 }
-                // In place when the array is in lanes and `i` in bounds: the
-                // words are numbers, so no count changes.
+                // In place when the array is in lanes and `i` in bounds and
+                // the words are numbers, so no count changes; a heap leaf's
+                // store the helper counts.
                 let (fast, slow) = self.in_lane_view(f, *array, i);
                 let join = self.b.create_block();
                 self.b.switch_to_block(fast);
-                let at = self.lane_element(*array, i);
-                for (n, &w) in words.iter().enumerate() {
-                    self.b.ins().store(MemFlagsData::trusted(), w, at, 8 * n as i32);
+                if shape.tag_mask == 0 {
+                    let at = self.lane_element(*array, i);
+                    for (n, &w) in words.iter().enumerate() {
+                        self.b.ins().store(MemFlagsData::trusted(), w, at, 8 * n as i32);
+                    }
+                    self.b.ins().jump(join, &[]);
+                } else {
+                    self.b.ins().jump(slow, &[]);
                 }
-                self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(slow);
                 let buf = self.lane_buffer(&words);
                 let k = self.b.ins().iconst(types::I64, words.len() as i64);
-                self.call_checked(self.lane_store_wide, &[self.ctx, a, i, buf, k]);
+                let [t, nl, nh] = self.lane_shape(shape);
+                self.call_checked(self.lane_store_wide, &[self.ctx, a, i, buf, k, t, nl, nh]);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 let one = self.b.ins().iconst(types::I64, 1);
@@ -6486,7 +6493,7 @@ impl<'a> Lower<'a> {
                 let one = self.b.ins().iconst(types::I64, 1);
                 self.set(f, *dest, one);
             }
-            MirInst::LanePush { dest, array, lo, hi, more, .. } if !more.is_empty() => {
+            MirInst::LanePush { dest, array, lo, hi, more, shape } if !more.is_empty() => {
                 let a = self.get(f, *array);
                 let mut words = Vec::with_capacity(2 + more.len());
                 for v in [*lo, *hi].iter().chain(more) {
@@ -6495,7 +6502,8 @@ impl<'a> Lower<'a> {
                 }
                 let buf = self.lane_buffer(&words);
                 let k = self.b.ins().iconst(types::I64, words.len() as i64);
-                let call = self.call_checked(self.lane_push_wide, &[self.ctx, a, buf, k]);
+                let [t, nl, nh] = self.lane_shape(shape);
+                let call = self.call_checked(self.lane_push_wide, &[self.ctx, a, buf, k, t, nl, nh]);
                 let w = self.b.inst_results(call)[0];
                 self.drop_views();
                 self.set(f, *dest, w);

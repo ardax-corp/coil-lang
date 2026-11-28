@@ -296,19 +296,6 @@ pub fn scalar_pair(checker: &Checker, ty: &Ty) -> bool {
     }
 }
 
-/// The items of a closed tuple of three or four immediates
-/// (`(int, int, int)`, `(float, float, float, float)`): a value that fits
-/// in up to four number words ([`crate::mir::MAX_RET_MORE`] past a pair),
-/// which a flat class field keeps in its slot and tail slots
-/// (`Checker::class_wide_tails`).
-pub fn wide_scalar_items(checker: &Checker, ty: &Ty) -> Option<Vec<Ty>> {
-    let ty = apply_ty_prune(checker.subst(), ty);
-    match strip_readonly(&ty) {
-        Ty::Tuple(items) if (3..=4).contains(&items.len()) && items.iter().all(is_immediate) => Some(items.clone()),
-        _ => None,
-    }
-}
-
 /// A closed tuple at any depth whose leaves are numbers or heap words
 /// (`(int, int, int)`, `((int, int), int)`, `(string, (int, int))`,
 /// `((Handle, int), int)`) of three to [`common::PACKED_KIND_WORDS`]

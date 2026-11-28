@@ -331,13 +331,19 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>, wide: &HashMap<Label, 
             MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
             MirInst::Call { target, dest_hi: None, .. } => numbers.contains(target),
             MirInst::Call { target, dest_more, .. } if !dest_more.is_empty() => numbers.contains(target),
-            // A wide lane element's words are all numbers.
-            MirInst::LaneIndex { dest_more, .. } => !dest_more.is_empty(),
             MirInst::Phi { .. } => true,
             _ => false,
         })
         .flat_map(MirInst::dests)
         .collect();
+    // A wide lane element's number words are numbers (its heap leaves are
+    // typed `heapref`).
+    out.extend(
+        insts()
+            .filter(|i| matches!(i, MirInst::LaneIndex { dest_more, .. } if !dest_more.is_empty()))
+            .flat_map(MirInst::dests)
+            .filter(|&d| matches!(ty_of(func, d), MirTy::I64 | MirTy::F64 | MirTy::Bool)),
+    );
     // A ground body's `int` parameter is a number, unless it is a pair's
     // low word, typed [`MirTy::MaybeObj`] (it may carry a heap payload).
     if !func.opaque_words {
@@ -845,7 +851,8 @@ impl Pass {
         let maybe = |v: ValueId| matches!(ty_of(func, v), MirTy::I64 | MirTy::MaybeObj | MirTy::Value);
         for inst in func.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
-                // A wide lane element's words are all numbers.
+                // A wide lane element's words are numbers or typed heap
+                // words, none an untyped one.
                 MirInst::LaneIndex { dest_more, .. } if !dest_more.is_empty() => {}
                 MirInst::MatchPayload { .. }
                 | MirInst::ProductLoad { .. }
