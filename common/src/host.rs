@@ -440,6 +440,14 @@ host_natives! {
     224 "map_remove" (2) HEAP_R, NO_CAP => MAP_REMOVE_ID, MAP_REMOVE_NATIVE;
     225 "map_compact" (1) HEAP_R, NO_CAP => MAP_COMPACT_ID, MAP_COMPACT_NATIVE;
     226 "map_clear" (1) HEAP_R, NO_CAP => MAP_CLEAR_ID, MAP_CLEAR_NATIVE;
+    /// The map object natives (archive 8.18): `map_put` takes a map object,
+    /// a class instance whose fields 0, 1 and 2 are its table, its keys and
+    /// its values, and finds or adds a key and stores its value in one call,
+    /// making each field it writes unique itself. `map_word_mode` is a
+    /// value type's word shape, which the compiler folds as it folds
+    /// `key_index_eq_mode`. See `docs/internals/key-index.md`, "Map objects".
+    227 "map_put" (7) HEAP_R, NO_CAP => MAP_PUT_ID, MAP_PUT_NATIVE;
+    228 "map_word_mode" (1) PURE, NO_CAP => MAP_WORD_MODE_ID, MAP_WORD_MODE_NATIVE;
 }
 
 /// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
@@ -449,6 +457,15 @@ pub const KEY_EQ_COIL: i64 = 0;
 pub const KEY_EQ_WORD: i64 = 1;
 /// `eq_mode`: `==` compares string contents (`string`).
 pub const KEY_EQ_STRING: i64 = 2;
+
+/// `map_word_mode`: the type's value is not one word in a `Vec` (a lane or
+/// wide element), or is not known (a type parameter): `map_put` is not for it.
+pub const WORD_MODE_OTHER: i64 = 0;
+/// `map_word_mode`: one number word (`int`, `float`, `bool`): no counts.
+pub const WORD_MODE_NUMBER: i64 = 1;
+/// `map_word_mode`: one word that may name an object (a `string`, a class
+/// instance, a `Vec`, a boxed enum): stores count it.
+pub const WORD_MODE_OBJECT: i64 = 2;
 
 /// Set on the `type_id` argument of `gc_register_finalizer` when the
 /// type's `drop` keeps nothing of `self` (the compiler's escape facts):
@@ -532,7 +549,7 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 // Every row's id is its index (so its consts name their row), and the
 // table only grows.
 const _: () = {
-    assert!(HOST_NATIVES.len() == 227);
+    assert!(HOST_NATIVES.len() == 229);
     let mut i = 0;
     while i < HOST_NATIVES.len() {
         assert!(HOST_NATIVES[i].id as usize == i, "a host native's id is not its index");
@@ -594,6 +611,8 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "map_remove",
     "map_compact",
     "map_clear",
+    "map_put",
+    "map_word_mode",
 ];
 
 /// Whether standard native `id` is in [`DIRECT_HOST_NATIVES`].
@@ -604,7 +623,7 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
 /// Host natives whose result is always a number (a hash, a slot index):
 /// it never names an object, so a frame does not count it.
 pub fn host_returns_number(id: u64) -> bool {
-    [HASH_STRING_ID, KEY_INDEX_FIND_ID, MAP_FIND_ID, MAP_UPSERT_ID, MAP_PROBE_ID, MAP_ADD_ID, MAP_LEN_ID]
+    [HASH_STRING_ID, KEY_INDEX_FIND_ID, MAP_FIND_ID, MAP_UPSERT_ID, MAP_PROBE_ID, MAP_ADD_ID, MAP_LEN_ID, MAP_PUT_ID, MAP_WORD_MODE_ID]
         .iter()
         .any(|&k| u64::from(k) == id)
 }
