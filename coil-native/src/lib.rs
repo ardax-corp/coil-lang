@@ -6524,8 +6524,8 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if from_bytes_in_place_fits(*native_id, *layout, args) => {
-                let join = self.from_bytes_in_place(f, args[0]);
+            MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if string_from_bytes_in_place_fits(*native_id, *layout, args) => {
+                let join = self.string_from_bytes_in_place(f, args[0]);
                 let w = self.host_call(f, *native_id, *layout, args);
                 self.b.ins().jump(join, &[w.into()]);
                 self.b.switch_to_block(join);
@@ -8513,7 +8513,7 @@ impl<'a> Lower<'a> {
     /// result's niche. Anything else (word storage, a longer or non-ASCII
     /// buffer, no slot) branches to the host call, after which the caller
     /// jumps to the returned join block with its result.
-    fn from_bytes_in_place(&mut self, f: &MirFunc, buf: ValueId) -> Block {
+    fn string_from_bytes_in_place(&mut self, f: &MirFunc, buf: ValueId) -> Block {
         let t = MemFlagsData::trusted();
         let l = machine::native::array_slots();
         let sa = machine::native::string_alloc();
@@ -9141,8 +9141,8 @@ fn lane_expr_fits(e: &compiler::native_mir::LaneExpr, streams: usize, scalars: u
 /// (`Lower::slice_in_place`; `COIL_NATIVE_INLINE_ALLOC=0` turns it off).
 /// Whether a `from_bytes` / `from_bytes_take` call returns its result in
 /// the niche layout, so a short ASCII one can be made in place
-/// ([`Lower::from_bytes_in_place`]).
-fn from_bytes_in_place_fits(native_id: u16, layout: u8, args: &[ValueId]) -> bool {
+/// ([`Lower::string_from_bytes_in_place`]).
+fn string_from_bytes_in_place_fits(native_id: u16, layout: u8, args: &[ValueId]) -> bool {
     (native_id == common::FROM_BYTES_ID || native_id == common::FROM_BYTES_TAKE_ID)
         && args.len() == 1
         && common::host_layout_base(u32::from(layout)) == common::HOST_ENUM_LAYOUT_RESULT_NICHE

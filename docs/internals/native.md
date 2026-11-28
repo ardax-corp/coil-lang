@@ -536,7 +536,7 @@ string-class slot, writes a young empty inline string's image, the length byte a
 bytes, and counts it. Anything else (an end the host clamps or reports, a longer result,
 a closed gate, a spent chunk) takes the host call.
 `from_bytes` and `from_bytes_take` of a byte-storage array of up to 30 bytes, all
-below 0x80, make their string the same way (`from_bytes_in_place`, sharing
+below 0x80, make their string the same way (`string_from_bytes_in_place`, sharing
 `inline_string` with the slice): ASCII is UTF-8 with no further check, and the
 string's word is the result's `Ok` niche. A longer, non-ASCII or word-stored buffer
 takes the host call.
