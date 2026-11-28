@@ -908,6 +908,8 @@ impl MirBuilder {
             return Err(MirError::msg(format!("LaneIndex dest is {tys:?}")));
         }
         let words: Vec<ValueId> = tys.iter().map(|&t| self.alloc(t)).collect();
+        // A two-word element's read needs no shape.
+        let shape = if tys.len() > 2 { shape } else { MirLaneShape::default() };
         self.push(MirInst::LaneIndex { dest: words[0], dest_hi: words[1], dest_more: words[2..].to_vec(), array: self.resolve(array), index: self.resolve(index), shape })?;
         Ok(words)
     }

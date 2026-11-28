@@ -250,7 +250,7 @@ pub fn lane_nest_pack(nest: &[u8]) -> Option<(u64, u64)> {
     if at != nest.len() || syms.len() > 64 {
         return None;
     }
-    if !syms.iter().any(|&s| s == 1) {
+    if !syms.contains(&1) {
         return Some((0, 0));
     }
     let mut w = [0u64; 2];
