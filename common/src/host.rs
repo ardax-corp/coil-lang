@@ -23,7 +23,29 @@ pub struct HostNative {
     /// ([`crate::open_mode_caps`]). Every row states it, so a new native
     /// cannot ship ungated by accident.
     pub caps: Caps,
+    /// What the call can do to the frame that makes it ([`HostReach`]):
+    /// [`HostReach::Runtime`] unless its row says `LEAF`.
+    pub reach: HostReach,
 }
+
+/// What a host call can do to its caller's frame beyond its result. The
+/// count pass ([`host_is_leaf`]) keeps a borrowed argument's or a live
+/// owner's rooting across a call only when the call can reach it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostReach {
+    /// It may panic (the frame unwinds there), collect, run code (a
+    /// `drop`, a callback, another task) or overwrite or release a
+    /// reference it can reach (an owner of something the frame borrows).
+    Runtime,
+    /// None of that: it reads its arguments, may write numbers or bytes
+    /// into them or append counted copies of their words (it counts what
+    /// it writes itself), and may return a fresh object. Making that object
+    /// frees nothing and never collects: a collection it makes due runs at
+    /// the caller's next safepoint.
+    Leaf,
+}
+
+const LEAF: HostReach = HostReach::Leaf;
 
 const fn fx(bits: u16) -> EffectFlags {
     EffectFlags::from_bits(bits)
@@ -67,21 +89,25 @@ const EXIT_CAP: Caps = Caps::EXIT;
 /// The HostInvoke catalog, one row per native:
 ///
 /// ```text
-/// id "name" (arity) effects, caps [=> ID_CONST[, NATIVE_CONST]];
+/// id "name" (arity) effects, caps[, LEAF] [=> ID_CONST[, NATIVE_CONST]];
 /// ```
 ///
+/// A row without `LEAF` is [`HostReach::Runtime`], the safe default: a leaf
+/// row the table forgets costs only the rooting it could have dropped.
 /// Emits [`HOST_NATIVES`] in row order, plus `pub const ID_CONST: u16 = id`
 /// and `pub const NATIVE_CONST: &str = "name"` for a row that names them
 /// (`_` for no id const). The row's doc comments go on its consts. Ids are
 /// literal and frozen: a row's id is its index, checked at compile time.
 macro_rules! host_natives {
-    ($( $(#[$doc:meta])* $id:literal $name:literal ($arity:literal) $fx:expr, $caps:expr $(=> $idc:tt $(, $nc:ident)?)? ; )*) => {
+    ($( $(#[$doc:meta])* $id:literal $name:literal ($arity:literal) $fx:expr, $caps:expr $(, $reach:ident)? $(=> $idc:tt $(, $nc:ident)?)? ; )*) => {
         /// Standard host natives in HostInvoke id order.
         pub const HOST_NATIVES: &[HostNative] = &[
-            $( HostNative { name: $name, arity: $arity, id: $id, effects: $fx, caps: $caps }, )*
+            $( HostNative { name: $name, arity: $arity, id: $id, effects: $fx, caps: $caps, reach: host_natives!(@reach $($reach)?) }, )*
         ];
         $( host_natives!(@consts [$(#[$doc])*] $id, $name $(, $idc $(, $nc)?)?); )*
     };
+    (@reach) => { HostReach::Runtime };
+    (@reach $reach:ident) => { $reach };
     (@consts [$($doc:tt)*] $id:literal, $name:literal) => {};
     (@consts [$($doc:tt)*] $id:literal, $name:literal, _, $nc:ident) => {
         $($doc)* pub const $nc: &str = $name;
@@ -108,8 +134,8 @@ host_natives! {
     7 "await_readable" (1) SUSPEND, NO_CAP;
     8 "await_writable" (1) SUSPEND, NO_CAP;
     9 "drive" (0) SUSPEND, NO_CAP;
-    10 "from_bytes" (1) TEXT, NO_CAP;
-    11 "to_bytes" (1) TEXT, NO_CAP;
+    10 "from_bytes" (1) TEXT, NO_CAP, LEAF;
+    11 "to_bytes" (1) TEXT, NO_CAP, LEAF;
     12 "tcp_connect" (2) NET, NET_CAP;
     13 "tcp_connect_timeout" (3) NET, NET_CAP;
     14 "tcp_listen" (2) NET, NET_CAP;
@@ -166,8 +192,8 @@ host_natives! {
     // Removed slot: `env::exec` (now the `process` module, ids 180–188). Kept so
     // later ids do not slide; nothing exports it and the runtime panics.
     64 "env_exec" (2) EXEC, Caps::NONE;
-    65 "ord" (1) HOST_R, NO_CAP;
-    66 "char" (1) HOST_R, NO_CAP;
+    65 "ord" (1) HOST_R, NO_CAP, LEAF;
+    66 "char" (1) HOST_R, NO_CAP, LEAF;
     67 "hash_string" (1) HOST_R, NO_CAP => HASH_STRING_ID;
     68 "thread_spawn" (1) THREAD_R, NO_CAP;
     69 "thread_join" (1) THREAD_R, NO_CAP;
@@ -207,19 +233,19 @@ host_natives! {
     100 "gc_collect" (0) GC_R, NO_CAP => _, GC_COLLECT_NATIVE;
     101 "gc_register_finalizer" (2) GC_R, NO_CAP => _, GC_REGISTER_FINALIZER_NATIVE;
     /// Frozen HostInvoke id for `math_sin` (first frozen prelude math).
-    102 "math_sin" (1) PURE, NO_CAP => MATH_SIN_ID;
-    103 "math_cos" (1) PURE, NO_CAP;
-    104 "math_tan" (1) PURE, NO_CAP;
-    105 "math_sqrt" (1) PURE, NO_CAP;
-    106 "math_floor" (1) PURE, NO_CAP;
-    107 "math_ceil" (1) PURE, NO_CAP;
-    108 "math_exp" (1) PURE, NO_CAP;
-    109 "math_ln" (1) PURE, NO_CAP;
+    102 "math_sin" (1) PURE, NO_CAP, LEAF => MATH_SIN_ID;
+    103 "math_cos" (1) PURE, NO_CAP, LEAF;
+    104 "math_tan" (1) PURE, NO_CAP, LEAF;
+    105 "math_sqrt" (1) PURE, NO_CAP, LEAF;
+    106 "math_floor" (1) PURE, NO_CAP, LEAF;
+    107 "math_ceil" (1) PURE, NO_CAP, LEAF;
+    108 "math_exp" (1) PURE, NO_CAP, LEAF;
+    109 "math_ln" (1) PURE, NO_CAP, LEAF;
     /// Frozen HostInvoke id for `math_pow` (last frozen prelude math).
-    110 "math_pow" (2) PURE, NO_CAP => MATH_POW_ID;
-    111 "vec_with_capacity" (1) HEAP_R, NO_CAP;
-    112 "vec_capacity" (1) HEAP_R, NO_CAP;
-    113 "vec_reserve" (2) HEAP_R, NO_CAP;
+    110 "math_pow" (2) PURE, NO_CAP, LEAF => MATH_POW_ID;
+    111 "vec_with_capacity" (1) HEAP_R, NO_CAP, LEAF;
+    112 "vec_capacity" (1) HEAP_R, NO_CAP, LEAF;
+    113 "vec_reserve" (2) HEAP_R, NO_CAP, LEAF;
     114 "vec_clear" (1) HEAP_R, NO_CAP;
     115 "vec_pop" (1) HEAP_R, NO_CAP;
     116 "vec_insert" (3) HEAP_R, NO_CAP;
@@ -233,38 +259,38 @@ host_natives! {
     /// Frozen HostInvoke id for `stream_park` (a panic stub).
     120 "stream_park" (1) PARK_R, NO_CAP => STREAM_PARK_ID, STREAM_PARK_NATIVE;
     /// HostInvoke id for `clock_wall_nanos`.
-    121 "clock_wall_nanos" (0) HOST, NO_CAP => CLOCK_WALL_NANOS_ID, CLOCK_WALL_NANOS_NATIVE;
+    121 "clock_wall_nanos" (0) HOST, NO_CAP, LEAF => CLOCK_WALL_NANOS_ID, CLOCK_WALL_NANOS_NATIVE;
     /// HostInvoke id for `clock_mono_nanos`.
-    122 "clock_mono_nanos" (0) HOST, NO_CAP => CLOCK_MONO_NANOS_ID, CLOCK_MONO_NANOS_NATIVE;
+    122 "clock_mono_nanos" (0) HOST, NO_CAP, LEAF => CLOCK_MONO_NANOS_ID, CLOCK_MONO_NANOS_NATIVE;
     /// HostInvoke id for `clock_sleep_ms`.
     123 "clock_sleep_ms" (1) HOST, NO_CAP => CLOCK_SLEEP_MS_ID, CLOCK_SLEEP_MS_NATIVE;
     /// HostInvoke id for `result_unit_probe` (`Result<(), IoError>` pack helper).
     124 "result_unit_probe" (1) HOST_R, NO_CAP => RESULT_UNIT_PROBE_ID, RESULT_UNIT_PROBE_NATIVE;
     /// First HostInvoke id of the M1 `prelude::math` expansion (`math_atan`).
-    125 "math_atan" (1) PURE, NO_CAP => MATH_ATAN_ID;
-    126 "math_atan2" (2) PURE, NO_CAP;
-    127 "math_asin" (1) PURE, NO_CAP;
-    128 "math_acos" (1) PURE, NO_CAP;
-    129 "math_log10" (1) PURE, NO_CAP;
-    130 "math_log2" (1) PURE, NO_CAP;
-    131 "math_cbrt" (1) PURE, NO_CAP;
-    132 "math_rem" (2) PURE, NO_CAP;
-    133 "math_sinh" (1) PURE, NO_CAP;
-    134 "math_cosh" (1) PURE, NO_CAP;
+    125 "math_atan" (1) PURE, NO_CAP, LEAF => MATH_ATAN_ID;
+    126 "math_atan2" (2) PURE, NO_CAP, LEAF;
+    127 "math_asin" (1) PURE, NO_CAP, LEAF;
+    128 "math_acos" (1) PURE, NO_CAP, LEAF;
+    129 "math_log10" (1) PURE, NO_CAP, LEAF;
+    130 "math_log2" (1) PURE, NO_CAP, LEAF;
+    131 "math_cbrt" (1) PURE, NO_CAP, LEAF;
+    132 "math_rem" (2) PURE, NO_CAP, LEAF;
+    133 "math_sinh" (1) PURE, NO_CAP, LEAF;
+    134 "math_cosh" (1) PURE, NO_CAP, LEAF;
     /// HostInvoke id for `math_tanh` (last M1 math native).
-    135 "math_tanh" (1) PURE, NO_CAP => MATH_TANH_ID;
+    135 "math_tanh" (1) PURE, NO_CAP, LEAF => MATH_TANH_ID;
     /// Compiler-only HostInvoke id for MIR saxpy-reduce packs (COI-286).
     136 "simd_axpy_reduce" (5) PURE, NO_CAP => SIMD_AXPY_REDUCE_ID, SIMD_AXPY_REDUCE_NATIVE;
     137 "thread_spawn_shared" (1) THREAD_R, NO_CAP => THREAD_SPAWN_SHARED_ID, THREAD_SPAWN_SHARED_NATIVE;
     138 "stream_fd" (1) PARK_R, NO_CAP => STREAM_FD_ID, STREAM_FD_NATIVE;
     /// First byte-offset `string` native (`string_byte_at`); the block runs
     /// through [`STRING_MATCH_AT_ID`] (archive minor 31).
-    139 "string_byte_at" (2) TEXT_R, NO_CAP => STRING_BYTE_AT_ID;
-    140 "string_slice_bytes" (3) TEXT_R, NO_CAP => STRING_SLICE_BYTES_ID;
-    141 "string_find_from" (3) TEXT_R, NO_CAP;
-    142 "string_rfind" (2) TEXT_R, NO_CAP;
+    139 "string_byte_at" (2) TEXT_R, NO_CAP, LEAF => STRING_BYTE_AT_ID;
+    140 "string_slice_bytes" (3) TEXT_R, NO_CAP, LEAF => STRING_SLICE_BYTES_ID;
+    141 "string_find_from" (3) TEXT_R, NO_CAP, LEAF;
+    142 "string_rfind" (2) TEXT_R, NO_CAP, LEAF;
     /// Last byte-offset `string` native (`string_match_at`).
-    143 "string_match_at" (3) TEXT_R, NO_CAP => STRING_MATCH_AT_ID;
+    143 "string_match_at" (3) TEXT_R, NO_CAP, LEAF => STRING_MATCH_AT_ID;
     /// First task-scheduler native (`task_scope_open`); the block runs through
     /// [`TASK_YIELD_ID`] (archive minor 32). The runtime handles these itself
     /// (`HostOp::Task`): they can switch tasks.
@@ -307,11 +333,11 @@ host_natives! {
     161 "values_eq_shaped" (3) TEXT, NO_CAP => VALUES_EQ_SHAPED_ID, VALUES_EQ_SHAPED_NATIVE;
     /// `<` / `<=` / `>` / `>=` on `string`: `-1` / `0` / `1` by UTF-8 bytes
     /// (coil-stdlib#48, archive minor 41).
-    162 "string_compare" (2) TEXT, NO_CAP => STRING_COMPARE_ID, STRING_COMPARE_NATIVE;
+    162 "string_compare" (2) TEXT, NO_CAP, LEAF => STRING_COMPARE_ID, STRING_COMPARE_NATIVE;
     /// `black_box(x)` (archive minor 43): returns `x`, which the optimizer
     /// cannot see through. Its `HOST` effect keeps it from being folded at
     /// compile time, hoisted or removed.
-    163 "black_box" (1) HOST, NO_CAP => BLACK_BOX_ID, BLACK_BOX_NATIVE;
+    163 "black_box" (1) HOST, NO_CAP, LEAF => BLACK_BOX_ID, BLACK_BOX_NATIVE;
     /// `io::capture_begin()` / `io::capture_end()` (archive minor 44): keep
     /// this thread's stdout and stderr writes in memory instead of writing them,
     /// and hand them back as `(stdout, stderr)` strings.
@@ -331,14 +357,14 @@ host_natives! {
     /// rewrite only): append `src[from..to]` to `dst` and return `to`; the
     /// compiler has checked `0 <= from < to <= src.len()`. When `dst` is
     /// `src` it appends nothing and returns `from` (the loop runs scalar).
-    174 "vec_extend_range" (4) HEAP_R, NO_CAP => VEC_EXTEND_RANGE_ID, VEC_EXTEND_RANGE_NATIVE;
+    174 "vec_extend_range" (4) HEAP_R, NO_CAP, LEAF => VEC_EXTEND_RANGE_ID, VEC_EXTEND_RANGE_NATIVE;
     /// `vec_fill(dst, v, n)` (archive minor 1, compiler rewrite only): push
     /// `v` onto `dst` `n` times (`n >= 1`); returns `0`.
-    175 "vec_fill" (3) HEAP_R, NO_CAP => VEC_FILL_ID, VEC_FILL_NATIVE;
+    175 "vec_fill" (3) HEAP_R, NO_CAP, LEAF => VEC_FILL_ID, VEC_FILL_NATIVE;
     /// `from_bytes` of a buffer the compiler proved dead after the call (archive
     /// 6.4): the string takes the buffer's bytes. Never named in source; the
     /// compiler swaps it in for `from_bytes`.
-    176 "from_bytes_take" (1) TEXT, NO_CAP => FROM_BYTES_TAKE_ID, FROM_BYTES_TAKE_NATIVE;
+    176 "from_bytes_take" (1) TEXT, NO_CAP, LEAF => FROM_BYTES_TAKE_ID, FROM_BYTES_TAKE_NATIVE;
     /// HostInvoke ids around a `region { ... }` block (escape step 5, archive
     /// 6.2): enter starts a fresh nursery for the block, exit collects it.
     /// Never named in source; the compiler emits them for `region`.
@@ -347,7 +373,7 @@ host_natives! {
     /// `symbol::next_id()` (archive 6.9): the next value of one process-wide
     /// atomic counter. Its `HOST` effect keeps it from being folded at compile
     /// time, hoisted or removed.
-    179 "symbol_next_id" (0) HOST, NO_CAP => SYMBOL_NEXT_ID_ID, SYMBOL_NEXT_ID_NATIVE;
+    179 "symbol_next_id" (0) HOST, NO_CAP, LEAF => SYMBOL_NEXT_ID_ID, SYMBOL_NEXT_ID_NATIVE;
     /// The embedded `process` module's natives (archive 6.10, ids 180–188):
     /// spawn a program, take its pipes as streams, wait, kill, signal. Only
     /// `process_spawn` needs a grant (`--allow-exec`); the rest act on a child
@@ -625,6 +651,14 @@ pub fn host_writes_only_numbers(id: u64) -> bool {
     .any(|&k| u64::from(k) == id)
 }
 
+/// Whether host native `id` is a [`HostReach::Leaf`]: a call to it needs no
+/// rooting of what its caller borrows or owns (no home for an unwind, no
+/// count of its own on a borrowed load, no snapshot of its arguments'
+/// words in the runtime). An id past the table is not.
+pub fn host_is_leaf(id: u64) -> bool {
+    usize::try_from(id).ok().and_then(|i| HOST_NATIVES.get(i)).is_some_and(|n| n.reach == HostReach::Leaf)
+}
+
 pub fn host_native_is_direct(id: usize) -> bool {
     HOST_NATIVES
         .get(id)
@@ -745,6 +779,23 @@ mod tests {
     fn host_native_names_are_unique() {
         for e in HOST_NATIVES {
             assert_eq!(host_native_id(e.name), Some(e.id as usize), "{} is not unique", e.name);
+        }
+    }
+
+    /// A leaf row is one the table names: the default is the runtime, and
+    /// no task, io or collector native is a leaf.
+    #[test]
+    fn leaf_natives_are_marked_ones() {
+        assert!(host_is_leaf(u64::from(STRING_SLICE_BYTES_ID)));
+        assert!(host_is_leaf(u64::from(VEC_EXTEND_RANGE_ID)));
+        assert!(!host_is_leaf(u64::from(HASH_STRING_ID)));
+        assert!(!host_is_leaf(u64::from(GC_ROOT_ID)));
+        assert!(!host_is_leaf(u64::from(VEC_STAMP_ID)));
+        assert!(!host_is_leaf(HOST_NATIVES.len() as u64));
+        for n in HOST_NATIVES.iter().filter(|n| n.reach == HostReach::Leaf) {
+            use crate::EffectFlags as E;
+            let e = n.effects;
+            assert!(![E::GC, E::THREAD, E::SUSPEND, E::ATTACH_PARK, E::YIELD, E::FFI, E::UNKNOWN, E::EXEC].iter().any(|&b| e.contains(b)), "{} is a leaf", n.name);
         }
     }
 
