@@ -1,9 +1,10 @@
 //! Wide direct calls: a small object of words (a tuple, an `Option` of a
 //! tuple, which is a niche word over the tuple object, a `Result` of a
-//! tuple whose `Err` is a heap word, also a niche word, or any nesting of
-//! those) crosses a direct call as its words when neither side needs the
-//! object, up to sixteen words once flattened (past the registers, on the
-//! stack).
+//! tuple whose `Err` is a heap word, also a niche word, a two-variant enum
+//! object such as a `Result` of a tuple whose `Err` is a number, or any
+//! nesting of those) crosses a direct call as its words when neither side
+//! needs the object, up to sixteen words once flattened (past the
+//! registers, on the stack).
 //!
 //! A body gets a twin, `name$words`, that takes such a parameter as its
 //! words (one MIR parameter per word) and returns such a result as its
@@ -16,7 +17,10 @@
 //! tuple the pass takes apart, that tuple's words in place; an `Option`
 //! of a tuple adds a `bool` word, `true` for `Some`, after its tuple's; a
 //! `Result` too (`true` for `Ok`), and its `Err` payload shares one of the
-//! `Ok` tuple's leaf words (`Lay::res`).
+//! `Ok` tuple's leaf words (`Lay::res`). A boxed two-variant enum (one
+//! variant's payload a tuple, the other's a number) has the same words: its
+//! tuple variant's, a flag `true` for that variant, the other's payload in
+//! a word it shares; a `jumpifmatch` on it branches on the flag.
 //! So `((int, int), int)`, `(string, int, int)` and
 //! `Option<((int, int), string)>` are three, three and four words. The
 //! only bound is the word budget (`MAX_WORDS`); a tuple whose nested words do not
@@ -154,8 +158,25 @@ enum Src {
     /// The `Err` payload of node `parent` (its niche word with bit 0
     /// cleared), an object word.
     ErrOf { parent: usize },
+    /// A boxed enum's variant `tag` of a number `payload`: the variant a
+    /// two-variant enum of words keeps in a word it shares (`Lay::res`).
+    Variant { tag: u32, payload: ValueId },
+    /// The tuple payload of node `parent`, a boxed enum (a `matchpayload`
+    /// of an object word): its item 0.
+    OkOf { parent: usize },
     /// Anything else (another kind of tuple, a tuple of boxed values).
     Opaque,
+}
+
+impl Src {
+    /// An item node's parent and slot.
+    fn item(&self) -> Option<(usize, usize)> {
+        match *self {
+            Src::Item { parent, slot } => Some((parent, slot)),
+            Src::OkOf { parent } => Some((parent, 0)),
+            _ => None,
+        }
+    }
 }
 
 /// A read of a node's object.
@@ -173,19 +194,24 @@ enum Use {
     Phi(usize),
     /// Item `slot` of node `parent`'s fresh tuple.
     Within { parent: usize, slot: usize },
-    /// An early free or a frame word's clear (its unit token `dest`):
-    /// nothing to free once there is no object. An early free still holds
-    /// the words that may be objects to its place (`keep`), as the object
-    /// held them: a `drop` they owe runs no earlier.
+    /// An early free, a frame word's clear or a `keepalive` (its unit
+    /// token `dest`): nothing to free once there is no object. An early
+    /// free or a `keepalive` still holds the words that may be objects to
+    /// its place (`keep`), as the object held them: a `drop` they owe runs
+    /// no earlier.
     Drop { dest: ValueId, keep: bool },
     /// `iand` of a `Result`'s niche word with `1` into `dest`: whether it
     /// is an `Err`.
     ErrBit { dest: ValueId },
     /// `ixor` of a `Result`'s niche word with `1` into `dest`: its `Err`
-    /// payload.
+    /// payload; or a `matchpayload` of a boxed enum's number payload.
     ErrPayload { dest: ValueId },
     /// The payload of node `parent`, an `Err`.
     ErrIn { parent: usize },
+    /// `matchpayload` of a boxed enum's tuple payload into `dest`.
+    Payload { dest: ValueId },
+    /// The `jumpifmatch` of block `block` on variant `tag`.
+    Match { block: usize, tag: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -301,6 +327,16 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                     let src = if words { Src::Alloc { items: elems.clone(), kind: *kind, kinds: *kinds } } else { Src::Opaque };
                     add(*dest, src, &mut nodes, &mut member);
                 }
+                // A variant of one payload word: a tuple variant (its item
+                // nests as a tuple's does) or a number one.
+                MirInst::Alloc { dest, kind: kind @ MirAllocKind::Enum { tag }, elems, kinds } if *kind != MirAllocKind::TUPLE && elems.len() == 1 => {
+                    let e = elems[0];
+                    if object_word(f.ty(e)) {
+                        add(*dest, Src::Alloc { items: elems.clone(), kind: *kind, kinds: *kinds }, &mut nodes, &mut member);
+                    } else if matches!(f.ty(e), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                        add(*dest, Src::Variant { tag: *tag, payload: e }, &mut nodes, &mut member);
+                    }
+                }
                 MirInst::Phi { dest, ty, args } if object_word(*ty) => {
                     add(*dest, Src::Phi(args.clone()), &mut nodes, &mut member);
                 }
@@ -337,6 +373,13 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                 MirInst::ProductLoad { dest, object, slot } if object_word(f.ty(*dest)) && !member.contains_key(dest) => {
                     if let Some(&parent) = member.get(object) {
                         add(*dest, Src::Item { parent, slot: *slot as usize }, &mut nodes, &mut member);
+                        grew = true;
+                    }
+                    continue;
+                }
+                MirInst::MatchPayload { dest, scrutinee, index: 0 } if object_word(f.ty(*dest)) && !member.contains_key(dest) => {
+                    if let Some(&parent) = member.get(scrutinee) {
+                        add(*dest, Src::OkOf { parent }, &mut nodes, &mut member);
                         grew = true;
                     }
                     continue;
@@ -396,6 +439,12 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                     nodes[member[object]].uses.push(Use::Load { dest: *dest, slot: *slot as usize });
                     continue;
                 }
+                MirInst::MatchPayload { dest, scrutinee, index: 0 } if member.contains_key(scrutinee) => {
+                    let u = if member.contains_key(dest) { Use::Payload { dest: *dest } } else { Use::ErrPayload { dest: *dest } };
+                    nodes[member[scrutinee]].uses.push(u);
+                    continue;
+                }
+                MirInst::Alloc { dest, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::Variant { .. }) && nodes[n].members[0] == *dest) => continue,
                 MirInst::Alloc { dest, elems, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::Alloc { .. })) => {
                     let parent = member[dest];
                     for (slot, e) in elems.iter().enumerate() {
@@ -405,8 +454,8 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                     }
                     continue;
                 }
-                MirInst::FreeEarly { dest, value, .. } | MirInst::ClearWord { dest, value } if member.contains_key(value) && !used.contains(dest) => {
-                    let keep = matches!(i, MirInst::FreeEarly { .. });
+                MirInst::FreeEarly { dest, value, .. } | MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } if member.contains_key(value) && !used.contains(dest) => {
+                    let keep = !matches!(i, MirInst::ClearWord { .. });
                     nodes[member[value]].uses.push(Use::Drop { dest: *dest, keep });
                     continue;
                 }
@@ -463,6 +512,12 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
         if matches!(t, Terminator::Return { .. }) {
             rets.push((bi, RetSite::Other));
         }
+        if let Terminator::JumpIfMatch { scrutinee, tag, .. } = t
+            && let Some(&n) = member.get(scrutinee)
+        {
+            nodes[n].uses.push(Use::Match { block: bi, tag: *tag });
+            continue;
+        }
         for u in t.uses() {
             if let Some(&n) = member.get(&u) {
                 nodes[n].other = true;
@@ -490,7 +545,7 @@ fn wanted(nodes: &[Node]) -> Vec<bool> {
         group[a] = b;
     };
     for (n, node) in nodes.iter().enumerate() {
-        if let Src::Item { parent, .. } | Src::ErrOf { parent } = node.src {
+        if let Src::Item { parent, .. } | Src::ErrOf { parent } | Src::OkOf { parent } = node.src {
             join(n, parent, &mut group);
         }
         for u in &node.uses {
@@ -536,6 +591,8 @@ struct Class {
     res: Option<bool>,
     /// A `Result`'s `Err` payload: its class and its word type as a leaf.
     err: Option<(usize, MirTy)>,
+    /// A boxed enum's number variant (its payload is `err`).
+    err_tag: Option<u32>,
     bad: bool,
     /// Some member stays an object (an item that is no node, a read the
     /// pass does not take): the class is never nested in another's words.
@@ -608,6 +665,11 @@ impl Classes {
             if let Some(r) = ca.res {
                 cb.set_res(r);
             }
+            match (ca.err_tag, cb.err_tag) {
+                (Some(t), None) => cb.err_tag = Some(t),
+                (Some(t), Some(u)) if t != u => cb.bad = true,
+                _ => {}
+            }
             match (ca.err, &mut cb.err) {
                 (None, _) => {}
                 (Some(e), slot @ None) => *slot = Some(e),
@@ -668,7 +730,12 @@ struct Lay {
     niche: bool,
     /// A `Result` of the tuple (its `Ok`): its last word is `Ok`'s flag,
     /// and its `Err` payload shares the word at `err` with an `Ok` leaf.
+    /// Also a boxed enum's (`boxed`).
     res: Option<usize>,
+    /// A boxed two-variant enum, its tuple variant's tag (`kind`) and its
+    /// number variant's: its one item is the tuple payload, its flag is
+    /// `true` for the tuple variant.
+    boxed: Option<(u32, u32)>,
     kind: MirAllocKind,
     kinds: common::PackedKinds,
     /// It and every tuple nested in it can be built again from the words
@@ -704,12 +771,20 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
         let t = class.tuple?;
         let niche = class.niche == Some(true);
         let res = class.res == Some(true);
-        if niche && res {
+        // A boxed enum's variants: the tuple one's, the number one's.
+        let boxed = match t.kind {
+            MirAllocKind::Enum { tag } if t.kind != MirAllocKind::TUPLE => match class.err_tag {
+                Some(e) if e != tag && t.slots.len() == 1 => Some((tag, e)),
+                _ => return None,
+            },
+            _ => None,
+        };
+        if niche && res || boxed.is_some() && (niche || res) {
             return None;
         }
         // An `Err` that is never made, or a `Result` with no `Err` payload
         // type, has no word to share.
-        let err = if res { Some(class.err?.1) } else { None };
+        let err = if res || boxed.is_some() { Some(class.err?.1) } else { None };
         let inner: Vec<Option<Rc<Lay>>> = t
             .slots
             .iter()
@@ -722,7 +797,7 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
         for nest in [true, false] {
             let mut words = Vec::new();
             let mut slots = Vec::new();
-            let mut rebuild = !niche && !res;
+            let mut rebuild = !niche && !res && boxed.is_none();
             for (k, &(_, ty, _)) in t.slots.iter().enumerate() {
                 match inner[k].as_ref().filter(|_| nest) {
                     Some(l) => {
@@ -740,11 +815,24 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
                 words.push(MirTy::Bool);
             }
             // The `Err` payload rides a leaf of the `Ok`'s: one of its own
-            // type if there is one, else the first it can share.
+            // type if there is one, else the first it can share. A leaf of a
+            // nested tuple is its tuple's word too, so it is shared only as
+            // it is.
             let mut res_at = None;
             if let Some(e) = err {
-                let leaves = slots.iter().filter_map(|s| if let Slot::Leaf(at) = s { Some(*at) } else { None });
-                let at = leaves.clone().find(|&at| words[at] == e).or_else(|| leaves.clone().find(|&at| union_word(words[at], e).is_some()));
+                let mut deep = Vec::new();
+                for s in &slots {
+                    if let Slot::Nested { at, lay } = s {
+                        leaves(lay, *at, &mut deep);
+                    }
+                }
+                let top = slots.iter().filter_map(|s| if let Slot::Leaf(at) = s { Some(*at) } else { None });
+                let at = top
+                    .clone()
+                    .chain(deep.iter().copied())
+                    .find(|&at| words[at] == e)
+                    .or_else(|| top.clone().find(|&at| union_word(words[at], e).is_some()))
+                    .or_else(|| deep.iter().copied().find(|&at| union_word(words[at], e) == Some(words[at])));
                 match at {
                     Some(at) => {
                         words[at] = union_word(words[at], e).expect("a shared word");
@@ -755,7 +843,7 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
                 }
             }
             if (2..=MAX_WORDS).contains(&words.len()) {
-                return Some(Rc::new(Lay { words, slots, niche, res: res_at, kind: t.kind, kinds, rebuild }));
+                return Some(Rc::new(Lay { words, slots, niche, res: res_at, boxed, kind: t.kind, kinds, rebuild }));
             }
             if !inner.iter().any(Option::is_some) {
                 break;
@@ -766,6 +854,17 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
     busy.remove(&c);
     memo.insert(c, out.clone());
     out
+}
+
+/// The leaf words of `lay`, its words from `base` on, at any depth (not a
+/// nested `Option`'s or `Result`'s flag).
+fn leaves(lay: &Lay, base: usize, out: &mut Vec<usize>) {
+    for s in &lay.slots {
+        match s {
+            Slot::Leaf(at) => out.push(base + at),
+            Slot::Nested { at, lay } => leaves(lay, base + at, out),
+        }
+    }
 }
 
 /// Build the object of `lay` from its words `ws` (nested tuples first):
@@ -861,6 +960,11 @@ impl<'a> Program<'a> {
                         let r = cls.fresh(Class { res: Some(true), err: Some((e, f.ty(*payload))), ..Class::default() });
                         cls.unify(id, r);
                     }
+                    Src::Variant { tag, payload } => {
+                        let e = cls.fresh(Class { fixed: true, ..Class::default() });
+                        let r = cls.fresh(Class { err: Some((e, f.ty(*payload))), err_tag: Some(*tag), ..Class::default() });
+                        cls.unify(id, r);
+                    }
                     _ => {}
                 }
                 for u in &node.uses {
@@ -887,7 +991,7 @@ impl<'a> Program<'a> {
         let mut pending: Vec<(usize, usize, usize, usize)> = Vec::new();
         for (bi, b) in info.iter().enumerate() {
             for (n, node) in b.nodes.iter().enumerate() {
-                if let Src::Item { parent, slot } = node.src {
+                if let Some((parent, slot)) = node.src.item() {
                     pending.push((bi, n, parent, slot));
                 }
             }
@@ -989,17 +1093,24 @@ impl<'a> Program<'a> {
             Src::Phi(ref args) => args.iter().all(|(_, a)| body.member.get(a).is_some_and(|&m| viable(m))),
             Src::Item { parent, slot } => viable(parent) && self.nested(b, parent, slot),
             Src::None => lay.niche,
-            Src::Err { payload } => lay.res.is_some_and(|at| union_word(lay.words[at], f.ty(payload)) == Some(lay.words[at])),
+            Src::Err { payload } => lay.boxed.is_none() && lay.res.is_some_and(|at| union_word(lay.words[at], f.ty(payload)) == Some(lay.words[at])),
+            Src::Variant { tag, payload } => lay.boxed.is_some_and(|(_, e)| e == tag) && lay.res.is_some_and(|at| union_word(lay.words[at], f.ty(payload)) == Some(lay.words[at])),
+            Src::OkOf { parent } => viable(parent) && self.lay[b][parent].as_ref().is_some_and(|l| l.boxed.is_some()) && self.nested(b, parent, 0),
             Src::ErrOf { .. } | Src::Opaque => false,
         };
+        // An item `slot` read into `dest`.
+        let item = |slot: usize, dest: ValueId| match lay.slots.get(slot) {
+            Some(Slot::Leaf(at)) => fits(lay.words[*at], f.ty(dest)),
+            Some(Slot::Nested { .. }) => body.member.get(&dest).is_some_and(|&m| viable(m)),
+            None => false,
+        };
         src && node.uses.iter().all(|u| match *u {
-            Use::Load { dest, slot } => match lay.slots.get(slot) {
-                Some(Slot::Leaf(at)) => fits(lay.words[*at], f.ty(dest)),
-                Some(Slot::Nested { .. }) => body.member.get(&dest).is_some_and(|&m| viable(m)),
-                None => false,
-            },
+            // A boxed enum's words are read by variant, not by item.
+            Use::Load { dest, slot } => lay.boxed.is_none() && item(slot, dest),
+            Use::Payload { dest } => lay.boxed.is_some() && item(0, dest),
+            Use::Match { tag, .. } => lay.boxed.is_some_and(|(ok, e)| tag == ok || tag == e),
             Use::Test => lay.niche,
-            Use::ErrBit { .. } => lay.res.is_some(),
+            Use::ErrBit { .. } => lay.boxed.is_none() && lay.res.is_some(),
             Use::ErrPayload { dest } => lay.res.is_some_and(|at| MirCastKind::Word.allows(lay.words[at], f.ty(dest)) || lay.words[at].word_class() == f.ty(dest).word_class()),
             // An `Err`'s payload is a word of its own, not taken apart.
             Use::ErrIn { .. } => false,
@@ -1202,9 +1313,10 @@ impl<'a> Program<'a> {
                     }
                     node_words.insert(n, ws);
                 }
-                // An `Err`: its payload in the word it shares, zeros in the
-                // `Ok`'s others, a `false` flag.
-                Src::Err { payload } => {
+                // An `Err` (a boxed enum's number variant): its payload in
+                // the word it shares, zeros in the `Ok`'s others, a `false`
+                // flag.
+                Src::Err { payload } | Src::Variant { payload, .. } => {
                     let l = lay(n);
                     let share = l.res.expect("a Result's shared word");
                     let mut out = Vec::new();
@@ -1258,7 +1370,7 @@ impl<'a> Program<'a> {
                             let t = new_value(&mut f, MirTy::Bool);
                             let flag = MirInst::Const { dest: t, c: MirConst::Bool(true) };
                             let ret = info.rets.iter().find(|(_, r)| matches!(r, RetSite::Node(m) if *m == n)).map(|(bi, _)| *bi);
-                            match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test | Use::ErrBit { .. }))) {
+                            match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test | Use::ErrBit { .. } | Use::Match { .. }))) {
                                 Some(bi) => tail.entry(bi).or_default().push(flag),
                                 None => at.entry(node.members[0]).or_default().push(flag),
                             }
@@ -1266,9 +1378,10 @@ impl<'a> Program<'a> {
                         }
                         ws
                     }
-                    Src::Item { parent, slot } => {
-                        let Some(pw) = node_words.get(parent) else { continue };
-                        let Some(Slot::Nested { at: off, lay: inner }) = lay(*parent).slots.get(*slot).cloned() else {
+                    Src::Item { .. } | Src::OkOf { .. } => {
+                        let (parent, slot) = node.src.item().expect("an item");
+                        let Some(pw) = node_words.get(&parent) else { continue };
+                        let Some(Slot::Nested { at: off, lay: inner }) = lay(parent).slots.get(slot).cloned() else {
                             unreachable!("a dissolved item is nested in its parent's words")
                         };
                         pw[off..off + inner.words.len()].to_vec()
@@ -1290,7 +1403,12 @@ impl<'a> Program<'a> {
             let l = lay(n);
             for u in &node.uses {
                 match *u {
-                    Use::Load { dest, slot } => {
+                    Use::Load { .. } | Use::Payload { .. } => {
+                        let (dest, slot) = match *u {
+                            Use::Load { dest, slot } => (dest, slot),
+                            Use::Payload { dest } => (dest, 0),
+                            _ => unreachable!("an item read"),
+                        };
                         if let Slot::Leaf(i) = l.slots[slot] {
                             let w = node_words[&n][i];
                             let to = f.ty(dest);
@@ -1322,6 +1440,15 @@ impl<'a> Program<'a> {
                             at.entry(dest).or_default().push(MirInst::Cast { dest, kind: MirCastKind::Word, to, src: w });
                         }
                         gone.insert(dest);
+                    }
+                    // A match on the variant: a branch on the flag, `true`
+                    // for the tuple variant.
+                    Use::Match { block, tag } => {
+                        let (ok, _) = l.boxed.expect("a boxed enum's variants");
+                        let flag = *node_words[&n].last().expect("a boxed enum's flag");
+                        let Some(Terminator::JumpIfMatch { taken, not_taken, .. }) = f.blocks[block].term else { unreachable!("a match's terminator") };
+                        let (taken, not_taken) = if tag == ok { (taken, not_taken) } else { (not_taken, taken) };
+                        f.blocks[block].term = Some(Terminator::Br { cond: flag, taken, not_taken });
                     }
                     Use::Drop { dest, keep } => {
                         gone.insert(dest);
@@ -1714,6 +1841,46 @@ mod tests {
         assert_eq!(params_of(&bodies, "first$words"), 4);
         assert_eq!(allocs(&bodies[1].mir), 0);
         let twin = bodies.iter().find(|b| b.name == "first$words").unwrap();
+        twin.mir.verify().unwrap();
+        bodies[1].mir.verify().unwrap();
+    }
+
+    #[test]
+    fn a_boxed_result_with_a_number_err_goes_as_its_words_and_a_flag() {
+        // total(r) = match r { Ok(t) => t.0 + t.1 + t.2, Err(e) => e },
+        // called with an `Ok` of a fresh tuple and with an `Err` of a number.
+        let mut b = MirBuilder::new("total");
+        let r = b.add_param(MirTy::HeapRef).unwrap();
+        let (ok, err) = (b.create_block(), b.create_block());
+        let t = b.ins_match_payload(r, 0, MirTy::HeapRef).unwrap();
+        b.jump_if_match(r, 0, vec![t], ok, err).unwrap();
+        b.switch_to_block(err);
+        let e = b.ins_match_payload(r, 0, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(e)).unwrap();
+        b.switch_to_block(ok);
+        let x = b.ins_product_load(t, 0, MirTy::I64).unwrap();
+        let y = b.ins_product_load(t, 1, MirTy::I64).unwrap();
+        let z = b.ins_product_load(t, 2, MirTy::I64).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, x, y).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, s, z).unwrap();
+        b.ret(Some(s)).unwrap();
+        let total = NativeBody { name: "total".into(), entry: Some(Label(1)), mir: b.finish().unwrap() };
+        let mut m = MirBuilder::new("main");
+        let a = m.add_param(MirTy::I64).unwrap();
+        let tup = m.ins_alloc_kinds(MirAllocKind::TUPLE, vec![a, a, a], scalar3()).unwrap();
+        let okv = m.ins_alloc_kinds(MirAllocKind::Enum { tag: 0 }, vec![tup], kinds(&[common::WORD_POINTER])).unwrap();
+        let (r1, _) = m.ins_call(Label(1), vec![okv], &word_abi(1, MirTy::I64)).unwrap();
+        let errv = m.ins_alloc_kinds(MirAllocKind::Enum { tag: 1 }, vec![a], kinds(&[common::WORD_SCALAR])).unwrap();
+        let (r2, _) = m.ins_call(Label(1), vec![errv], &word_abi(1, MirTy::I64)).unwrap();
+        let r = m.ins_binop(MirBinOp::Add, r1, r2).unwrap();
+        let mut bodies = vec![total, main_of(m, r)];
+        assert_eq!(wide_call_twins(&mut bodies), 2);
+        // Three `Ok` words, one shared with the `Err` payload, and a flag.
+        assert_eq!(params_of(&bodies, "total$words"), 4);
+        assert_eq!(allocs(&bodies[1].mir), 0);
+        let twin = bodies.iter().find(|b| b.name == "total$words").unwrap();
+        assert!(twin.mir.blocks.iter().all(|b| !matches!(b.term, Some(Terminator::JumpIfMatch { .. }))));
         twin.mir.verify().unwrap();
         bodies[1].mir.verify().unwrap();
     }
