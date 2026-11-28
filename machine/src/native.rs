@@ -1485,11 +1485,12 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
 /// count their own words.
 pub(crate) fn host_writes_words(id: u64) -> bool {
     use common::EffectFlags as E;
-    // `vec_stamp` counts the one object it changes itself. The lock
-    // primitives change only the lock, whose value is a portable copy, and
-    // never a word of an argument.
+    // `vec_stamp` counts the one object it changes itself, and `map_put`
+    // the fields and elements it changes. The lock primitives change only
+    // the lock, whose value is a portable copy, and never a word of an
+    // argument.
     fn exempt(id: u64) -> bool {
-        id == u64::from(common::VEC_STAMP_ID) || common::host_writes_only_numbers(id) || (u64::from(common::LOCK_ACQUIRE_ID)..=u64::from(common::RW_STORE_ID)).contains(&id)
+        id == u64::from(common::VEC_STAMP_ID) || id == u64::from(common::MAP_PUT_ID) || common::host_writes_only_numbers(id) || (u64::from(common::LOCK_ACQUIRE_ID)..=u64::from(common::RW_STORE_ID)).contains(&id)
     }
     // One look per id, made once: this runs on every host call.
     static WRITES: std::sync::LazyLock<Vec<bool>> = std::sync::LazyLock::new(|| {
