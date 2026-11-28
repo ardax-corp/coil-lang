@@ -340,4 +340,25 @@ bb3:
         );
         assert_eq!(dedup_cow_checks(&mut f), 0);
     }
+
+    /// `ps[i].tags.push(a); ps[i].tags.push(b)`: a check of another place,
+    /// or the root's own unique again, in between keeps the first check.
+    #[test]
+    fn a_check_outlives_another_place_s_check() {
+        let mut f = looped(
+            "    v11 = cow.unique_index v0, v4\n    v12 = gcbarrier.safepoint v11\n    v15 = cow.unique_index v0, v10\n    v16 = gcbarrier.safepoint v15\n    v17 = cow.unique_index v0, v4\n    v18 = gcbarrier.safepoint v17",
+        );
+        assert_eq!(dedup_cow_checks(&mut f), 1);
+        f.verify().unwrap();
+        assert_eq!(checks_in(&f, BlockId(2)), 2);
+        let mut f = looped(
+            "    v11 = cow.unique v0\n    v12 = gcbarrier.safepoint v11\n    v15 = cow.unique_index v11, v4\n    v16 = gcbarrier.safepoint v15\n    v17 = cow.unique v11\n    v18 = gcbarrier.safepoint v17\n    v19 = cow.unique_index v17, v4\n    v20 = gcbarrier.safepoint v19",
+        );
+        assert_eq!(dedup_cow_checks(&mut f), 2, "{f}");
+        f.verify().unwrap();
+        assert_eq!(checks_in(&f, BlockId(2)), 1, "{f}");
+        // The root's unique of a word no unique made stays.
+        let mut f = looped("    v11 = cow.unique v0\n    v12 = gcbarrier.safepoint v11\n    v17 = cow.unique v0\n    v18 = gcbarrier.safepoint v17");
+        assert_eq!(dedup_cow_checks(&mut f), 0);
+    }
 }
