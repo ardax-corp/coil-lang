@@ -1416,7 +1416,14 @@ mod tests {
     /// A counted loop `while v4 < v0 { s += <body>; v4 += 1 }` with
     /// `body` spliced in (it defines `v6`, read by the sum).
     fn counted(params: &str, body: &str) -> MirFunc {
-        let src = format!(
+        let src = counted_src(params, body);
+        let f = crate::mir::parse_func(&src).expect(&src);
+        f.verify().unwrap();
+        f
+    }
+
+    fn counted_src(params: &str, body: &str) -> String {
+        format!(
             r#"
 func @f({params}) -> i64 {{
 bb0:
@@ -1437,10 +1444,7 @@ bb3:
     return v5
 }}
 "#
-        );
-        let f = crate::mir::parse_func(&src).expect(&src);
-        f.verify().unwrap();
-        f
+        )
     }
 
     fn in_loop(func: &MirFunc, pred: impl Fn(&MirInst) -> bool) -> usize {
@@ -1617,6 +1621,31 @@ bb5:
         licm(&mut f, true);
         f.verify().unwrap();
         assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { .. })), 1);
+    }
+
+    /// A grid's row (`g[i]`, an object element) leaves a loop that stores
+    /// numbers into it; a store of an object word, which may replace the
+    /// row, keeps it in.
+    #[test]
+    fn a_row_read_moves_past_number_stores() {
+        let row = |store: &str| {
+            let src = counted_src("v0: i64, v1: heapref", &format!("    v11 = index v1, v3\n    v6 = index v11, v4\n{store}"));
+            let mut f = crate::mir::parse_func(&src).expect(&src);
+            f.types[11] = MirTy::HeapRef;
+            if let Some(t) = f.types.get_mut(12) {
+                *t = if store.contains(".num") { MirTy::I64 } else { MirTy::HeapRef };
+            }
+            f.verify().unwrap();
+            f
+        };
+        let mut f = row("    v12 = storeindex.num v11, v4, v6");
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { array, .. } if *array == ValueId(1))), 0, "{f}");
+        let mut f = row("    v12 = storeindex v1, v4, v11");
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { array, .. } if *array == ValueId(1))), 1, "{f}");
     }
 
     /// `while` loops over `v0` from 0: `test` is the header's compare of

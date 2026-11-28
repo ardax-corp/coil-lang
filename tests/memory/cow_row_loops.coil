@@ -1,0 +1,136 @@
+// A loop that writes the cells of one row of a grid (`g[i][j] = ..` in a
+// `j` loop) reads the row once, ahead of the loop, when nothing in the loop
+// may put another row in its place: a number stored into a row or into
+// another vector does not. The rows stay apart from any other name of them.
+use tests::assert;
+
+fn grid(int n, int m) -> Vec<Vec<int>> {
+    let g: Vec<Vec<int>> = Vec::new();
+    let i = 0;
+    while i < n {
+        let row: Vec<int> = Vec::new();
+        let j = 0;
+        while j < m {
+            row.push(i * 10 + j);
+            j += 1;
+        }
+        g.push(row);
+        i += 1;
+    }
+    return g;
+}
+
+fn zeros(int m) -> Vec<int> {
+    let row: Vec<int> = Vec::new();
+    let j = 0;
+    while j < m {
+        row.push(0);
+        j += 1;
+    }
+    return row;
+}
+
+fn add_cols(Vec<Vec<int>> g, int m) -> int {
+    let i = 0;
+    while i < g.len() {
+        let j = 0;
+        while j < m {
+            g[i][j] = g[i][j] + j;
+            j += 1;
+        }
+        i += 1;
+    }
+    return g.len();
+}
+
+test("a row loop keeps aliased and kept rows apart") {
+    let g = grid(3, 4);
+    g[2] = g[0];
+    let kept = g[1];
+    let i = 0;
+    while i < g.len() {
+        let j = 0;
+        while j < 4 {
+            g[i][j] = g[i][j] + 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    assert!(g[0][3] == 4 && g[2][3] == 4 && g[1][0] == 11);
+    assert!(kept[0] == 10);
+    g[0][0] = 100;
+    assert!(g[2][0] == 1);
+}
+
+test("a row loop that runs no cell, or a long row") {
+    let g = grid(3, 40);
+    assert!(add_cols(g, 0) == 3 && g[2][39] == 59);
+    let h = g;
+    assert!(add_cols(g, 40) == 3 && g[2][39] == 98 && g[0][1] == 2);
+    assert!(h[2][39] == 59);
+    let big = grid(2, 5000);
+    let other = big[1];
+    add_cols(big, 5000);
+    assert!(big[1][4999] == 10 + 4999 * 2 && other[4999] == 5009);
+}
+
+test("a row loop that writes another vector or replaces the row") {
+    let g = grid(3, 4);
+    let out = zeros(4);
+    let i = 0;
+    while i < 3 {
+        let j = 0;
+        while j < 4 {
+            out[j] = out[j] + g[i][j] * 2;
+            g[i][j] = g[i][j] + j;
+            j += 1;
+        }
+        i += 1;
+    }
+    assert!(out[0] == 60 && out[3] == 78);
+    assert!(g[2][3] == 26);
+    i = 0;
+    while i < 3 {
+        let j = 0;
+        while j < 4 {
+            g[i][j] = g[i][j] + 1;
+            if j == 1 {
+                g[i] = zeros(4);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    assert!(g[0][0] == 0 && g[0][1] == 0 && g[0][2] == 1 && g[1][3] == 1);
+    let h = grid(2, 3);
+    i = 0;
+    while i < 3 {
+        h[0].push(i);
+        h[1][i] = h[1][i] + h[0].len();
+        i += 1;
+    }
+    assert!(h[0].len() == 6 && h[1][0] == 14 && h[1][2] == 18);
+}
+
+test("a row loop over rows of any length") {
+    let g: Vec<Vec<int>> = Vec::new();
+    let i = 0;
+    while i < 4 {
+        g.push(zeros(i));
+        i += 1;
+    }
+    let r = 0;
+    while r < 3 {
+        i = 0;
+        while i < g.len() {
+            let j = 0;
+            while j < g[i].len() {
+                g[i][j] = g[i][j] + j + r;
+                j += 1;
+            }
+            i += 1;
+        }
+        r += 1;
+    }
+    assert!(g[0].len() == 0 && g[3][2] == 9 && g[1][0] == 3);
+}
