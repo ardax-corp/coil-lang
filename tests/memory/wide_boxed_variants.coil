@@ -1,0 +1,233 @@
+// A boxed two-variant enum, one variant a tuple and the other a number (a
+// `Result` of a tuple whose `Err` is an `int`), crosses a direct call as
+// its words: the tuple's words, the number in a word it shares with one of
+// them, and a flag for the tuple variant. A match branches on the flag.
+use tests::assert;
+use gc::collect;
+
+static let drops: int = 0;
+
+class Handle {
+    pub fd: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+enum Pick {
+    Code(int),
+    Pair((int, int)),
+}
+
+enum Three {
+    A((int, int)),
+    B(int),
+    C(int),
+}
+
+#[inline(never)]
+fn get(int a) -> Result<(int, int, int), int> {
+    if a % 3 == 0 {
+        return Err(-a - 1);
+    }
+    return Ok((a, a + 1, a + 2));
+}
+
+#[inline(never)]
+fn total(Result<(int, int, int), int> r) -> int {
+    return match r {
+        Ok(t) => t[0] + t[1] * 10 + t[2] * 100,
+        Err(e) => e,
+    };
+}
+
+#[inline(never)]
+fn total_err_first(Result<(int, int, int), int> r) -> int {
+    return match r {
+        Err(e) => e * 2,
+        Ok(t) => t[0] - t[2],
+    };
+}
+
+#[inline(never)]
+fn relay(Result<(int, int, int), int> r, int k) -> int {
+    if k == 0 {
+        return total(r);
+    }
+    return relay(r, k - 1) + 1;
+}
+
+#[inline(never)]
+fn pass(Result<(int, int, int), int> r) -> Result<(int, int, int), int> {
+    return r;
+}
+
+#[inline(never)]
+fn ratio(float a) -> Result<(float, float), float> {
+    if a == 0.0 {
+        return Err(0.5);
+    }
+    return Ok((a * 1.0, a * 2.0));
+}
+
+#[inline(never)]
+fn sum_ratio(Result<(float, float), float> r) -> float {
+    return match r {
+        Ok(t) => t[0] + t[1],
+        Err(e) => e,
+    };
+}
+
+#[inline(never)]
+fn nested(int a) -> Result<((int, int), int), int> {
+    if a < 0 {
+        return Err(a);
+    }
+    return Ok(((a, a * 2), a * 3));
+}
+
+#[inline(never)]
+fn weigh(Result<((int, int), int), int> r) -> int {
+    return match r {
+        Ok(t) => t[0][0] + t[0][1] + t[1],
+        Err(e) => e,
+    };
+}
+
+#[inline(never)]
+fn pick(int a) -> Pick {
+    if a % 2 == 0 {
+        return Pick::Code(a);
+    }
+    return Pick::Pair((a, -a));
+}
+
+#[inline(never)]
+fn read_pick(Pick p) -> int {
+    return match p {
+        Pick::Code(c) => c * 1000,
+        Pick::Pair(t) => t[0] * 10 + t[1],
+    };
+}
+
+#[inline(never)]
+fn three(int a) -> Three {
+    if a % 3 == 0 {
+        return Three::A((a, a));
+    }
+    if a % 3 == 1 {
+        return Three::B(a);
+    }
+    return Three::C(a);
+}
+
+#[inline(never)]
+fn read_three(Three t) -> int {
+    return match t {
+        Three::A(p) => p[0] + p[1],
+        Three::B(b) => b * 10,
+        Three::C(c) => c * 100,
+    };
+}
+
+#[inline(never)]
+fn open(int a) -> Result<(Handle, int), int> {
+    if a % 2 == 0 {
+        return Err(a);
+    }
+    return Ok((new Handle(a), a));
+}
+
+#[inline(never)]
+fn fds(Result<(Handle, int), int> r) -> int {
+    return match r {
+        Ok(t) => t[0].fd * 10 + t[1],
+        Err(e) => e,
+    };
+}
+
+#[inline(never)]
+fn kept(Result<(int, int, int), int> r) -> Vec<Result<(int, int, int), int>> {
+    let v: Vec<Result<(int, int, int), int>> = [];
+    v.push(r);
+    return v;
+}
+
+test("an Ok, an int Err and a call's Result go to a call as words") {
+    let s = 0;
+    let expect = 0;
+    let i = 0;
+    while i < 9 {
+        s += total(get(i));
+        s += total(Ok((i, 1, 2)));
+        s += total(Err(i));
+        s += total_err_first(get(i));
+        expect += if i % 3 == 0 {
+            -i - 1 + (-i - 1) * 2
+        } else {
+            i + (i + 1) * 10 + (i + 2) * 100 - 2
+        };
+        expect += i + 10 + 200 + i;
+        i += 1;
+    }
+    assert!(s == expect);
+}
+
+test("a Result parameter passed on and returned") {
+    assert!(relay(Ok((1, 2, 3)), 3) == 321 + 3);
+    assert!(relay(Err(-7), 2) == -7 + 2);
+    assert!(total(pass(Ok((4, 5, 6)))) == 654);
+    assert!(total(pass(Err(9))) == 9);
+    assert!(total(pass(get(4))) == 4 + 50 + 600);
+    assert!(total(pass(get(3))) == -4);
+}
+
+test("a float Err and a nested Ok tuple") {
+    assert!(sum_ratio(ratio(2.0)) == 6.0);
+    assert!(sum_ratio(ratio(0.0)) == 0.5);
+    assert!(weigh(nested(2)) == 2 + 4 + 6);
+    assert!(weigh(nested(-5)) == -5);
+}
+
+test("a two-variant enum of a tuple and a number") {
+    let s = 0;
+    let i = 0;
+    while i < 4 {
+        s += read_pick(pick(i));
+        i += 1;
+    }
+    assert!(s == 0 + 9 + 2000 + 27);
+}
+
+test("a three-variant enum keeps its object") {
+    let s = 0;
+    let i = 0;
+    while i < 6 {
+        s += read_three(three(i));
+        i += 1;
+    }
+    assert!(s == 0 + 10 + 200 + 6 + 40 + 500);
+}
+
+test("a Result of heap words with an int Err is counted") {
+    drops = 0;
+    let s = 0;
+    let i = 0;
+    while i < 6 {
+        s += fds(open(i));
+        i += 1;
+    }
+    collect();
+    assert!(drops == 3);
+    assert!(s == 0 + 11 + 2 + 33 + 4 + 55);
+}
+
+test("a callee that keeps the Result gets the object") {
+    let v = kept(Ok((7, 8, 9)));
+    assert!(total(v[0]) == 987);
+    let w = kept(Err(4));
+    assert!(total(w[0]) == 4);
+}
