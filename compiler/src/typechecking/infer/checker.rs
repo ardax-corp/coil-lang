@@ -1265,6 +1265,20 @@ impl Checker {
             common::MAP_LIVE_NATIVE | common::MAP_REMOVE_NATIVE => Ty::fun(&[vec_app_ty(int()), int()], boolean()),
             common::MAP_LEN_NATIVE | common::MAP_COMPACT_NATIVE => Ty::fun(&[vec_app_ty(int())], int()),
             common::MAP_CLEAR_NATIVE => Ty::fun(&[vec_app_ty(int())], unit_ty()),
+            common::MAP_PUT_NATIVE => {
+                // (map object, h, k, v, mode, vmode, replace) -> slot code;
+                // any map class, key and value type.
+                let (m, k, v) = (self.counter.fresh(), self.counter.fresh(), self.counter.fresh());
+                return Scheme::poly(
+                    vec![m, k, v],
+                    vec![],
+                    Ty::fun(&[Ty::Var(m), int(), Ty::Var(k), Ty::Var(v), int(), int(), int()], int()),
+                );
+            }
+            common::MAP_WORD_MODE_NATIVE => {
+                let t = self.counter.fresh();
+                return Scheme::poly(vec![t], vec![], Ty::fun(&[Ty::Var(t)], int()));
+            }
             "io_capture_begin" => Ty::fun(&[], unit_ty()),
             "io_capture_end" => Ty::fun(&[], tuple_ty(vec![string(), string()])),
 

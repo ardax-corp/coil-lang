@@ -550,13 +550,18 @@ const NON_RETAINING_HOSTS: &[&str] = &[
     "map_remove",
     "map_compact",
     "map_clear",
+    "map_word_mode",
+    "word_mode",
 ];
 
 /// Host natives that write their first argument and no other: the map
 /// table natives that change the table (`map_upsert` only reads the keys
-/// `Vec` it is handed), so copy-on-write makes only the table unique.
+/// `Vec` it is handed), so copy-on-write makes only the table unique, and
+/// `map_put`, which writes its map object's fields and makes each of them
+/// unique itself.
 pub(super) fn writes_first_arg_only(name: &str) -> bool {
-    matches!(name, "map_upsert" | "map_add" | "map_remove" | "map_compact" | "map_clear")
+    let name = name.rsplit("::").next().unwrap_or(name);
+    matches!(name, "map_upsert" | "map_add" | "map_remove" | "map_compact" | "map_clear" | "map_put")
 }
 
 /// The registry name of a host function export that is in [`FRESH_HOSTS`]
@@ -566,10 +571,11 @@ pub(super) fn fresh_registry(export: &crate::typechecking::virtual_modules::Buil
     export.host_registry().filter(|r| FRESH_HOSTS.contains(r))
 }
 
-/// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`].
+/// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`], or is
+/// `map_put`, whose facts [`host_summary`] gives argument by argument.
 pub(super) fn is_listed_host(name: &str) -> bool {
     let short = name.rsplit("::").next().unwrap_or(name);
-    FRESH_HOSTS.contains(&short) || NON_RETAINING_HOSTS.contains(&short)
+    FRESH_HOSTS.contains(&short) || NON_RETAINING_HOSTS.contains(&short) || short == "map_put"
 }
 
 /// [`Summary::of`] for host native `name`, with its escape facts: a pure
@@ -591,5 +597,17 @@ pub(super) fn host_summary(name: &str, mut s: Summary) -> Summary {
     // Only a host native keeps without sharing; other unknown code shares
     // what it stores (copy-on-write).
     s.keeps = if common::host_native_id(short).is_some() { s.escapes } else { 0 };
+    // `map_put` keeps the key and the value it stores in its map object,
+    // which copy-on-write shares. The map object itself is not kept, so it
+    // is not shared at the call, but it escapes all the same: the runtime
+    // finds it as a heap object, so it is never a frame's.
+    if short == "map_put" {
+        s.escapes = 0b1101;
+        s.keeps = 0b1100;
+        s.returns = 0;
+        s.returns_arg = 0;
+        s.returns_inner = 0;
+        s.shared_ret = false;
+    }
     s
 }
