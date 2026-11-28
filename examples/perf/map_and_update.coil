@@ -1,0 +1,42 @@
+// CPU: `m.and_update(k, v)` on a `HashMap<int, int>` of 1024 keys: each
+// call finds the key, makes the values `Vec` unique and writes the slot.
+// `n` is the last argument (default 1000000). Needs the stdlib root
+// (`--root .deps/coil-stdlib/src`).
+use collections::map::HashMap;
+use conv::parse_int;
+use env::args;
+use io::sync::print;
+use string::format;
+
+fn arg_n(int fallback) -> int {
+    let argv = match args() {
+        Result::Ok(a) => a,
+        Result::Err(_) => Vec::new(),
+    };
+    if argv.len() < 2 {
+        return fallback;
+    }
+    return match parse_int(argv[argv.len() - 1]) {
+        Result::Ok(n) => n,
+        Result::Err(_) => fallback,
+    };
+}
+
+fn main() {
+    let n = arg_n(1000000);
+    let m: HashMap<int, int> = HashMap::new();
+    let k = 0;
+    while k < 1024 {
+        m.insert(k, 0);
+        k += 1;
+    }
+    let hits = 0;
+    let i = 0;
+    while i < n {
+        if m.and_update((i * 7919) & 1023, i) {
+            hits += 1;
+        }
+        i += 1;
+    }
+    let _ = print(format("%i %i %i\n", hits, m.get_or(0, -1), m.get_or(1023, -1)));
+}

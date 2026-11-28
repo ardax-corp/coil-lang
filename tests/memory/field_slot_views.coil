@@ -1,0 +1,151 @@
+// Field reads and writes of one object at several places in a body, which
+// native code makes through the object's slot words once it has found
+// them: an object made again on each iteration, one of two objects picked
+// on each iteration, objects whose fields spill out of the header, number
+// field writes next to reads of another field in a loop, a loop that puts
+// a new vector in the field it reads, and copy-on-write of a `Vec` field
+// whose object another variable shares.
+use tests::assert;
+
+class Pt {
+    pub x: int,
+    pub y: int,
+}
+
+class Wide {
+    pub a: int,
+    pub b: int,
+    pub c: int,
+    pub d: int,
+    pub e: int,
+    pub f: int,
+    pub g: int,
+    pub h: int,
+    pub items: Vec<int>,
+}
+
+class Hist {
+    pub counts: Vec<int>,
+    pub total: int,
+}
+
+impl Hist {
+    pub fn add(int k) {
+        self.counts[k] = self.counts[k] + 1;
+        self.total += 1;
+    }
+}
+
+fn fill(Hist h, int n) {
+    let i = 0;
+    while i < n {
+        h.add(i % h.counts.len());
+        i += 1;
+    }
+}
+
+fn swap_in(Hist h, int n) -> int {
+    let seen = 0;
+    let i = 0;
+    while i < n {
+        seen += h.counts.len();
+        let fresh: Vec<int> = [0, 0, 0];
+        if i % 2 == 0 {
+            fresh.push(0);
+        }
+        h.counts = fresh;
+        h.total += 1;
+        i += 1;
+    }
+    return seen;
+}
+
+fn zeros(int n) -> Vec<int> {
+    let out: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        out.push(0);
+        i += 1;
+    }
+    return out;
+}
+
+fn wide_sum(Wide w) -> int {
+    return w.a + w.b + w.c + w.d + w.e + w.f + w.g + w.h + w.items.len();
+}
+
+test("an object made on each iteration reads its own fields") {
+    let s = 0;
+    let i = 0;
+    while i < 100 {
+        let p = new Pt(i, 2 * i);
+        s += p.x + p.y;
+        p.x = p.y + 1;
+        s += p.x;
+        i += 1;
+    }
+    assert!(s == 3 * 4950 + 2 * 4950 + 100);
+}
+
+test("one of two objects, picked on each iteration") {
+    let a = new Pt(1, 10);
+    let b = new Pt(2, 20);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        let p = if i % 3 == 0 {
+            a
+        } else {
+            b
+        };
+        s += p.x * p.y;
+        i += 1;
+    }
+    assert!(s == 4 * 10 + 6 * 40);
+}
+
+test("fields past the header read and write in place") {
+    let w = new Wide(1, 2, 3, 4, 5, 6, 7, 8, [1, 2]);
+    let i = 0;
+    while i < 10 {
+        w.h = w.a + w.h;
+        w.a = w.b;
+        w.items.push(w.h);
+        i += 1;
+    }
+    assert!(w.a == 2);
+    assert!(w.h == 8 + 1 + 9 * 2);
+    assert!(wide_sum(w) == 2 + 2 + 3 + 4 + 5 + 6 + 7 + 27 + 12);
+}
+
+test("number field writes next to reads of a vector field") {
+    let h = new Hist(zeros(7), 0);
+    fill(h, 700);
+    assert!(h.total == 700);
+    let i = 0;
+    while i < 7 {
+        assert!(h.counts[i] == 100);
+        i += 1;
+    }
+}
+
+test("a loop that puts a new vector in the field reads the new one") {
+    let h = new Hist(zeros(5), 0);
+    assert!(swap_in(h, 6) == 5 + 4 + 3 + 4 + 3 + 4);
+    assert!(h.total == 6);
+    assert!(h.counts.len() == 3);
+}
+
+test("a vector field written through a copy of its object") {
+    let a = new Hist(zeros(4), 0);
+    let b = a;
+    fill(b, 8);
+    assert!(a.total == 0);
+    assert!(a.counts[0] == 0 && a.counts[3] == 0);
+    assert!(b.total == 8);
+    assert!(b.counts[0] == 2 && b.counts[3] == 2);
+    let c = b;
+    c.add(1);
+    assert!(b.counts[1] == 2);
+    assert!(c.counts[1] == 3);
+}

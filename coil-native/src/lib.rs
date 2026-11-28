@@ -3096,6 +3096,18 @@ struct Lower<'a> {
     /// is never written once made; a value the body also reads or writes
     /// as a class's fields is left out.
     payload_views: HashMap<ValueId, (Variable, Variable)>,
+    /// Objects this body reads or writes fields of in two or more blocks:
+    /// `(pointer, length)` of their slot words, taken at the first field
+    /// access after the value is defined (length 0 until then), so the
+    /// other accesses skip the kind and storage tests. An object's slot
+    /// storage is fixed when it is made: field writes change the words,
+    /// never where they are.
+    product_views: HashMap<ValueId, (Variable, Variable)>,
+    /// The `(pointer, length)` of the slot words of the objects whose fields
+    /// the current block reached so far, for its later accesses of the
+    /// same object ([`Self::product_views`] within one block, with no
+    /// variable to carry along the edges).
+    block_views: HashMap<ValueId, (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)>,
     /// Lane arrays this body reads or writes elements of in place:
     /// `(state, pointer, element count)` of their element words
     /// (`machine::native::coil_native_lane_view`). `state` is 1 for a view
@@ -3337,6 +3349,8 @@ impl<'a> Lower<'a> {
             views: HashMap::new(),
             str_views: HashMap::new(),
             payload_views: HashMap::new(),
+            product_views: HashMap::new(),
+            block_views: HashMap::new(),
             lane_views: HashMap::new(),
             lane_words: HashMap::new(),
             stored: HashSet::new(),
@@ -3394,7 +3408,7 @@ impl<'a> Lower<'a> {
             let zero = self.b.ins().iconst(types::I64, 0);
             self.b.def_var(known, zero);
         }
-        if let Some(&(_, len)) = self.payload_views.get(&v) {
+        if let Some(&(_, len)) = self.payload_views.get(&v).or_else(|| self.product_views.get(&v)) {
             let zero = self.b.ins().iconst(types::I64, 0);
             self.b.def_var(len, zero);
         }
@@ -5303,6 +5317,14 @@ impl<'a> Lower<'a> {
             self.b.def_var(vars.1, zero);
             self.payload_views.insert(s, vars);
         }
+        self.product_views.clear();
+        for o in field_objects(f) {
+            let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.def_var(vars.0, zero);
+            self.b.def_var(vars.1, zero);
+            self.product_views.insert(o, vars);
+        }
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let read: Vec<ValueId> = match inst {
@@ -5466,6 +5488,7 @@ impl<'a> Lower<'a> {
         for blk in &f.blocks {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
+            self.block_views.clear();
             self.maybe_dropped = dropped_in.get(&blk.id).cloned().unwrap_or_default();
             if spins.contains(&blk.id) {
                 let sp = self.b.ins().get_stack_pointer(types::I64);
@@ -5982,7 +6005,14 @@ impl<'a> Lower<'a> {
             }
             MirInst::ProductLoad { dest, object, slot } => {
                 let o = self.get(f, *object);
-                let w = self.product_load(o, *slot);
+                let o = self.coerce(o, types::I64);
+                let (fast, slow) = self.field_slot(*object, o, *slot, false);
+                self.b.switch_to_block(slow);
+                let args = self.bail_args(TRAP_HELPER);
+                self.b.ins().jump(self.bail, &args);
+                self.b.switch_to_block(fast);
+                let at = self.b.block_params(fast)[0];
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -6044,7 +6074,7 @@ impl<'a> Lower<'a> {
                 let inline = counted_inline(vt) || *scalar || matches!(vt, MirTy::F64 | MirTy::Bool);
                 if machine::native::product_slots().inline_stores && inline {
                     // In place when the object is an instance.
-                    let (fast, slow) = self.product_slot(o, *index, true);
+                    let (fast, slow) = self.field_slot(*object, o, *index, true);
                     self.b.switch_to_block(fast);
                     let at = self.b.block_params(fast)[0];
                     if counted_inline(vt) {
@@ -6826,7 +6856,7 @@ impl<'a> Lower<'a> {
                 let word = self.b.append_block_param(done, types::I64);
                 let tested = match field {
                     Some(i) => {
-                        let (fast, slow) = self.product_slot(s, *i, true);
+                        let (fast, slow) = self.field_slot(*src, s, *i, true);
                         self.b.switch_to_block(slow);
                         self.b.ins().jump(call_b, &[]);
                         self.b.switch_to_block(fast);
@@ -6835,18 +6865,32 @@ impl<'a> Lower<'a> {
                     }
                     None => s,
                 };
-                let (object, plain) = self.maybe_object(tested);
-                self.b.switch_to_block(plain);
-                self.b.ins().jump(done, &[s.into()]);
-                self.b.switch_to_block(object);
-                let o = self.b.ins().band_imm_u(tested, !1i64);
-                let k = self.b.ins().uload8(types::I64, t, o, machine::HEADER_KIND_OFFSET);
-                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
-                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
-                let either = self.b.ins().bor(inst, arr);
-                let flag_b = self.b.create_block();
-                self.b.ins().brif(either, flag_b, &[], done, &[s.into()]);
-                self.b.switch_to_block(flag_b);
+                let o = if field.is_some() {
+                    // A field copy-on-write tests is a class's or an array's
+                    // (`hir::cow::cow_ty`, as an element's for `CowIndex`): its
+                    // word is `0` or an object, so no heap range or kind test.
+                    let (aligned, object) = (self.b.create_block(), self.b.create_block());
+                    let tagged = self.b.ins().band_imm_u(tested, 6);
+                    self.b.ins().brif(tagged, done, &[s.into()], aligned, &[]);
+                    self.b.switch_to_block(aligned);
+                    self.b.ins().brif(tested, object, &[], done, &[s.into()]);
+                    self.b.switch_to_block(object);
+                    self.b.ins().band_imm_u(tested, !1i64)
+                } else {
+                    let (object, plain) = self.maybe_object(tested);
+                    self.b.switch_to_block(plain);
+                    self.b.ins().jump(done, &[s.into()]);
+                    self.b.switch_to_block(object);
+                    let o = self.b.ins().band_imm_u(tested, !1i64);
+                    let k = self.b.ins().uload8(types::I64, t, o, machine::HEADER_KIND_OFFSET);
+                    let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
+                    let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                    let either = self.b.ins().bor(inst, arr);
+                    let flag_b = self.b.create_block();
+                    self.b.ins().brif(either, flag_b, &[], done, &[s.into()]);
+                    self.b.switch_to_block(flag_b);
+                    o
+                };
                 let bits = self.b.ins().uload8(types::I64, t, o, machine::HEADER_FLAGS_OFFSET);
                 let shared = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_SHARED));
                 self.b.ins().brif(shared, call_b, &[], done, &[s.into()]);
@@ -8771,6 +8815,47 @@ impl<'a> Lower<'a> {
         (fast, slow)
     }
 
+    /// [`Self::product_slot`] of the object `obj` (word `o`): through its
+    /// view ([`Self::product_views`]) when it has one, which the in-place
+    /// test fills for the next access when it is not taken yet, or through
+    /// what an earlier read in the block found ([`Self::block_views`]).
+    fn field_slot(&mut self, obj: ValueId, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
+        let Some(&(ptr, len)) = self.product_views.get(&obj) else {
+            if let Some(&(p, n)) = self.block_views.get(&obj) {
+                let (fast, slow) = (self.b.create_block(), self.b.create_block());
+                self.b.append_block_param(fast, types::I64);
+                let has = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, n, i64::from(index));
+                let at = self.b.ins().iadd_imm_s(p, i64::from(index) * 8);
+                self.b.ins().brif(has, fast, &[at.into()], slow, &[]);
+                return (fast, slow);
+            }
+            let (fast, slow, view) = self.product_slot_view(o, index, store);
+            // Only a read's: its other way bails, so the rest of the block
+            // is reached through `fast`, where the view is defined.
+            if !store {
+                self.block_views.insert(obj, view);
+            }
+            return (fast, slow);
+        };
+        let (have, take, fast) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(fast, types::I64);
+        let n = self.b.use_var(len);
+        let has = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, n, i64::from(index));
+        self.b.ins().brif(has, have, &[], take, &[]);
+        self.b.switch_to_block(have);
+        let p = self.b.use_var(ptr);
+        let at = self.b.ins().iadd_imm_s(p, i64::from(index) * 8);
+        self.b.ins().jump(fast, &[at.into()]);
+        self.b.switch_to_block(take);
+        let (found, slow, (vp, vn)) = self.product_slot_view(o, index, store);
+        self.b.switch_to_block(found);
+        self.b.def_var(ptr, vp);
+        self.b.def_var(len, vn);
+        let at = self.b.block_params(found)[0];
+        self.b.ins().jump(fast, &[at.into()]);
+        (fast, slow)
+    }
+
     /// [`Self::product_slot`], with the object's `(pointer, length)` of
     /// its slot words as well, defined where `fast` is entered.
     fn product_slot_view(
@@ -9074,6 +9159,31 @@ impl<'a> Lower<'a> {
         }
         Ok(())
     }
+}
+
+/// The objects `f` reaches fields of (a field read, a field store, a
+/// field's copy test) at two or more places, in two or more blocks or with a
+/// store or a copy test among them, for [`Lower::product_views`]. Reads in
+/// one block share what the first one found ([`Lower::block_views`]).
+fn field_objects(f: &MirFunc) -> Vec<ValueId> {
+    // Each object's blocks, places, and whether a store or a test is one.
+    let mut uses: HashMap<ValueId, (HashSet<BlockId>, u32, bool)> = HashMap::new();
+    for b in &f.blocks {
+        for inst in &b.insts {
+            let (object, write) = match inst {
+                MirInst::ProductLoad { object, .. } => (*object, false),
+                MirInst::HeapFieldStore { object, .. } | MirInst::Cow { src: object, unique: true, field: Some(_), .. } => (*object, true),
+                _ => continue,
+            };
+            let u = uses.entry(object).or_default();
+            u.0.insert(b.id);
+            u.1 += 1;
+            u.2 |= write;
+        }
+    }
+    let mut out: Vec<_> = uses.into_iter().filter(|(_, (b, n, w))| b.len() >= 2 || *n >= 2 && *w).map(|(v, _)| v).collect();
+    out.sort_unstable();
+    out
 }
 
 /// Boxed enum values `f` reads two or more payload words of (a tag test
